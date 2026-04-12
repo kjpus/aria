@@ -1,0 +1,15 @@
+[package]
+name = "aria-library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aria-domain = { path = "../domain" }
+chrono.workspace = true
+dirs.workspace = true
+lofty.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+walkdir.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "aria"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "aria_tauri"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+aria-app-core = { path = "../crates/app-core" }
+aria-domain = { path = "../crates/domain" }
+serde.workspace = true
+tauri = { workspace = true, features = ["protocol-asset"] }
+thiserror.workspace = true
+tokio.workspace = true

@@ -1,0 +1,36 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="tileBrass" x1="96" y1="72" x2="422" y2="438" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2F261E"/>
+      <stop offset="1" stop-color="#12100F"/>
+    </linearGradient>
+    <radialGradient id="tileGlowWarm" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(188 144) rotate(34) scale(322)">
+      <stop stop-color="#D8B26B" stop-opacity="0.3"/>
+      <stop offset="1" stop-color="#D8B26B" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="champagneStroke" x1="176" y1="82" x2="326" y2="318" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF3DB"/>
+      <stop offset="0.48" stop-color="#E9D2A4"/>
+      <stop offset="1" stop-color="#C08A4B"/>
+    </linearGradient>
+    <radialGradient id="dotPearl" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(244 102) rotate(36) scale(58)">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="0.45" stop-color="#F5E8D3"/>
+      <stop offset="1" stop-color="#D2B27B"/>
+    </radialGradient>
+  </defs>
+  <rect x="40" y="40" width="432" height="432" rx="132" fill="url(#tileBrass)"/>
+  <rect x="40" y="40" width="432" height="432" rx="132" fill="url(#tileGlowWarm)"/>
+  <rect x="40" y="40" width="432" height="432" rx="132" stroke="#FFFFFF" stroke-opacity="0.07" stroke-width="2"/>
+
+  <path d="M166 136L251 360" stroke="#081018" stroke-opacity="0.22" stroke-width="58" stroke-linecap="round"/>
+  <path d="M346 136L261 360" stroke="#081018" stroke-opacity="0.22" stroke-width="58" stroke-linecap="round"/>
+  <circle cx="256" cy="88" r="35" fill="#081018" fill-opacity="0.16"/>
+
+  <path d="M160 124L245 348" stroke="url(#champagneStroke)" stroke-width="42" stroke-linecap="round"/>
+  <path d="M352 124L267 348" stroke="url(#champagneStroke)" stroke-width="42" stroke-linecap="round"/>
+  <circle cx="256" cy="82" r="29" fill="url(#dotPearl)"/>
+
+  <path d="M247 150L218 226" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="8" stroke-linecap="round"/>
+  <path d="M275 150L304 226" stroke="#FFFFFF" stroke-opacity="0.18" stroke-width="8" stroke-linecap="round"/>
+</svg>

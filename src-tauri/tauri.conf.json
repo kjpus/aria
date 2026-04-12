@@ -1,0 +1,41 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Aria",
+  "version": "0.1.0",
+  "identifier": "com.aria.player",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Aria",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 1100,
+        "minHeight": 760,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$HOME/**",
+          "$APPDATA/**",
+          "$APPLOCALDATA/**",
+          "$TEMP/**"
+        ]
+      },
+      "csp": null,
+      "capabilities": ["main-capability"]
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}
