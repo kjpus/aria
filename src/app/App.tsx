@@ -46,6 +46,7 @@ import {
   startLibraryScan,
   shuffleQueue,
   updateAlbumTrackTableSettings,
+  updatePlaylistTrackTableSettings,
   updateTheme,
   updatePlaybackPreferences,
   updateTrackTableSettings,
@@ -507,6 +508,18 @@ export function App() {
     }
   }
 
+  async function handlePlaylistTrackTableChange(trackTable: TrackTableSettings) {
+    try {
+      const settings = await updatePlaylistTrackTableSettings(trackTable);
+      setBootstrap((current) =>
+        current ? { ...current, settings } : current,
+      );
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   async function handleTrackTableChange(trackTable: TrackTableSettings) {
     try {
       const settings = await updateTrackTableSettings(trackTable);
@@ -953,9 +966,10 @@ export function App() {
               onRegeneratePlaylistIcon={handleRegeneratePlaylistIcon}
               onRenamePlaylist={handleRenamePlaylist}
               onSelectPlaylist={setSelectedPlaylistId}
+              onTrackTableChange={handlePlaylistTrackTableChange}
               playlists={bootstrap.playlists.playlists}
               selectedPlaylistId={selectedPlaylistId}
-              settings={bootstrap.settings.trackTable}
+              settings={bootstrap.settings.playlistTrackTable}
               tracks={bootstrap.library.tracks}
             />
           ) : null}

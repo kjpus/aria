@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
 } from 'react';
 import { SectionCard } from '../../components/SectionCard';
 import { toLocalImageSrc } from '../../lib/runtime';
@@ -29,6 +30,7 @@ type PlaylistPaneProps = {
   settings: TrackTableSettings;
   selectedPlaylistId: string | null;
   onSelectPlaylist: (playlistId: string) => void;
+  onTrackTableChange: (settings: TrackTableSettings) => void;
   onRenamePlaylist: (playlistId: string, name: string) => void | Promise<void>;
   onDeletePlaylist: (playlistId: string) => void | Promise<void>;
   onRegeneratePlaylistIcon: (playlistId: string) => void | Promise<void>;
@@ -54,6 +56,12 @@ type PlaylistTrackContextMenuState = {
   primaryTrackId: string;
 };
 
+type ResizeState = {
+  key: string;
+  startX: number;
+  startWidth: number;
+};
+
 export function PlaylistPane({
   playlists,
   tracks,
@@ -61,6 +69,7 @@ export function PlaylistPane({
   settings,
   selectedPlaylistId,
   onSelectPlaylist,
+  onTrackTableChange,
   onRenamePlaylist,
   onDeletePlaylist,
   onRegeneratePlaylistIcon,
@@ -73,6 +82,7 @@ export function PlaylistPane({
   onOpenAlbum,
 }: PlaylistPaneProps) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const resizeStateRef = useRef<ResizeState | null>(null);
   const [contextMenu, setContextMenu] = useState<PlaylistContextMenuState | null>(null);
   const [trackContextMenu, setTrackContextMenu] =
     useState<PlaylistTrackContextMenuState | null>(null);
@@ -80,6 +90,9 @@ export function PlaylistPane({
   const [renameValue, setRenameValue] = useState('');
   const [selectedTrackIds, setSelectedTrackIds] = useState<string[]>([]);
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
+  const [resizingColumn, setResizingColumn] = useState<string | null>(null);
+  const [hasHydrated, setHasHydrated] = useState(false);
   const columns = useMemo(
     () =>
       buildTrackColumns(mappings).filter(
@@ -100,6 +113,10 @@ export function PlaylistPane({
           columns.some((column) => column.key === key),
         );
   }, [columns, settings.visibleColumns]);
+  const normalizedColumnWidths = useMemo(
+    () => normalizeColumnWidths(settings, columns),
+    [columns, settings],
+  );
   const columnLookup = useMemo(
     () => new Map(columns.map((column) => [column.key, column])),
     [columns],
@@ -124,6 +141,76 @@ export function PlaylistPane({
   );
   const renameTarget =
     playlists.find((playlist) => playlist.id === renamePlaylistId) ?? null;
+
+  useEffect(() => {
+    setColumnWidths(normalizedColumnWidths);
+    setHasHydrated(true);
+  }, [normalizedColumnWidths]);
+
+  useEffect(() => {
+    if (!resizingColumn) {
+      return undefined;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const resizeState = resizeStateRef.current;
+      if (!resizeState) {
+        return;
+      }
+
+      const nextWidth = clampColumnWidth(
+        resizeState.key,
+        resizeState.startWidth + (event.clientX - resizeState.startX),
+      );
+
+      setColumnWidths((current) => ({
+        ...current,
+        [resizeState.key]: nextWidth,
+      }));
+    };
+
+    const handlePointerUp = () => {
+      resizeStateRef.current = null;
+      setResizingColumn(null);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [resizingColumn]);
+
+  useEffect(() => {
+    if (!hasHydrated) {
+      return undefined;
+    }
+
+    if (columnWidthsEqual(columnWidths, normalizedColumnWidths)) {
+      return undefined;
+    }
+
+    const timeout = window.setTimeout(() => {
+      onTrackTableChange({
+        ...settings,
+        columnWidths,
+      });
+    }, 200);
+
+    return () => window.clearTimeout(timeout);
+  }, [
+    columnWidths,
+    hasHydrated,
+    normalizedColumnWidths,
+    onTrackTableChange,
+    settings,
+  ]);
 
   useEffect(() => {
     if (!contextMenu && !trackContextMenu) {
@@ -303,6 +390,21 @@ export function PlaylistPane({
     });
   }
 
+  function handleResizeStart(
+    event: ReactPointerEvent<HTMLDivElement>,
+    key: string,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    resizeStateRef.current = {
+      key,
+      startX: event.clientX,
+      startWidth: columnWidths[key] ?? getDefaultColumnWidth(key),
+    };
+    setResizingColumn(key);
+  }
+
   async function runTrackContextAction(
     action: (playlistId: string, trackIds: string[]) => void | Promise<void>,
   ) {
@@ -422,11 +524,28 @@ export function PlaylistPane({
 
                 <div className="track-table-shell track-table-shell--clamped">
                   <table className="track-table track-table--grouped">
+                    <colgroup>
+                      {visibleColumns.map((key) => (
+                        <col
+                          key={key}
+                          style={{
+                            width: `${buildColumnWeight(key, columnWidths, visibleColumns)}%`,
+                          }}
+                        />
+                      ))}
+                    </colgroup>
                     <thead>
                       <tr>
                         {visibleColumns.map((key) => (
                           <th className="track-table__header" key={key}>
-                            {columnLookup.get(key)?.label ?? key}
+                            <div className="track-table__header-inner">
+                              <span>{columnLookup.get(key)?.label ?? key}</span>
+                              <div
+                                className="track-table__resize-handle"
+                                onPointerDown={(event) => handleResizeStart(event, key)}
+                                role="presentation"
+                              />
+                            </div>
                           </th>
                         ))}
                       </tr>
@@ -657,4 +776,97 @@ function selectTrackIdsInOrder(
   return orderedTracks
     .filter((track) => selectedTrackSet.has(track.id))
     .map((track) => track.id);
+}
+
+function buildColumnWeight(
+  key: string,
+  columnWidths: Record<string, number>,
+  visibleColumns: string[],
+): number {
+  const total = visibleColumns.reduce(
+    (sum, columnKey) => sum + (columnWidths[columnKey] ?? getDefaultColumnWidth(columnKey)),
+    0,
+  );
+
+  if (total <= 0) {
+    return 100 / Math.max(visibleColumns.length, 1);
+  }
+
+  return ((columnWidths[key] ?? getDefaultColumnWidth(key)) / total) * 100;
+}
+
+function normalizeColumnWidths(
+  settings: TrackTableSettings,
+  columns: { key: string }[],
+): Record<string, number> {
+  const nextWidths: Record<string, number> = {};
+
+  for (const column of columns) {
+    nextWidths[column.key] = clampColumnWidth(
+      column.key,
+      settings.columnWidths[column.key] ?? getDefaultColumnWidth(column.key),
+    );
+  }
+
+  return nextWidths;
+}
+
+function columnWidthsEqual(
+  left: Record<string, number>,
+  right: Record<string, number>,
+): boolean {
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+
+  for (let index = 0; index < leftKeys.length; index += 1) {
+    const key = leftKeys[index];
+    if (key !== rightKeys[index]) {
+      return false;
+    }
+    if (left[key] !== right[key]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function clampColumnWidth(key: string, width: number): number {
+  const minimumWidth = ['track_number', 'disk_number', 'year', 'format', 'duration'].includes(key)
+    ? 76
+    : key === 'title'
+      ? 160
+      : 120;
+  return Math.max(minimumWidth, Math.min(520, Math.round(width)));
+}
+
+function getDefaultColumnWidth(key: string): number {
+  switch (key) {
+    case 'track_number':
+    case 'disk_number':
+      return 96;
+    case 'year':
+    case 'format':
+    case 'duration':
+      return 110;
+    case 'file_name':
+      return 220;
+    case 'path':
+      return 360;
+    case 'title':
+      return 280;
+    case 'album':
+      return 260;
+    case 'composer':
+    case 'conductor':
+    case 'ensemble':
+    case 'soloist':
+      return 220;
+    default:
+      return 180;
+  }
 }

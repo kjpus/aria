@@ -130,6 +130,7 @@ export type SettingsSnapshot = {
   accentColor: string;
   trackTable: TrackTableSettings;
   albumTrackTable: TrackTableSettings;
+  playlistTrackTable: TrackTableSettings;
   playback: PlaybackPreferences;
 };
 

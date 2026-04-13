@@ -354,6 +354,18 @@ impl AppCore {
         snapshot
     }
 
+    pub async fn update_playlist_track_table_settings(
+        &self,
+        playlist_track_table: TrackTableSettings,
+    ) -> SettingsSnapshot {
+        let snapshot = self
+            .settings
+            .update_playlist_track_table(playlist_track_table)
+            .await;
+        self.emit(AppEvent::Settings(snapshot.clone()));
+        snapshot
+    }
+
     pub async fn update_playback_preferences(
         &self,
         playback: PlaybackPreferences,

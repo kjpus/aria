@@ -44,6 +44,15 @@ impl SettingsStore {
         state.clone()
     }
 
+    pub async fn update_playlist_track_table(
+        &self,
+        playlist_track_table: TrackTableSettings,
+    ) -> SettingsSnapshot {
+        let mut state = self.state.write().await;
+        state.playlist_track_table = playlist_track_table;
+        state.clone()
+    }
+
     pub async fn update_playback(&self, playback: PlaybackPreferences) -> SettingsSnapshot {
         let mut state = self.state.write().await;
         state.playback = playback;

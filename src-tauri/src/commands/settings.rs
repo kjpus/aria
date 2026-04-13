@@ -34,6 +34,17 @@ pub async fn update_album_track_table_settings(
 }
 
 #[tauri::command]
+pub async fn update_playlist_track_table_settings(
+    state: State<'_, AppState>,
+    playlist_track_table: TrackTableSettings,
+) -> Result<SettingsSnapshot, CommandError> {
+    Ok(state
+        .core
+        .update_playlist_track_table_settings(playlist_track_table)
+        .await)
+}
+
+#[tauri::command]
 pub fn list_output_devices(
     state: State<'_, AppState>,
 ) -> Result<Vec<OutputDeviceSnapshot>, CommandError> {

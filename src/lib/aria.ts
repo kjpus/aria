@@ -235,6 +235,34 @@ let previewBootstrap: AppBootstrap = {
       sortDirection: 'asc',
       secondarySort: [{ key: 'title', direction: 'asc' }],
     },
+    playlistTrackTable: {
+      visibleColumns: [
+        'track_number',
+        'title',
+        'composer',
+        'conductor',
+        'format',
+        'duration',
+      ],
+      columnWidths: {
+        track_number: 96,
+        disk_number: 96,
+        year: 110,
+        format: 110,
+        duration: 110,
+        file_name: 220,
+        path: 360,
+        title: 280,
+        album: 260,
+        composer: 220,
+        conductor: 220,
+        ensemble: 220,
+        soloist: 220,
+      },
+      sortKey: 'track_number',
+      sortDirection: 'asc',
+      secondarySort: [{ key: 'title', direction: 'asc' }],
+    },
     playback: {
       outputDeviceId: null,
       exclusiveMode: false,
@@ -738,6 +766,24 @@ export async function updateAlbumTrackTableSettings(
     return previewBootstrap.settings;
   }
   return invoke<SettingsSnapshot>('update_album_track_table_settings', { albumTrackTable });
+}
+
+export async function updatePlaylistTrackTableSettings(
+  playlistTrackTable: TrackTableSettings,
+): Promise<SettingsSnapshot> {
+  if (!isTauriRuntime) {
+    previewBootstrap = {
+      ...previewBootstrap,
+      settings: {
+        ...previewBootstrap.settings,
+        playlistTrackTable,
+      },
+    };
+    return previewBootstrap.settings;
+  }
+  return invoke<SettingsSnapshot>('update_playlist_track_table_settings', {
+    playlistTrackTable,
+  });
 }
 
 export async function listOutputDevices(): Promise<OutputDeviceSnapshot[]> {

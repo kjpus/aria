@@ -92,6 +92,26 @@ pub fn default_album_track_table_settings() -> TrackTableSettings {
     }
 }
 
+pub fn default_playlist_track_table_settings() -> TrackTableSettings {
+    TrackTableSettings {
+        visible_columns: vec![
+            "track_number".into(),
+            "title".into(),
+            "composer".into(),
+            "conductor".into(),
+            "format".into(),
+            "duration".into(),
+        ],
+        column_widths: default_track_column_widths(),
+        sort_key: "track_number".into(),
+        sort_direction: TrackSortDirection::Asc,
+        secondary_sort: vec![TrackSortCriterion {
+            key: "title".into(),
+            direction: TrackSortDirection::Asc,
+        }],
+    }
+}
+
 fn default_track_column_widths() -> BTreeMap<String, u32> {
     BTreeMap::from([
         ("track_number".into(), 96),
@@ -127,6 +147,8 @@ pub struct SettingsSnapshot {
     pub track_table: TrackTableSettings,
     #[serde(default = "default_album_track_table_settings")]
     pub album_track_table: TrackTableSettings,
+    #[serde(default = "default_playlist_track_table_settings")]
+    pub playlist_track_table: TrackTableSettings,
     #[serde(default)]
     pub playback: PlaybackPreferences,
 }
@@ -138,6 +160,7 @@ impl Default for SettingsSnapshot {
             accent_color: "#d6b16a".into(),
             track_table: default_track_table_settings(),
             album_track_table: default_album_track_table_settings(),
+            playlist_track_table: default_playlist_track_table_settings(),
             playback: PlaybackPreferences::default(),
         }
     }

@@ -81,24 +81,63 @@ Run a Rust compile check for the desktop app:
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
-## Release Build
+## Packaging And Release Builds
 
-Build an optimized desktop executable:
+Aria can be built in two release forms:
+
+- a standalone optimized executable for local testing
+- an installer package for sharing with other users
+
+Build both with:
 
 ```powershell
 npm.cmd run tauri -- build
 ```
 
-Important:
+What this command does:
 
-- Tauri bundling is currently disabled in `src-tauri/tauri.conf.json`
-- That means `tauri build` produces a release executable, but not a packaged installer
+- runs the frontend production build
+- compiles the Rust app in release mode
+- creates installer bundle artifacts through Tauri
 
-On Windows, the release executable is typically:
+Typical Windows outputs:
 
-```text
-src-tauri\target\release\aria.exe
+- release executable: `target\release\aria.exe`
+- installer bundles: `target\release\bundle\`
+
+The exact installer filenames depend on the host toolchain and Tauri bundler, but on Windows you should expect artifacts such as:
+
+- `msi\Aria_0.1.0_x64_en-US.msi`
+- `nsis\Aria_0.1.0_x64-setup.exe`
+
+If you only want to test the optimized app locally, you can launch the release executable directly. If you want something to hand to another user, use the installer from the `bundle` directory.
+
+On a Windows machine, the first installer build may download the WiX and NSIS tool bundles automatically. That is expected.
+
+### Packaging Checklist
+
+Before building an installer package, make sure:
+
+- `npm.cmd install` has been run
+- Rust/Cargo are installed and working
+- Tauri Windows prerequisites are installed
+- WebView2 is available on the target machine
+
+### Clean Packaging Workflow
+
+From a clean checkout:
+
+```powershell
+npm.cmd install
+npm.cmd run tauri -- build
 ```
+
+After that:
+
+1. Check `target\release\bundle\`
+2. Pick the installer format you want to distribute
+3. Test-install it on the same machine or a clean Windows machine
+4. Launch Aria and verify first-run flow, scanning, playback, and icon appearance
 
 ## Running Aria As A User
 
@@ -115,8 +154,18 @@ npm.cmd run tauri -- dev
 After building with `npm.cmd run tauri -- build`, launch:
 
 ```text
-src-tauri\target\release\aria.exe
+target\release\aria.exe
 ```
+
+### From an installer package
+
+After building with `npm.cmd run tauri -- build`, open:
+
+```text
+target\release\bundle\
+```
+
+Then run the installer file generated for Windows, such as the `.msi` or setup `.exe`.
 
 ### First-use flow
 
@@ -150,7 +199,6 @@ For the detailed scan and mapping rules, see [docs/LIBRARY.md](./docs/LIBRARY.md
 
 ## Current Limitations
 
-- The main packaged-installer flow is not enabled yet
 - Embedded cover extraction is currently FLAC-first; other formats mainly rely on sidecar images
 - The project is desktop-first; mobile is not an active primary target yet
 

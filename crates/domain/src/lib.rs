@@ -16,8 +16,9 @@ pub use playback::{
 };
 pub use playlist::{Playlist, PlaylistSnapshot};
 pub use settings::{
-    default_album_track_table_settings, default_track_table_settings, PlaybackPreferences,
-    SettingsSnapshot, ThemePreference, TrackSortCriterion, TrackSortDirection, TrackTableSettings,
+    default_album_track_table_settings, default_playlist_track_table_settings,
+    default_track_table_settings, PlaybackPreferences, SettingsSnapshot, ThemePreference,
+    TrackSortCriterion, TrackSortDirection, TrackTableSettings,
 };
 
 use serde::{Deserialize, Serialize};

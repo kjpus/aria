@@ -44,6 +44,12 @@ type DropIndicator = {
   position: DropPosition;
 };
 
+type ResizeState = {
+  key: string;
+  startX: number;
+  startWidth: number;
+};
+
 type AlbumContextMenuState = {
   x: number;
   y: number;
@@ -84,11 +90,14 @@ export function AlbumPane({
   onGoToDirectory,
 }: AlbumPaneProps) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const resizeStateRef = useRef<ResizeState | null>(null);
   const visibleDropIndicatorRef = useRef<DropIndicator | null>(null);
   const [selectedTrackIds, setSelectedTrackIds] = useState<string[]>([]);
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
   const [isLayoutDialogOpen, setIsLayoutDialogOpen] = useState(false);
   const [visibleColumns, setVisibleColumns] = useState<string[]>([]);
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
+  const [resizingColumn, setResizingColumn] = useState<string | null>(null);
   const [draggedVisibleColumn, setDraggedVisibleColumn] = useState<string | null>(
     null,
   );
@@ -123,6 +132,10 @@ export function AlbumPane({
     () => normalizeVisibleColumns(settings, columns),
     [columns, settings],
   );
+  const normalizedColumnWidths = useMemo(
+    () => normalizeColumnWidths(settings, columns),
+    [columns, settings],
+  );
   const selectedTrackSet = useMemo(
     () => new Set(selectedTrackIds),
     [selectedTrackIds],
@@ -130,8 +143,9 @@ export function AlbumPane({
 
   useEffect(() => {
     setVisibleColumns(normalizedVisibleColumns);
+    setColumnWidths(normalizedColumnWidths);
     setHasHydrated(true);
-  }, [normalizedVisibleColumns]);
+  }, [normalizedColumnWidths, normalizedVisibleColumns]);
 
   useEffect(() => {
     setSelectedTrackIds([]);
@@ -150,6 +164,46 @@ export function AlbumPane({
       current && availableIds.has(current) ? current : null,
     );
   }, [albumTracks]);
+
+  useEffect(() => {
+    if (!resizingColumn) {
+      return undefined;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const resizeState = resizeStateRef.current;
+      if (!resizeState) {
+        return;
+      }
+
+      const nextWidth = clampColumnWidth(
+        resizeState.key,
+        resizeState.startWidth + (event.clientX - resizeState.startX),
+      );
+
+      setColumnWidths((current) => ({
+        ...current,
+        [resizeState.key]: nextWidth,
+      }));
+    };
+
+    const handlePointerUp = () => {
+      resizeStateRef.current = null;
+      setResizingColumn(null);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [resizingColumn]);
 
   useEffect(() => {
     if (!draggedVisibleColumn) {
@@ -271,20 +325,26 @@ export function AlbumPane({
       return undefined;
     }
 
-    if (visibleColumnsEqual(visibleColumns, normalizedVisibleColumns)) {
+    if (
+      visibleColumnsEqual(visibleColumns, normalizedVisibleColumns) &&
+      columnWidthsEqual(columnWidths, normalizedColumnWidths)
+    ) {
       return undefined;
     }
 
     const timeout = window.setTimeout(() => {
       onTrackTableChange({
         ...settings,
+        columnWidths,
         visibleColumns,
       });
     }, 200);
 
     return () => window.clearTimeout(timeout);
   }, [
+    columnWidths,
     hasHydrated,
+    normalizedColumnWidths,
     normalizedVisibleColumns,
     onTrackTableChange,
     settings,
@@ -385,6 +445,21 @@ export function AlbumPane({
     visibleDropIndicatorRef.current = null;
     setDraggedVisibleColumn(key);
     setVisibleDropIndicator(null);
+  }
+
+  function handleResizeStart(
+    event: ReactPointerEvent<HTMLDivElement>,
+    key: string,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    resizeStateRef.current = {
+      key,
+      startX: event.clientX,
+      startWidth: columnWidths[key] ?? getDefaultColumnWidth(key),
+    };
+    setResizingColumn(key);
   }
 
   function toggleColumn(key: string) {
@@ -513,7 +588,7 @@ export function AlbumPane({
                 <col
                   key={key}
                   style={{
-                    width: `${settings.columnWidths[key] ?? getDefaultColumnWidth(key)}px`,
+                    width: `${columnWidths[key] ?? getDefaultColumnWidth(key)}px`,
                   }}
                 />
               ))}
@@ -521,7 +596,16 @@ export function AlbumPane({
             <thead>
               <tr>
                 {visibleColumns.map((key) => (
-                  <th key={key}>{columnLookup.get(key)?.label ?? key}</th>
+                  <th className="track-table__header" key={key}>
+                    <div className="track-table__header-inner">
+                      <span>{columnLookup.get(key)?.label ?? key}</span>
+                      <div
+                        className="track-table__resize-handle"
+                        onPointerDown={(event) => handleResizeStart(event, key)}
+                        role="presentation"
+                      />
+                    </div>
+                  </th>
                 ))}
               </tr>
             </thead>
@@ -858,6 +942,46 @@ function visibleColumnsEqual(left: string[], right: string[]): boolean {
   return true;
 }
 
+function normalizeColumnWidths(
+  settings: TrackTableSettings,
+  columns: { key: string }[],
+): Record<string, number> {
+  const nextWidths: Record<string, number> = {};
+
+  for (const column of columns) {
+    nextWidths[column.key] = clampColumnWidth(
+      column.key,
+      settings.columnWidths[column.key] ?? getDefaultColumnWidth(column.key),
+    );
+  }
+
+  return nextWidths;
+}
+
+function columnWidthsEqual(
+  left: Record<string, number>,
+  right: Record<string, number>,
+): boolean {
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+
+  for (let index = 0; index < leftKeys.length; index += 1) {
+    const key = leftKeys[index];
+    if (key !== rightKeys[index]) {
+      return false;
+    }
+    if (left[key] !== right[key]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function stringListsEqual(left: string[], right: string[]): boolean {
   if (left.length !== right.length) {
     return false;
@@ -870,6 +994,15 @@ function stringListsEqual(left: string[], right: string[]): boolean {
   }
 
   return true;
+}
+
+function clampColumnWidth(key: string, width: number): number {
+  const minimumWidth = ['track_number', 'disk_number', 'year', 'format', 'duration'].includes(key)
+    ? 76
+    : key === 'title'
+      ? 160
+      : 120;
+  return Math.max(minimumWidth, Math.min(520, Math.round(width)));
 }
 
 function getDefaultColumnWidth(key: string): number {
