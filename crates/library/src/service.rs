@@ -7,9 +7,8 @@ use std::{
 };
 
 use aria_domain::{
-    default_catalog_rules, AppEvent, AudioPropertiesSnapshot, CatalogPatternRule, LibraryEvent,
-    LibraryFieldMapping, LibraryRoot, LibrarySnapshot, ScanProgress, ScannedTrack,
-    TagInventoryEntry,
+    default_catalog_rules, AppEvent, AudioPropertiesSnapshot, CatalogRule, LibraryEvent,
+    LibraryFieldMapping, LibraryRoot, LibrarySnapshot, ScanProgress, ScannedTrack, TagInventoryEntry,
 };
 use chrono::Utc;
 use lofty::{
@@ -50,7 +49,6 @@ struct ScanArtifacts {
 struct CompiledCatalogRule {
     regex: Regex,
     composer_hints: Vec<String>,
-    source_tags: Vec<String>,
 }
 
 const DEFAULT_CATALOG_SOURCE_TAGS: &[&str] = &["TITLE", "WORK", "ALBUM"];
@@ -150,7 +148,7 @@ impl LibraryService {
 
     pub async fn set_catalog_rules(
         &self,
-        rules: Vec<CatalogPatternRule>,
+        rules: Vec<CatalogRule>,
     ) -> Result<LibrarySnapshot, LibraryError> {
         let sanitized_rules = sanitize_catalog_rules(rules);
         validate_catalog_rules(&sanitized_rules)?;
@@ -250,7 +248,7 @@ impl LibraryService {
 fn scan_library(
     roots: &[LibraryRoot],
     mappings: &[LibraryFieldMapping],
-    catalog_rules: &[CatalogPatternRule],
+    catalog_rules: &[CatalogRule],
     cache_root: &Path,
     events: &broadcast::Sender<AppEvent>,
 ) -> Result<ScanArtifacts, LibraryError> {
@@ -662,25 +660,28 @@ fn extract_catalog_numbers(
 ) -> Vec<String> {
     let mut values = Vec::new();
 
-    for rule in catalog_rules {
-        if !catalog_rule_matches_composer(raw_tags, rule) {
+    for source in DEFAULT_CATALOG_SOURCE_TAGS {
+        let Some(source_values) = raw_tags.get(*source) else {
             continue;
+        };
+
+        let mut source_matches = Vec::new();
+        for rule in catalog_rules {
+            if !catalog_rule_matches_composer(raw_tags, rule) {
+                continue;
+            }
+
+            for source_value in source_values {
+                source_matches.extend(extract_catalog_matches_from_value(
+                    source_value,
+                    &rule.regex,
+                ));
+            }
         }
 
-        for source in &rule.source_tags {
-            let mut source_matches = Vec::new();
-
-            if let Some(source_values) = raw_tags.get(source) {
-                for source_value in source_values {
-                    source_matches
-                        .extend(extract_catalog_matches_from_value(source_value, &rule.regex));
-                }
-            }
-
-            if !source_matches.is_empty() {
-                values.extend(source_matches);
-                break;
-            }
+        if !source_matches.is_empty() {
+            values.extend(source_matches);
+            break;
         }
     }
 
@@ -730,20 +731,14 @@ fn match_is_followed_by_catalog_range(value: &str, match_end: usize) -> bool {
         .is_some_and(|character| character.is_ascii_digit())
 }
 
-fn sanitize_catalog_rules(rules: Vec<CatalogPatternRule>) -> Vec<CatalogPatternRule> {
+fn sanitize_catalog_rules(rules: Vec<CatalogRule>) -> Vec<CatalogRule> {
     let sanitized = rules
         .into_iter()
         .filter_map(|rule| {
-            let pattern = rule.pattern.trim().to_string();
-            if pattern.is_empty() {
+            let label = normalize_catalog_label(&rule.label);
+            if label.is_empty() {
                 return None;
             }
-
-            let label = if rule.label.trim().is_empty() {
-                "Custom rule".to_string()
-            } else {
-                rule.label.trim().to_string()
-            };
 
             let composers = dedupe_preserve_order(
                 rule.composers
@@ -753,26 +748,9 @@ fn sanitize_catalog_rules(rules: Vec<CatalogPatternRule>) -> Vec<CatalogPatternR
                     .collect(),
             );
 
-            let source_tags = dedupe_preserve_order(
-                rule.source_tags
-                    .into_iter()
-                    .map(|tag| normalize_tag_name(&tag))
-                    .filter(|tag| !tag.is_empty())
-                    .collect(),
-            );
-
-            Some(CatalogPatternRule {
+            Some(CatalogRule {
                 label,
-                pattern,
                 composers,
-                source_tags: if source_tags.is_empty() {
-                    DEFAULT_CATALOG_SOURCE_TAGS
-                        .iter()
-                        .map(|tag| (*tag).to_string())
-                        .collect()
-                } else {
-                    source_tags
-                },
                 enabled: rule.enabled,
             })
         })
@@ -785,49 +763,88 @@ fn sanitize_catalog_rules(rules: Vec<CatalogPatternRule>) -> Vec<CatalogPatternR
     }
 }
 
-fn validate_catalog_rules(rules: &[CatalogPatternRule]) -> Result<(), LibraryError> {
+fn validate_catalog_rules(rules: &[CatalogRule]) -> Result<(), LibraryError> {
     for rule in rules {
-        Regex::new(&rule.pattern).map_err(|error| LibraryError::InvalidCatalogPattern {
-            label: rule.label.clone(),
-            message: error.to_string(),
-        })?;
+        let label = normalize_catalog_label(&rule.label);
+        if label.is_empty() {
+            return Err(LibraryError::InvalidCatalogRule {
+                label: rule.label.clone(),
+                message: "catalog label cannot be empty".into(),
+            });
+        }
+
+        let _ = build_catalog_label_regex(&label)?;
     }
 
     Ok(())
 }
 
-fn compile_catalog_rules(rules: &[CatalogPatternRule]) -> Vec<CompiledCatalogRule> {
+fn compile_catalog_rules(rules: &[CatalogRule]) -> Vec<CompiledCatalogRule> {
     rules
         .iter()
         .filter(|rule| rule.enabled)
         .filter_map(|rule| {
-            let regex = Regex::new(&rule.pattern).ok()?;
+            let regex = build_catalog_label_regex(&rule.label).ok()?;
             let composer_hints = rule
                 .composers
                 .iter()
                 .map(|composer| composer.trim().to_ascii_lowercase())
                 .filter(|composer| !composer.is_empty())
                 .collect::<Vec<_>>();
-            let source_tags = if rule.source_tags.is_empty() {
-                DEFAULT_CATALOG_SOURCE_TAGS
-                    .iter()
-                    .map(|tag| (*tag).to_string())
-                    .collect()
-            } else {
-                rule.source_tags
-                    .iter()
-                    .map(|tag| normalize_tag_name(tag))
-                    .filter(|tag| !tag.is_empty())
-                    .collect()
-            };
 
             Some(CompiledCatalogRule {
                 regex,
                 composer_hints,
-                source_tags,
             })
         })
         .collect()
+}
+
+fn build_catalog_label_regex(label: &str) -> Result<Regex, LibraryError> {
+    let normalized = normalize_catalog_label(label);
+    if normalized.is_empty() {
+        return Err(LibraryError::InvalidCatalogRule {
+            label: label.to_string(),
+            message: "catalog label cannot be empty".into(),
+        });
+    }
+
+    let prefix = catalog_label_regex_prefix(&normalized);
+    if prefix.is_empty() {
+        return Err(LibraryError::InvalidCatalogRule {
+            label: normalized,
+            message: "catalog label must contain letters or numbers".into(),
+        });
+    }
+
+    Regex::new(&format!(
+        r"(?i)\b{prefix}\s*(?:[IVXLCM]+\s*[:.]\s*)?\d+[A-Za-z]?(?:\s*[:.]\s*[A-Za-z0-9]+)?(?:\s*No\.?\s*\d+)?\b"
+    ))
+    .map_err(|error| LibraryError::InvalidCatalogRule {
+        label: normalized,
+        message: error.to_string(),
+    })
+}
+
+fn catalog_label_regex_prefix(label: &str) -> String {
+    if label.eq_ignore_ascii_case("op") || label.eq_ignore_ascii_case("opus") {
+        String::from(r"(?:Op\.?|Opus)")
+    } else {
+        let trimmed = label.trim_end_matches('.').trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+        format!(r"{}\.?", regex::escape(trimmed))
+    }
+}
+
+fn normalize_catalog_label(label: &str) -> String {
+    let trimmed = label.trim();
+    if trimmed.eq_ignore_ascii_case("opus") {
+        "Op".into()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn catalog_rule_matches_composer(
@@ -838,15 +855,23 @@ fn catalog_rule_matches_composer(
         return true;
     }
 
-    COMPOSER_SOURCE_TAGS.iter().any(|tag| {
-        raw_tags.get(*tag).is_some_and(|values| {
-            values.iter().any(|value| {
-                let normalized = value.to_ascii_lowercase();
-                rule.composer_hints
-                    .iter()
-                    .any(|hint| normalized.contains(hint))
-            })
-        })
+    let composer_values = COMPOSER_SOURCE_TAGS
+        .iter()
+        .filter_map(|tag| raw_tags.get(*tag))
+        .flat_map(|values| values.iter())
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+
+    if composer_values.is_empty() {
+        return true;
+    }
+
+    composer_values.iter().any(|value| {
+        let normalized = value.to_ascii_lowercase();
+        rule.composer_hints
+            .iter()
+            .any(|hint| normalized.contains(hint))
     })
 }
 
@@ -1170,6 +1195,22 @@ mod tests {
     }
 
     #[test]
+    fn composer_aware_catalog_rules_allow_explicit_label_when_composer_is_missing() {
+        let rules = compile_catalog_rules(&default_catalog_rules());
+        let raw_tags = BTreeMap::from([(
+            "TITLE".into(),
+            vec![
+                "Messiah, HWV 56, Pt. 1: No. 20, Aria. He Shall Feed His Flock Like a Shepherd (Alto/Soprano)"
+                    .into(),
+            ],
+        )]);
+
+        let values = extract_catalog_numbers(&raw_tags, &rules);
+
+        assert_eq!(values, vec!["HWV 56"]);
+    }
+
+    #[test]
     fn catalog_rules_respect_source_tag_priority_before_falling_back_to_album() {
         let rules = compile_catalog_rules(&default_catalog_rules());
         let raw_tags = BTreeMap::from([
@@ -1204,4 +1245,21 @@ mod tests {
 
         assert_eq!(values, vec!["BWV 852"]);
     }
+
+    #[test]
+    fn catch_all_op_rule_applies_when_no_composer_specific_label_matches() {
+        let rules = compile_catalog_rules(&default_catalog_rules());
+        let raw_tags = BTreeMap::from([
+            ("COMPOSER".into(), vec!["Ludwig van Beethoven".into()]),
+            (
+                "TITLE".into(),
+                vec!["Piano Sonata No. 23 in F minor, Op. 57".into()],
+            ),
+        ]);
+
+        let values = extract_catalog_numbers(&raw_tags, &rules);
+
+        assert_eq!(values, vec!["Op. 57"]);
+    }
+
 }

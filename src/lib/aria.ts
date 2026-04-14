@@ -4,7 +4,7 @@ import { isTauriRuntime } from './runtime';
 import type {
   AppBootstrap,
   AppEvent,
-  CatalogPatternRule,
+  CatalogRule,
   LibraryFieldMapping,
   LibrarySnapshot,
   OutputDeviceSnapshot,
@@ -46,45 +46,33 @@ let previewBootstrap: AppBootstrap = {
     ],
     catalogRules: [
       {
-        label: 'Opus',
-        pattern: String.raw`(?i)\b(?:Op\.?|Opus)\s*\d+[A-Za-z]?(?:\s*No\.?\s*\d+)?\b`,
-        composers: [],
-        sourceTags: ['TITLE', 'WORK', 'ALBUM'],
-        enabled: true,
-      },
-      {
         label: 'BWV',
-        pattern: String.raw`(?i)\bBWV\s*\d+[A-Za-z]?\b`,
         composers: ['Johann Sebastian Bach', 'Bach'],
-        sourceTags: ['TITLE', 'WORK', 'ALBUM'],
         enabled: true,
       },
       {
         label: 'WAB',
-        pattern: String.raw`(?i)\bWAB\s*\d+[A-Za-z]?\b`,
         composers: ['Anton Bruckner', 'Bruckner'],
-        sourceTags: ['TITLE', 'WORK', 'ALBUM'],
         enabled: true,
       },
       {
         label: 'K',
-        pattern: String.raw`(?i)\bK\.?\s*\d+[A-Za-z]?\b`,
         composers: ['Wolfgang Amadeus Mozart', 'Mozart'],
-        sourceTags: ['TITLE', 'WORK', 'ALBUM'],
         enabled: true,
       },
       {
         label: 'D',
-        pattern: String.raw`(?i)\bD\.?\s*\d+[A-Za-z]?\b`,
         composers: ['Franz Schubert', 'Schubert'],
-        sourceTags: ['TITLE', 'WORK', 'ALBUM'],
         enabled: true,
       },
       {
         label: 'WoO',
-        pattern: String.raw`(?i)\bWoO\s*\d+[A-Za-z]?\b`,
         composers: [],
-        sourceTags: ['TITLE', 'WORK', 'ALBUM'],
+        enabled: true,
+      },
+      {
+        label: 'Op',
+        composers: [],
         enabled: true,
       },
     ],
@@ -525,7 +513,7 @@ export async function setFieldMappings(
 }
 
 export async function setCatalogRules(
-  rules: CatalogPatternRule[],
+  rules: CatalogRule[],
 ): Promise<LibrarySnapshot> {
   if (!isTauriRuntime) {
     previewBootstrap = {

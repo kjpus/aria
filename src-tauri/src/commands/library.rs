@@ -1,4 +1,4 @@
-use aria_domain::{CatalogPatternRule, LibraryFieldMapping, LibrarySnapshot};
+use aria_domain::{CatalogRule, LibraryFieldMapping, LibrarySnapshot};
 use std::collections::BTreeMap;
 use tauri::State;
 
@@ -41,7 +41,7 @@ pub async fn set_field_mappings(
 #[tauri::command]
 pub async fn set_catalog_rules(
     state: State<'_, AppState>,
-    rules: Vec<CatalogPatternRule>,
+    rules: Vec<CatalogRule>,
 ) -> Result<LibrarySnapshot, CommandError> {
     Ok(state.core.set_catalog_rules(rules).await?)
 }

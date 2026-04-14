@@ -12,6 +12,6 @@ pub enum LibraryError {
     ScanFailure,
     #[error("the requested track could not be read from disk")]
     TrackReadFailure,
-    #[error("invalid catalog rule regex for {label}: {message}")]
-    InvalidCatalogPattern { label: String, message: String },
+    #[error("invalid catalog rule for {label}: {message}")]
+    InvalidCatalogRule { label: String, message: String },
 }

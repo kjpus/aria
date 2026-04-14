@@ -1,14 +1,14 @@
 import { useEffect, useState } from 'react';
 import { SectionCard } from '../../components/SectionCard';
-import type { CatalogPatternRule } from '../../types/aria';
+import type { CatalogRule } from '../../types/aria';
 
 type CatalogRulesPanelProps = {
-  rules: CatalogPatternRule[];
+  rules: CatalogRule[];
   onAddRule: () => void;
   onRemoveRule: (index: number) => void;
   onUpdateRule: (
     index: number,
-    patch: Partial<CatalogPatternRule>,
+    patch: Partial<CatalogRule>,
   ) => void;
   onSave: () => void;
   variant?: 'card' | 'dialog';
@@ -25,13 +25,9 @@ export function CatalogRulesPanel({
   const [composerDrafts, setComposerDrafts] = useState(() =>
     rules.map((rule) => rule.composers.join(', ')),
   );
-  const [sourceTagDrafts, setSourceTagDrafts] = useState(() =>
-    rules.map((rule) => rule.sourceTags.join(', ')),
-  );
 
   useEffect(() => {
     setComposerDrafts(rules.map((rule) => rule.composers.join(', ')));
-    setSourceTagDrafts(rules.map((rule) => rule.sourceTags.join(', ')));
   }, [rules.length]);
 
   const actions = (
@@ -48,9 +44,9 @@ export function CatalogRulesPanel({
   const content = (
     <>
       <p className="panel-copy">
-        Add regex rules for catalog schemes like WAB, BWV, or composer-specific
-        abbreviations. Composer hints are optional. Source tags are checked in
-        descending priority.
+        Define the catalog abbreviation Aria should look for. All rules use the
+        same source-tag order and parsing flow; composer hints only control when
+        a label applies. The default catch-all is <code>Op</code>.
       </p>
 
       <div className="mapping-list">
@@ -74,18 +70,7 @@ export function CatalogRulesPanel({
                 onChange={(event) =>
                   onUpdateRule(index, { label: event.target.value })
                 }
-                placeholder="WAB"
-              />
-            </label>
-
-            <label className="field-label">
-              Regex pattern
-              <input
-                value={rule.pattern}
-                onChange={(event) =>
-                  onUpdateRule(index, { pattern: event.target.value })
-                }
-                placeholder="(?i)\\bWAB\\s*\\d+[A-Za-z]?\\b"
+                placeholder="BWV"
               />
             </label>
 
@@ -108,28 +93,6 @@ export function CatalogRulesPanel({
                   });
                 }}
                 placeholder="Anton Bruckner, Bruckner"
-              />
-            </label>
-
-            <label className="field-label">
-              Source tags
-              <input
-                value={sourceTagDrafts[index] ?? rule.sourceTags.join(', ')}
-                onBlur={() =>
-                  setSourceTagDrafts((current) =>
-                    updateDraftAtIndex(current, index, rule.sourceTags.join(', ')),
-                  )
-                }
-                onChange={(event) => {
-                  const nextValue = event.target.value;
-                  setSourceTagDrafts((current) =>
-                    updateDraftAtIndex(current, index, nextValue),
-                  );
-                  onUpdateRule(index, {
-                    sourceTags: parseCommaSeparatedValues(nextValue),
-                  });
-                }}
-                placeholder="TITLE, WORK, ALBUM"
               />
             </label>
 

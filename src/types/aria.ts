@@ -29,7 +29,7 @@ export type LibrarySnapshot = {
   indexedFiles: number;
   lastScanAt: string | null;
   fieldMappings: LibraryFieldMapping[];
-  catalogRules: CatalogPatternRule[];
+  catalogRules: CatalogRule[];
   tagInventory: TagInventoryEntry[];
   tracks: ScannedTrack[];
 };
@@ -59,11 +59,9 @@ export type LibraryFieldMapping = {
   tagPriorities: string[];
 };
 
-export type CatalogPatternRule = {
+export type CatalogRule = {
   label: string;
-  pattern: string;
   composers: string[];
-  sourceTags: string[];
   enabled: boolean;
 };
 

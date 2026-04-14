@@ -6,9 +6,8 @@ pub mod settings;
 
 pub use events::{AppEvent, LibraryEvent, PlaybackEvent, PlaylistEvent};
 pub use library::{
-    default_catalog_rules, default_field_mappings, AudioPropertiesSnapshot, CatalogPatternRule,
-    LibraryFieldMapping, LibraryRoot, LibrarySnapshot, ScanProgress, ScannedTrack,
-    TagInventoryEntry,
+    default_catalog_rules, default_field_mappings, AudioPropertiesSnapshot, CatalogRule,
+    LibraryFieldMapping, LibraryRoot, LibrarySnapshot, ScanProgress, ScannedTrack, TagInventoryEntry,
 };
 pub use playback::{
     OutputDeviceSnapshot, PlayTrackRequest, PlaybackSessionSnapshot, PlaybackSnapshot,

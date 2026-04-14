@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { SectionCard } from '../../components/SectionCard';
 import type {
-  CatalogPatternRule,
+  CatalogRule,
   LibraryFieldMapping,
   LibrarySnapshot,
   OutputDeviceSnapshot,
@@ -20,7 +20,7 @@ type SettingsPaneProps = {
   currentOutputDevice: OutputDeviceSnapshot;
   outputDevices: OutputDeviceSnapshot[];
   draftMappings: LibraryFieldMapping[];
-  draftCatalogRules: CatalogPatternRule[];
+  draftCatalogRules: CatalogRule[];
   settings: SettingsSnapshot;
   onAddDirectory: () => void;
   onClearLibrary: () => void;
@@ -31,7 +31,7 @@ type SettingsPaneProps = {
   onRemoveField: (index: number) => void;
   onRemoveCatalogRule: (index: number) => void;
   onUpdateField: (index: number, patch: Partial<LibraryFieldMapping>) => void;
-  onUpdateCatalogRule: (index: number, patch: Partial<CatalogPatternRule>) => void;
+  onUpdateCatalogRule: (index: number, patch: Partial<CatalogRule>) => void;
   onSaveMappings: () => void;
   onSaveCatalogRules: () => void;
   onThemeChange: (theme: ThemePreference) => void;
@@ -127,12 +127,12 @@ export function SettingsPane({
             }
           >
             <p className="panel-copy">
-              Add composer-aware regex patterns for schemes like BWV, WAB, K.,
-              or your own catalog abbreviations.
+              Map composer hints to catalog abbreviations like BWV, WAB, K.,
+              or the default catch-all Op label.
             </p>
             <div className="device-chip">
               <strong>{draftCatalogRules.length} rules configured</strong>
-              <span>Rules can be enabled, ordered by source tags, and saved independently.</span>
+              <span>All rules share the same tag order and parser; only the label and composer hints vary.</span>
             </div>
           </SectionCard>
         </div>
@@ -172,7 +172,7 @@ export function SettingsPane({
 
       {isCatalogRulesDialogOpen ? (
         <ConfigDialog
-          copy="Add built-in or custom composer-aware catalog matchers. Rules are used when the catalog field is still empty after tag mapping."
+          copy="Choose which catalog labels Aria should look for. All labels share the same extraction order; composer hints decide when a label is considered before the catch-all Op rule."
           eyebrow="Catalog Rules"
           onClose={() => setIsCatalogRulesDialogOpen(false)}
           title="Catalog extraction rules"

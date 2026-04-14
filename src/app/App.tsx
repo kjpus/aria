@@ -54,7 +54,7 @@ import {
 import type {
   AppBootstrap,
   AppEvent,
-  CatalogPatternRule,
+  CatalogRule,
   LibraryFieldMapping,
   OutputDeviceSnapshot,
   PlaybackPreferences,
@@ -102,7 +102,7 @@ export function App() {
   const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(null);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
   const [draftMappings, setDraftMappings] = useState<LibraryFieldMapping[]>([]);
-  const [draftCatalogRules, setDraftCatalogRules] = useState<CatalogPatternRule[]>([]);
+  const [draftCatalogRules, setDraftCatalogRules] = useState<CatalogRule[]>([]);
   const [outputDevices, setOutputDevices] = useState<OutputDeviceSnapshot[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [playlistPickerState, setPlaylistPickerState] = useState<{
@@ -635,10 +635,8 @@ export function App() {
     setDraftCatalogRules((current) => [
       ...current,
       {
-        label: 'Custom rule',
-        pattern: '',
+        label: '',
         composers: [],
-        sourceTags: ['TITLE', 'WORK', 'ALBUM'],
         enabled: true,
       },
     ]);
@@ -650,7 +648,7 @@ export function App() {
     );
   }
 
-  function handleUpdateCatalogRule(index: number, patch: Partial<CatalogPatternRule>) {
+  function handleUpdateCatalogRule(index: number, patch: Partial<CatalogRule>) {
     setDraftCatalogRules((current) =>
       current.map((rule, currentIndex) =>
         currentIndex === index ? { ...rule, ...patch } : rule,

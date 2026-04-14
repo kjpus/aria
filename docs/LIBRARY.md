@@ -169,12 +169,10 @@ If that succeeds, catalog fallback parsing is not used.
 
 If `catalog` is still empty after normal field mapping, Aria runs user-configurable catalog rules.
 
-Each catalog rule has:
+Each catalog rule now has:
 
-- `label`
-- `pattern`: regex
+- `label`: the catalog abbreviation Aria should search for, such as `BWV`, `WAB`, `K`, or `Op`
 - `composers`: optional composer hints
-- `source_tags`: ordered source-tag list
 - `enabled`
 
 Users can edit these in `Settings -> Catalog rules`.
@@ -183,7 +181,6 @@ Users can edit these in `Settings -> Catalog rules`.
 
 Aria ships with built-in rules for common classical catalogs, including examples such as:
 
-- `Opus`
 - `BWV`
 - `WAB`
 - `K`
@@ -194,34 +191,50 @@ Aria ships with built-in rules for common classical catalogs, including examples
 - `TWV`
 - `BuxWV`
 - `Hob.`
+- `S.`
+- `WoO`
+- `Op`
 
-### Source-tag priority
+### Shared source-tag priority
 
-Catalog rules respect source-tag priority.
+All catalog rules use the same source-tag priority.
 
-If a rule is configured with:
+Aria checks these tags in order:
 
 - `TITLE`
 - `WORK`
 - `ALBUM`
 
-then Aria:
+It:
 
-- tries `TITLE` first
-- only falls back to `WORK` if `TITLE` produced no matches
+- tries `TITLE` first for all catalog labels
+- only falls back to `WORK` if `TITLE` produced no catalog matches
 - only falls back to `ALBUM` if neither `TITLE` nor `WORK` produced matches
 
 This avoids leaking album-level range catalogs into track-level results when the track title already contains the specific catalog number.
 
 ### Composer-aware matching
 
-If a rule has composer hints, Aria only applies it when one of these raw tags matches those hints:
+If a rule has composer hints, Aria only applies that catalog label when one of these raw tags matches those hints:
 
 - `COMPOSER`
 - `WORKCOMPOSER`
 - `COMPOSERSORT`
 
-This is how rules like `WAB` remain Bruckner-specific.
+This is how labels like `WAB` remain Bruckner-specific.
+
+### Shared catalog parser
+
+Aria does not store or edit per-rule regex patterns anymore.
+
+Instead, all labels share the same extraction logic:
+
+- split colon-separated title/work/album text into segments
+- search segments from right to left
+- look for the configured label plus a catalog number
+- keep the first segment that yields matches
+
+The only per-rule difference is the catalog label itself, plus optional composer hints. The built-in `Op` rule is the catch-all fallback.
 
 ### Colon-segment preference
 
@@ -237,7 +250,7 @@ Aria prefers `BWV 852` from the final segment instead of the collection-level ra
 
 ### Range suppression
 
-Aria ignores regex matches that are immediately followed by a dash and more digits, such as:
+Aria ignores catalog matches that are immediately followed by a dash and more digits, such as:
 
 ```text
 BWV 846-869

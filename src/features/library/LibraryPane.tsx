@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
+import { ClearableInput } from '../../components/ClearableInput';
 import { SectionCard } from '../../components/SectionCard';
 import { toLocalImageSrc } from '../../lib/runtime';
 import type { ScannedTrack } from '../../types/aria';
@@ -116,9 +117,10 @@ export function LibraryPane({
           <label className="library-toolbar__label" htmlFor="album-filter">
             Filter albums
           </label>
-          <input
+          <ClearableInput
             className="library-toolbar__input"
             id="album-filter"
+            onClear={() => setFilter('')}
             placeholder="Search album, composer, conductor or performer, year"
             value={filter}
             onChange={(event) => setFilter(event.target.value)}

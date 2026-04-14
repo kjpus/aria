@@ -1,5 +1,5 @@
 use aria_domain::{
-    AppBootstrap, AppEvent, CatalogPatternRule, LibraryEvent, LibraryFieldMapping, LibrarySnapshot,
+    AppBootstrap, AppEvent, CatalogRule, LibraryEvent, LibraryFieldMapping, LibrarySnapshot,
     OutputDeviceSnapshot, PlayTrackRequest, PlaybackEvent, PlaybackPreferences, PlaylistEvent,
     PlaylistSnapshot, PlaybackSessionSnapshot, PlaybackSnapshot, SettingsSnapshot,
     ThemePreference, TrackTableSettings,
@@ -215,7 +215,7 @@ impl AppCore {
 
     pub async fn set_catalog_rules(
         &self,
-        rules: Vec<CatalogPatternRule>,
+        rules: Vec<CatalogRule>,
     ) -> Result<LibrarySnapshot, AppCoreError> {
         let snapshot = self.library.set_catalog_rules(rules).await?;
         self.emit(AppEvent::Library(LibraryEvent::SnapshotChanged(

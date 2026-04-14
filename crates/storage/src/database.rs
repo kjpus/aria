@@ -1,9 +1,9 @@
 use std::{fs, path::PathBuf};
 
 use aria_domain::{
-    default_catalog_rules, default_field_mappings, CatalogPatternRule, LibraryFieldMapping,
-    LibraryRoot, LibrarySnapshot, PlaybackSessionSnapshot, PlaylistSnapshot, ScannedTrack,
-    SettingsSnapshot, TagInventoryEntry,
+    default_catalog_rules, default_field_mappings, CatalogRule, LibraryFieldMapping, LibraryRoot,
+    LibrarySnapshot, PlaybackSessionSnapshot, PlaylistSnapshot, ScannedTrack, SettingsSnapshot,
+    TagInventoryEntry,
 };
 use rusqlite::{params, Connection};
 use serde::de::DeserializeOwned;
@@ -180,9 +180,9 @@ impl AppDatabase {
                 statement.execute(params![
                     i64::try_from(index).unwrap_or(i64::MAX),
                     rule.label,
-                    rule.pattern,
+                    legacy_catalog_pattern(&rule.label),
                     serde_json::to_string(&rule.composers)?,
-                    serde_json::to_string(&rule.source_tags)?,
+                    catalog_source_tags_json(),
                     if rule.enabled { 1 } else { 0 }
                 ])?;
             }
@@ -340,39 +340,26 @@ impl AppDatabase {
             .map_err(StorageError::from)
     }
 
-    fn load_catalog_rules(
-        &self,
-        connection: &Connection,
-    ) -> Result<Vec<CatalogPatternRule>, StorageError> {
+    fn load_catalog_rules(&self, connection: &Connection) -> Result<Vec<CatalogRule>, StorageError> {
         let mut statement = connection.prepare(
-            "select label, pattern, composers_json, source_tags_json, enabled
+            "select label, composers_json, enabled
              from catalog_rules
              order by position asc",
         )?;
         let rows = statement.query_map([], |row| {
-            let composers_json: String = row.get(2)?;
+            let composers_json: String = row.get(1)?;
             let composers = serde_json::from_str(&composers_json).map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    2,
-                    rusqlite::types::Type::Text,
-                    Box::new(error),
-                )
-            })?;
-            let source_tags_json: String = row.get(3)?;
-            let source_tags = serde_json::from_str(&source_tags_json).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    3,
+                    1,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
             })?;
 
-            Ok(CatalogPatternRule {
+            Ok(CatalogRule {
                 label: row.get(0)?,
-                pattern: row.get(1)?,
                 composers,
-                source_tags,
-                enabled: row.get::<_, i64>(4)? != 0,
+                enabled: row.get::<_, i64>(2)? != 0,
             })
         })?;
 
@@ -468,6 +455,39 @@ where
     }
 }
 
+fn catalog_source_tags_json() -> &'static str {
+    r#"["TITLE","WORK","ALBUM"]"#
+}
+
+fn legacy_catalog_pattern(label: &str) -> String {
+    let trimmed = label.trim();
+    let prefix = if trimmed.eq_ignore_ascii_case("op") || trimmed.eq_ignore_ascii_case("opus") {
+        String::from(r"(?:Op\.?|Opus)")
+    } else {
+        format!(r"{}\.?", legacy_regex_escape(trimmed.trim_end_matches('.')))
+    };
+
+    format!(
+        r"(?i)\b{prefix}\s*(?:[IVXLCM]+\s*[:.]\s*)?\d+[A-Za-z]?(?:\s*[:.]\s*[A-Za-z0-9]+)?(?:\s*No\.?\s*\d+)?\b"
+    )
+}
+
+fn legacy_regex_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$'
+            | '|' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            _ => escaped.push(character),
+        }
+    }
+
+    escaped
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -477,7 +497,7 @@ mod tests {
     };
 
     use aria_domain::{
-        CatalogPatternRule, LibrarySnapshot, PlayTrackRequest, PlaybackPreferences,
+        CatalogRule, LibrarySnapshot, PlayTrackRequest, PlaybackPreferences,
         PlaybackSessionSnapshot, QueueItem, SettingsSnapshot, ThemePreference, TrackTableSettings,
     };
 
@@ -503,11 +523,9 @@ mod tests {
         });
         library.indexed_files = 1;
         library.last_scan_at = Some("2026-04-06T10:00:00Z".into());
-        library.catalog_rules = vec![CatalogPatternRule {
+        library.catalog_rules = vec![CatalogRule {
             label: "WAB".into(),
-            pattern: r"(?i)\bWAB\s*\d+[A-Za-z]?\b".into(),
             composers: vec!["Anton Bruckner".into(), "Bruckner".into()],
-            source_tags: vec!["TITLE".into(), "WORK".into()],
             enabled: true,
         }];
         library.tag_inventory.push(aria_domain::TagInventoryEntry {
@@ -542,6 +560,7 @@ mod tests {
             accent_color: "#abcdef".into(),
             track_table: TrackTableSettings::default(),
             album_track_table: aria_domain::default_album_track_table_settings(),
+            playlist_track_table: aria_domain::default_playlist_track_table_settings(),
             playback: PlaybackPreferences {
                 output_device_id: Some("wasapi:test-device".into()),
                 exclusive_mode: false,

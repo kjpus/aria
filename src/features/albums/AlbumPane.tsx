@@ -4,10 +4,13 @@ import type {
 } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { SectionCard } from '../../components/SectionCard';
+import { TrackRawTagsDialog } from '../../components/TrackRawTagsDialog';
+import { readTrackRawTags } from '../../lib/aria';
 import { toLocalImageSrc } from '../../lib/runtime';
 import type {
   LibraryFieldMapping,
   ScannedTrack,
+  TrackRawTags,
   TrackTableSettings,
 } from '../../types/aria';
 import {
@@ -107,6 +110,11 @@ export function AlbumPane({
     useState<AlbumContextMenuState | null>(null);
   const [trackContextMenu, setTrackContextMenu] =
     useState<TrackContextMenuState | null>(null);
+  const [tagInspectorTrack, setTagInspectorTrack] = useState<ScannedTrack | null>(null);
+  const [tagInspectorTags, setTagInspectorTags] = useState<TrackRawTags>({});
+  const [tagInspectorError, setTagInspectorError] = useState<string | null>(null);
+  const [isTagInspectorOpen, setIsTagInspectorOpen] = useState(false);
+  const [isTagInspectorLoading, setIsTagInspectorLoading] = useState(false);
   const [hasHydrated, setHasHydrated] = useState(false);
   const albums = useMemo(() => buildAlbumCards(tracks), [tracks]);
   const columns = useMemo(() => buildTrackColumns(mappings), [mappings]);
@@ -306,19 +314,20 @@ export function AlbumPane({
   }, [albumContextMenu, trackContextMenu]);
 
   useEffect(() => {
-    if (!isLayoutDialogOpen) {
+    if (!isLayoutDialogOpen && !isTagInspectorOpen) {
       return undefined;
     }
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setIsLayoutDialogOpen(false);
+        setIsTagInspectorOpen(false);
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isLayoutDialogOpen]);
+  }, [isLayoutDialogOpen, isTagInspectorOpen]);
 
   useEffect(() => {
     if (!hasHydrated) {
@@ -525,6 +534,37 @@ export function AlbumPane({
     await onShowInExplorer(track);
   }
 
+  async function runShowAllTags() {
+    if (!trackContextMenu || trackContextMenu.trackIds.length !== 1) {
+      return;
+    }
+
+    const track = albumTracks.find(
+      (candidate) => candidate.id === trackContextMenu.primaryTrackId,
+    );
+
+    if (!track) {
+      setTrackContextMenu(null);
+      return;
+    }
+
+    setTrackContextMenu(null);
+    setTagInspectorTrack(track);
+    setTagInspectorTags({});
+    setTagInspectorError(null);
+    setIsTagInspectorOpen(true);
+    setIsTagInspectorLoading(true);
+
+    try {
+      const tags = await readTrackRawTags(track.path, track.rawTags);
+      setTagInspectorTags(tags);
+    } catch (reason) {
+      setTagInspectorError(String(reason));
+    } finally {
+      setIsTagInspectorLoading(false);
+    }
+  }
+
   return (
     <div className="pane-stack">
       <SectionCard hideHeader>
@@ -692,6 +732,11 @@ export function AlbumPane({
               Play
             </button>
             {trackContextMenu.trackIds.length === 1 ? (
+              <button onClick={() => void runShowAllTags()} type="button">
+                Show all tags
+              </button>
+            ) : null}
+            {trackContextMenu.trackIds.length === 1 ? (
               <button onClick={() => void runShowInExplorer()} type="button">
                 Show in Explorer
               </button>
@@ -813,6 +858,15 @@ export function AlbumPane({
           </div>
         </div>
       ) : null}
+
+      <TrackRawTagsDialog
+        error={tagInspectorError}
+        isLoading={isTagInspectorLoading}
+        isOpen={isTagInspectorOpen}
+        onClose={() => setIsTagInspectorOpen(false)}
+        tags={tagInspectorTags}
+        track={tagInspectorTrack}
+      />
     </div>
   );
 }

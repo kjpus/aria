@@ -3,7 +3,9 @@ import type {
   PointerEvent as ReactPointerEvent,
 } from 'react';
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { ClearableInput } from '../../components/ClearableInput';
 import { SectionCard } from '../../components/SectionCard';
+import { TrackRawTagsDialog } from '../../components/TrackRawTagsDialog';
 import { readTrackRawTags } from '../../lib/aria';
 import type {
   LibraryFieldMapping,
@@ -605,7 +607,8 @@ export function TrackPane({
         <div className="track-controls">
           <label className="field-label">
             Filter
-            <input
+            <ClearableInput
+              onClear={() => setFilter('')}
               placeholder="Filter by title, album, composer, conductor, path"
               value={filter}
               onChange={(event) => setFilter(event.target.value)}
@@ -972,109 +975,16 @@ export function TrackPane({
         </div>
       ) : null}
 
-      {isTagInspectorOpen ? (
-        <div
-          className="dialog-backdrop"
-          onClick={() => setIsTagInspectorOpen(false)}
-          role="presentation"
-        >
-          <div
-            className="dialog-card dialog-card--wide"
-            onClick={(event) => event.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="track-tags-dialog-title"
-          >
-            <div className="dialog-card__header">
-              <div>
-                <p className="section-card__eyebrow">Track</p>
-                <h3 id="track-tags-dialog-title">Raw file tags</h3>
-              </div>
-              <button
-                className="ghost-button"
-                onClick={() => setIsTagInspectorOpen(false)}
-                type="button"
-              >
-                Close
-              </button>
-            </div>
-
-            <p className="dialog-card__copy">
-              {tagInspectorTrack?.fileName ?? 'Selected track'}
-            </p>
-
-            {tagInspectorTrack ? (
-              <p className="tag-inspector__path">{tagInspectorTrack.path}</p>
-            ) : null}
-
-            {isTagInspectorLoading ? (
-              <div className="placeholder-pane">
-                <strong>Reading tags from disk…</strong>
-                <p>Aria is opening the file and extracting raw tags directly.</p>
-              </div>
-            ) : tagInspectorError ? (
-              <div className="placeholder-pane">
-                <strong>Could not read raw tags</strong>
-                <p>{tagInspectorError}</p>
-              </div>
-            ) : (
-              <div className="tag-inspector__list">
-                {Object.entries(tagInspectorTags)
-                  .sort(([left], [right]) => left.localeCompare(right))
-                  .map(([tag, values]) => (
-                    <section className="tag-inspector__item" key={tag}>
-                      <div className="tag-inspector__header">
-                        <h4>{tag}</h4>
-                        <span className="pane-chip">
-                          {values.length} value{values.length === 1 ? '' : 's'}
-                        </span>
-                      </div>
-                      <div className="tag-inspector__values">
-                        {values.map((value, index) => (
-                          <div className="tag-inspector__value" key={`${tag}-${index}`}>
-                            <textarea
-                              className="tag-inspector__textarea"
-                              onFocus={(event) => event.currentTarget.select()}
-                              readOnly
-                              rows={Math.max(1, Math.min(4, value.split('\n').length || 1))}
-                              value={value}
-                            />
-                            <button
-                              className="ghost-button"
-                              onClick={() => void copyToClipboard(value)}
-                              type="button"
-                            >
-                              Copy
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </section>
-                  ))}
-              </div>
-            )}
-          </div>
-        </div>
-      ) : null}
+      <TrackRawTagsDialog
+        error={tagInspectorError}
+        isLoading={isTagInspectorLoading}
+        isOpen={isTagInspectorOpen}
+        onClose={() => setIsTagInspectorOpen(false)}
+        tags={tagInspectorTags}
+        track={tagInspectorTrack}
+      />
     </div>
   );
-}
-
-async function copyToClipboard(value: string) {
-  try {
-    await navigator.clipboard.writeText(value);
-    return;
-  } catch {
-    const textarea = document.createElement('textarea');
-    textarea.value = value;
-    textarea.setAttribute('readonly', 'true');
-    textarea.style.position = 'absolute';
-    textarea.style.left = '-9999px';
-    document.body.appendChild(textarea);
-    textarea.select();
-    document.execCommand('copy');
-    document.body.removeChild(textarea);
-  }
 }
 
 function compareTracks(

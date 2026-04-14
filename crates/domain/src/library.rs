@@ -18,7 +18,7 @@ pub struct LibrarySnapshot {
     pub last_scan_at: Option<String>,
     pub field_mappings: Vec<LibraryFieldMapping>,
     #[serde(default = "default_catalog_rules")]
-    pub catalog_rules: Vec<CatalogPatternRule>,
+    pub catalog_rules: Vec<CatalogRule>,
     pub tag_inventory: Vec<TagInventoryEntry>,
     pub tracks: Vec<ScannedTrack>,
 }
@@ -57,13 +57,10 @@ pub struct LibraryFieldMapping {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct CatalogPatternRule {
+pub struct CatalogRule {
     pub label: String,
-    pub pattern: String,
     #[serde(default)]
     pub composers: Vec<String>,
-    #[serde(default = "default_catalog_rule_source_tags")]
-    pub source_tags: Vec<String>,
     #[serde(default = "default_catalog_rule_enabled")]
     pub enabled: bool,
 }
@@ -158,112 +155,37 @@ pub fn default_field_mappings() -> Vec<LibraryFieldMapping> {
     ]
 }
 
-pub fn default_catalog_rules() -> Vec<CatalogPatternRule> {
+pub fn default_catalog_rules() -> Vec<CatalogRule> {
     vec![
-        CatalogPatternRule {
-            label: "Opus".into(),
-            pattern: r"(?i)\b(?:Op\.?|Opus)\s*\d+[A-Za-z]?(?:\s*No\.?\s*\d+)?\b".into(),
-            composers: Vec::new(),
-            source_tags: default_catalog_rule_source_tags(),
-            enabled: true,
-        },
-        CatalogPatternRule {
-            label: "BWV".into(),
-            pattern: r"(?i)\bBWV\s*\d+[A-Za-z]?\b".into(),
-            composers: vec!["Johann Sebastian Bach".into(), "Bach".into()],
-            source_tags: default_catalog_rule_source_tags(),
-            enabled: true,
-        },
-        CatalogPatternRule {
-            label: "WAB".into(),
-            pattern: r"(?i)\bWAB\s*\d+[A-Za-z]?\b".into(),
-            composers: vec!["Anton Bruckner".into(), "Bruckner".into()],
-            source_tags: default_catalog_rule_source_tags(),
-            enabled: true,
-        },
-        CatalogPatternRule {
-            label: "K".into(),
-            pattern: r"(?i)\bK\.?\s*\d+[A-Za-z]?\b".into(),
-            composers: vec!["Wolfgang Amadeus Mozart".into(), "Mozart".into()],
-            source_tags: default_catalog_rule_source_tags(),
-            enabled: true,
-        },
-        CatalogPatternRule {
-            label: "KV".into(),
-            pattern: r"(?i)\bKV\s*\d+[A-Za-z]?\b".into(),
-            composers: vec!["Wolfgang Amadeus Mozart".into(), "Mozart".into()],
-            source_tags: default_catalog_rule_source_tags(),
-            enabled: true,
-        },
-        CatalogPatternRule {
-            label: "D".into(),
-            pattern: r"(?i)\bD\.?\s*\d+[A-Za-z]?\b".into(),
-            composers: vec!["Franz Schubert".into(), "Schubert".into()],
-            source_tags: default_catalog_rule_source_tags(),
-            enabled: true,
-        },
-        CatalogPatternRule {
-            label: "RV".into(),
-            pattern: r"(?i)\bRV\s*\d+[A-Za-z]?\b".into(),
-            composers: vec!["Antonio Vivaldi".into(), "Vivaldi".into()],
-            source_tags: default_catalog_rule_source_tags(),
-            enabled: true,
-        },
-        CatalogPatternRule {
-            label: "HWV".into(),
-            pattern: r"(?i)\bHWV\s*\d+[A-Za-z]?\b".into(),
-            composers: vec![
-                "George Frideric Handel".into(),
-                "Georg Friedrich Handel".into(),
-                "Handel".into(),
+        catalog_rule("BWV", &["Johann Sebastian Bach", "Bach"]),
+        catalog_rule("WAB", &["Anton Bruckner", "Bruckner"]),
+        catalog_rule("K", &["Wolfgang Amadeus Mozart", "Mozart"]),
+        catalog_rule("KV", &["Wolfgang Amadeus Mozart", "Mozart"]),
+        catalog_rule("D", &["Franz Schubert", "Schubert"]),
+        catalog_rule("RV", &["Antonio Vivaldi", "Vivaldi"]),
+        catalog_rule(
+            "HWV",
+            &[
+                "George Frideric Handel",
+                "Georg Friedrich Handel",
+                "Handel",
             ],
-            source_tags: default_catalog_rule_source_tags(),
-            enabled: true,
-        },
-        CatalogPatternRule {
-            label: "TWV".into(),
-            pattern: r"(?i)\bTWV\s*\d+:\d+\b".into(),
-            composers: vec!["Georg Philipp Telemann".into(), "Telemann".into()],
-            source_tags: default_catalog_rule_source_tags(),
-            enabled: true,
-        },
-        CatalogPatternRule {
-            label: "BuxWV".into(),
-            pattern: r"(?i)\bBuxWV\s*\d+[A-Za-z]?\b".into(),
-            composers: vec!["Dieterich Buxtehude".into(), "Buxtehude".into()],
-            source_tags: default_catalog_rule_source_tags(),
-            enabled: true,
-        },
-        CatalogPatternRule {
-            label: "Hob.".into(),
-            pattern: r"(?i)\bHob\.?\s*[IVXLC]+[:. ]\s*\d+\b".into(),
-            composers: vec![
-                "Joseph Haydn".into(),
-                "Franz Joseph Haydn".into(),
-                "Haydn".into(),
-            ],
-            source_tags: default_catalog_rule_source_tags(),
-            enabled: true,
-        },
-        CatalogPatternRule {
-            label: "S.".into(),
-            pattern: r"(?i)\bS\.?\s*\d+[A-Za-z]?\b".into(),
-            composers: vec!["Franz Liszt".into(), "Liszt".into()],
-            source_tags: default_catalog_rule_source_tags(),
-            enabled: true,
-        },
-        CatalogPatternRule {
-            label: "WoO".into(),
-            pattern: r"(?i)\bWoO\s*\d+[A-Za-z]?\b".into(),
-            composers: Vec::new(),
-            source_tags: default_catalog_rule_source_tags(),
-            enabled: true,
-        },
+        ),
+        catalog_rule("TWV", &["Georg Philipp Telemann", "Telemann"]),
+        catalog_rule("BuxWV", &["Dieterich Buxtehude", "Buxtehude"]),
+        catalog_rule("Hob.", &["Joseph Haydn", "Franz Joseph Haydn", "Haydn"]),
+        catalog_rule("S.", &["Franz Liszt", "Liszt"]),
+        catalog_rule("WoO", &[]),
+        catalog_rule("Op", &[]),
     ]
 }
 
-fn default_catalog_rule_source_tags() -> Vec<String> {
-    vec!["TITLE".into(), "WORK".into(), "ALBUM".into()]
+fn catalog_rule(label: &str, composers: &[&str]) -> CatalogRule {
+    CatalogRule {
+        label: label.into(),
+        composers: composers.iter().map(|composer| (*composer).into()).collect(),
+        enabled: true,
+    }
 }
 
 fn default_catalog_rule_enabled() -> bool {
