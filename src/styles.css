@@ -965,7 +965,8 @@ button:disabled {
 }
 
 .album-track-table {
-  min-width: 720px;
+  width: 100%;
+  min-width: 0;
 }
 
 .hover-scroll {
@@ -1058,6 +1059,11 @@ button:disabled {
 }
 
 .track-table--playlist {
+  width: 100%;
+  min-width: 0;
+}
+
+.track-table--fluid {
   width: 100%;
   min-width: 0;
 }

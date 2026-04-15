@@ -634,14 +634,14 @@ export function AlbumPane({
           </div>
         </div>
 
-        <div className="track-table-shell">
-          <table className="track-table album-track-table">
+        <div className="track-table-shell track-table-shell--clamped">
+          <table className="track-table album-track-table track-table--fluid">
             <colgroup>
               {visibleColumns.map((key) => (
                 <col
                   key={key}
                   style={{
-                    width: `${columnWidths[key] ?? getDefaultColumnWidth(key)}px`,
+                    width: `${buildColumnWeight(key, columnWidths, visibleColumns)}%`,
                   }}
                 />
               ))}
@@ -699,7 +699,17 @@ export function AlbumPane({
                         className={key === 'path' ? 'track-path' : undefined}
                         key={`${track.id}-${key}`}
                       >
-                        {albumTrackValue(track, key) || '-'}
+                        {isStaticAlbumColumn(key) ? (
+                          <span className="track-table__cell-text track-table__cell-text--static">
+                            {albumTrackValue(track, key) || '-'}
+                          </span>
+                        ) : (
+                          <HoverScrollText
+                            className="track-table__cell-text"
+                            speed={36}
+                            text={albumTrackValue(track, key) || '-'}
+                          />
+                        )}
                       </td>
                     ))}
                   </tr>
@@ -1162,4 +1172,28 @@ function getDefaultColumnWidth(key: string): number {
     default:
       return 180;
   }
+}
+
+function buildColumnWeight(
+  key: string,
+  columnWidths: Record<string, number>,
+  visibleColumns: string[],
+): number {
+  const total = visibleColumns.reduce(
+    (sum, columnKey) =>
+      sum + (columnWidths[columnKey] ?? getDefaultColumnWidth(columnKey)),
+    0,
+  );
+
+  if (total <= 0) {
+    return 100 / Math.max(visibleColumns.length, 1);
+  }
+
+  return ((columnWidths[key] ?? getDefaultColumnWidth(key)) / total) * 100;
+}
+
+function isStaticAlbumColumn(key: string): boolean {
+  return ['track_number', 'disk_number', 'year', 'format', 'duration'].includes(
+    key,
+  );
 }
