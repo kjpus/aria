@@ -480,18 +480,35 @@ button:disabled {
   list-style: none;
   margin: 0;
   padding: 0 0.65rem;
+  overflow-x: clip;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .queue-pane__header {
   display: flex;
   justify-content: space-between;
   align-items: flex-end;
+  flex-wrap: wrap;
   gap: 1rem;
+  min-width: 0;
 }
 
 .queue-pane__header h2 {
   margin: 0;
   font-size: 1.6rem;
+}
+
+.queue-pane__header > div:first-child {
+  min-width: 0;
+}
+
+.queue-pane__header .inline-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .root-list li,
@@ -504,6 +521,9 @@ button:disabled {
   align-items: center;
   padding: 0.95rem 0;
   border-top: 1px solid var(--line);
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .root-list li:first-child,
@@ -523,15 +543,25 @@ button:disabled {
   background: rgba(214, 177, 106, 0.07);
   border-radius: 16px;
   padding-inline: 0.8rem;
-  margin-inline: -0.15rem;
+}
+
+.queue-list__item {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .queue-list__summary {
   min-width: 0;
-  flex: 1;
-  white-space: nowrap;
+  flex: 1 1 0;
   overflow: hidden;
-  text-overflow: ellipsis;
+}
+
+.queue-list__summary-line {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .queue-list__title {
@@ -545,6 +575,8 @@ button:disabled {
 }
 
 .queue-list__duration {
+  flex: 0 0 auto;
+  margin-left: auto;
   color: var(--muted);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;

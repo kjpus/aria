@@ -1,4 +1,5 @@
 import { SectionCard } from '../../components/SectionCard';
+import { HoverScrollText } from '../albums/HoverScrollText';
 import type { PlaybackSnapshot, ScannedTrack } from '../../types/aria';
 import { firstField, formatDuration, joinField } from '../library/view-models';
 
@@ -81,6 +82,9 @@ type QueueRowProps = {
 
 function QueueRow({ queuedTrack, scannedTrack, playback, index }: QueueRowProps) {
   const summary = buildQueueSummary(queuedTrack, scannedTrack);
+  const fullSummary = summary.detail
+    ? `${summary.title} / ${summary.detail}`
+    : summary.title;
 
   return (
     <li
@@ -95,8 +99,18 @@ function QueueRow({ queuedTrack, scannedTrack, playback, index }: QueueRowProps)
         .join(' ')}
     >
       <div className="queue-list__summary">
-        <strong className="queue-list__title">{summary.title}</strong>
-        {summary.detail ? <span className="queue-list__meta"> / {summary.detail}</span> : null}
+        <HoverScrollText
+          className="queue-list__summary-line"
+          speed={34}
+          text={fullSummary}
+        >
+          <>
+            <strong className="queue-list__title">{summary.title}</strong>
+            {summary.detail ? (
+              <span className="queue-list__meta"> / {summary.detail}</span>
+            ) : null}
+          </>
+        </HoverScrollText>
       </div>
       <span className="queue-list__duration">{formatDuration(queuedTrack.durationMs)}</span>
     </li>

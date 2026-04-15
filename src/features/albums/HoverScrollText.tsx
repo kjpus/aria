@@ -1,16 +1,18 @@
-import type { CSSProperties } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { useEffect, useRef, useState } from 'react';
 
 type HoverScrollTextProps = {
   text: string;
   className?: string;
   speed?: number;
+  children?: ReactNode;
 };
 
 export function HoverScrollText({
   text,
   className,
   speed = 28,
+  children,
 }: HoverScrollTextProps) {
   const outerRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLSpanElement>(null);
@@ -62,7 +64,7 @@ export function HoverScrollText({
       title={text}
     >
       <span className="hover-scroll__inner" ref={innerRef}>
-        {text}
+        {children ?? text}
       </span>
     </div>
   );
