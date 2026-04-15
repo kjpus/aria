@@ -13,10 +13,10 @@ export function SettingsPanel({
   onThemeChange,
 }: SettingsPanelProps) {
   return (
-    <SectionCard eyebrow="Settings" title="Shell and diagnostics">
+    <SectionCard eyebrow="Settings" title="Prefererence">
       <div className="field-stack">
         <label className="field-label" htmlFor="theme-select">
-          Theme preference
+          Theme
         </label>
         <select
           id="theme-select"
@@ -31,11 +31,6 @@ export function SettingsPanel({
             </option>
           ))}
         </select>
-      </div>
-
-      <div className="accent-row">
-        <span>Accent</span>
-        <code>{settings.accentColor}</code>
       </div>
     </SectionCard>
   );

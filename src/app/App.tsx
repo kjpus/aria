@@ -99,6 +99,14 @@ function applyEvent(current: AppBootstrap | null, event: AppEvent): AppBootstrap
   }
 }
 
+function resolveTheme(theme: ThemePreference, prefersDark: boolean): 'light' | 'dark' {
+  if (theme === 'system') {
+    return prefersDark ? 'dark' : 'light';
+  }
+
+  return theme;
+}
+
 export function App() {
   const [bootstrap, setBootstrap] = useState<AppBootstrap | null>(null);
   const [activePane, setActivePane] = useState<PaneKey>('library');
@@ -198,6 +206,29 @@ export function App() {
       setSelectedPlaylistId(bootstrap.playlists.playlists[0]?.id ?? null);
     }
   }, [bootstrap, selectedPlaylistId]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    const themePreference = bootstrap?.settings.theme ?? 'dark';
+
+    const applyResolvedTheme = () => {
+      const resolvedTheme = resolveTheme(themePreference, mediaQuery.matches);
+      root.dataset.theme = resolvedTheme;
+      root.style.colorScheme = resolvedTheme;
+    };
+
+    applyResolvedTheme();
+
+    if (themePreference !== 'system') {
+      return undefined;
+    }
+
+    const handleChange = () => applyResolvedTheme();
+    mediaQuery.addEventListener('change', handleChange);
+
+    return () => mediaQuery.removeEventListener('change', handleChange);
+  }, [bootstrap?.settings.theme]);
 
   const remainingQueueCount = useMemo(() => {
     if (!bootstrap) {
@@ -1061,7 +1092,6 @@ export function App() {
             <PlaylistPane
               onDeletePlaylist={handleDeletePlaylist}
               onExportPlaylist={handleExportPlaylist}
-              mappings={bootstrap.library.fieldMappings}
               onAddPlaylistToQueue={handleAddPlaylistToQueue}
               onOpenAlbum={handleOpenAlbum}
               onPlayPlaylist={handlePlayPlaylist}

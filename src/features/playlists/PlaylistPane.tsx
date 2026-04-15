@@ -9,7 +9,6 @@ import {
 import { SectionCard } from '../../components/SectionCard';
 import { toLocalImageSrc } from '../../lib/runtime';
 import type {
-  LibraryFieldMapping,
   Playlist,
   ScannedTrack,
   TrackTableSettings,
@@ -17,16 +16,29 @@ import type {
 import {
   albumIdForTrack,
   albumTitleForTrack,
-  buildTrackColumns,
-  getTrackColumnValue,
+  firstField,
+  formatDuration,
+  joinField,
   tracksForPlaylist,
 } from '../library/view-models';
 import { HoverScrollText } from '../albums/HoverScrollText';
 
+type PlaylistColumnKey =
+  | 'playlist_order'
+  | 'album'
+  | 'title'
+  | 'composer'
+  | 'artists'
+  | 'duration';
+
+type PlaylistColumn = {
+  key: PlaylistColumnKey;
+  label: string;
+};
+
 type PlaylistPaneProps = {
   playlists: Playlist[];
   tracks: ScannedTrack[];
-  mappings: LibraryFieldMapping[];
   settings: TrackTableSettings;
   selectedPlaylistId: string | null;
   onSelectPlaylist: (playlistId: string) => void;
@@ -57,7 +69,7 @@ type PlaylistTrackContextMenuState = {
 };
 
 type ResizeState = {
-  key: string;
+  key: PlaylistColumnKey;
   startX: number;
   startWidth: number;
 };
@@ -65,7 +77,6 @@ type ResizeState = {
 export function PlaylistPane({
   playlists,
   tracks,
-  mappings,
   settings,
   selectedPlaylistId,
   onSelectPlaylist,
@@ -79,7 +90,6 @@ export function PlaylistPane({
   onShufflePlayPlaylist,
   onPlayTracks,
   onRemoveTracks,
-  onOpenAlbum,
 }: PlaylistPaneProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const resizeStateRef = useRef<ResizeState | null>(null);
@@ -93,26 +103,21 @@ export function PlaylistPane({
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   const [resizingColumn, setResizingColumn] = useState<string | null>(null);
   const [hasHydrated, setHasHydrated] = useState(false);
-  const columns = useMemo(
-    () =>
-      buildTrackColumns(mappings).filter(
-        (column) => column.key !== 'album' && column.key !== 'path',
-      ),
-    [mappings],
+  const columns = useMemo<PlaylistColumn[]>(
+    () => [
+      { key: 'playlist_order', label: '#' },
+      { key: 'album', label: 'Album' },
+      { key: 'title', label: 'Title' },
+      { key: 'composer', label: 'Composer' },
+      { key: 'artists', label: 'Artists' },
+      { key: 'duration', label: 'Duration' },
+    ],
+    [],
   );
-  const visibleColumns = useMemo(() => {
-    const preferred = settings.visibleColumns.filter(
-      (key) => key !== 'album' && key !== 'path',
-    );
-    const filtered = preferred.filter((key) =>
-      columns.some((column) => column.key === key),
-    );
-    return filtered.length > 0
-      ? filtered
-      : ['track_number', 'title', 'composer', 'conductor', 'format', 'duration'].filter((key) =>
-          columns.some((column) => column.key === key),
-        );
-  }, [columns, settings.visibleColumns]);
+  const visibleColumns = useMemo<PlaylistColumnKey[]>(
+    () => columns.map((column) => column.key),
+    [columns],
+  );
   const normalizedColumnWidths = useMemo(
     () => normalizeColumnWidths(settings, columns),
     [columns, settings],
@@ -127,8 +132,8 @@ export function PlaylistPane({
     () => (selectedPlaylist ? tracksForPlaylist(tracks, selectedPlaylist) : []),
     [tracks, selectedPlaylist],
   );
-  const groupedRows = useMemo(
-    () => buildPlaylistRows(playlistTracks),
+  const playlistRows = useMemo(
+    () => playlistTracks.map((track, index) => ({ track, order: index + 1 })),
     [playlistTracks],
   );
   const playlistTrackIdsKey = useMemo(
@@ -192,13 +197,17 @@ export function PlaylistPane({
       return undefined;
     }
 
-    if (columnWidthsEqual(columnWidths, normalizedColumnWidths)) {
+    if (
+      columnWidthsEqual(columnWidths, normalizedColumnWidths) &&
+      stringListsEqual(settings.visibleColumns, visibleColumns)
+    ) {
       return undefined;
     }
 
     const timeout = window.setTimeout(() => {
       onTrackTableChange({
         ...settings,
+        visibleColumns,
         columnWidths,
       });
     }, 200);
@@ -392,7 +401,7 @@ export function PlaylistPane({
 
   function handleResizeStart(
     event: ReactPointerEvent<HTMLDivElement>,
-    key: string,
+    key: PlaylistColumnKey,
   ) {
     event.preventDefault();
     event.stopPropagation();
@@ -523,7 +532,7 @@ export function PlaylistPane({
                 </div>
 
                 <div className="track-table-shell track-table-shell--clamped">
-                  <table className="track-table track-table--grouped">
+                  <table className="track-table track-table--playlist">
                     <colgroup>
                       {visibleColumns.map((key) => (
                         <col
@@ -551,60 +560,58 @@ export function PlaylistPane({
                       </tr>
                     </thead>
                     <tbody>
-                      {groupedRows.length === 0 ? (
+                      {playlistRows.length === 0 ? (
                         <tr>
                           <td className="empty-state" colSpan={Math.max(visibleColumns.length, 1)}>
                             This playlist does not have any available tracks in the current library.
                           </td>
                         </tr>
                       ) : (
-                        groupedRows.map((row) =>
-                          row.kind === 'album' ? (
-                            <tr
-                              className="track-table__album-row"
-                              key={`album-${row.albumId}-${row.index}`}
-                              onClick={() => onOpenAlbum(row.albumId)}
-                            >
-                              <td colSpan={Math.max(visibleColumns.length, 1)}>
-                                <div className="track-table__album-meta">
-                                  <HoverScrollText
-                                    className="track-table__album-title"
-                                    speed={44}
-                                    text={row.title}
-                                  />
-                                </div>
-                              </td>
-                            </tr>
-                          ) : (
-                            <tr
-                              className={[
-                                'track-table__row--playable',
-                                selectedTrackSet.has(row.track.id)
-                                  ? 'track-table__row--selected'
-                                  : '',
-                              ]
-                                .filter(Boolean)
-                                .join(' ')}
-                              key={row.track.id}
-                              onClick={(event) => handleTrackClick(event, row.track.id)}
-                              onContextMenu={(event) => handleTrackContextMenu(event, row.track)}
-                              onDoubleClick={() => void onPlayTracks([row.track])}
-                            >
-                              {visibleColumns.map((key) => (
-                                <td
-                                  className={key === 'path' ? 'track-path' : undefined}
-                                  key={`${row.track.id}-${key}`}
-                                >
+                        playlistRows.map(({ track, order }) => (
+                          <tr
+                            className={[
+                              'track-table__row--playable',
+                              selectedTrackSet.has(track.id)
+                                ? 'track-table__row--selected'
+                                : '',
+                            ]
+                              .filter(Boolean)
+                              .join(' ')}
+                            key={track.id}
+                            onClick={(event) => handleTrackClick(event, track.id)}
+                            onContextMenu={(event) => handleTrackContextMenu(event, track)}
+                            onDoubleClick={() => void onPlayTracks([track])}
+                          >
+                            {visibleColumns.map((key) => (
+                              <td
+                                className={[
+                                  'track-table__cell',
+                                  key === 'playlist_order'
+                                    ? 'track-table__cell--playlist-order'
+                                    : '',
+                                  key === 'duration'
+                                    ? 'track-table__cell--duration'
+                                    : '',
+                                ]
+                                  .filter(Boolean)
+                                  .join(' ')}
+                                key={`${track.id}-${key}`}
+                              >
+                                {key === 'playlist_order' || key === 'duration' ? (
+                                  <span className="track-table__cell-text track-table__cell-text--static">
+                                    {getPlaylistColumnValue(track, key, order)}
+                                  </span>
+                                ) : (
                                   <HoverScrollText
                                     className="track-table__cell-text"
                                     speed={36}
-                                    text={getTrackColumnValue(row.track, key) || '-'}
+                                    text={getPlaylistColumnValue(track, key, order) || '-'}
                                   />
-                                </td>
-                              ))}
-                            </tr>
-                          ),
-                        )
+                                )}
+                              </td>
+                            ))}
+                          </tr>
+                        ))
                       )}
                     </tbody>
                   </table>
@@ -710,32 +717,6 @@ export function PlaylistPane({
   );
 }
 
-type PlaylistRow =
-  | { kind: 'album'; albumId: string; title: string; index: number }
-  | { kind: 'track'; track: ScannedTrack };
-
-function buildPlaylistRows(tracks: ScannedTrack[]): PlaylistRow[] {
-  const rows: PlaylistRow[] = [];
-  let previousAlbumId: string | null = null;
-
-  tracks.forEach((track, index) => {
-    const albumId = albumIdForTrack(track);
-    if (albumId !== previousAlbumId) {
-      rows.push({
-        kind: 'album',
-        albumId,
-        title: albumTitleForTrack(track),
-        index,
-      });
-      previousAlbumId = albumId;
-    }
-
-    rows.push({ kind: 'track', track });
-  });
-
-  return rows;
-}
-
 function buildPlaylistCollage(playlist: Playlist, tracks: ScannedTrack[]) {
   const albumArts: string[] = [];
   const seenAlbums = new Set<string>();
@@ -779,9 +760,9 @@ function selectTrackIdsInOrder(
 }
 
 function buildColumnWeight(
-  key: string,
+  key: PlaylistColumnKey,
   columnWidths: Record<string, number>,
-  visibleColumns: string[],
+  visibleColumns: PlaylistColumnKey[],
 ): number {
   const total = visibleColumns.reduce(
     (sum, columnKey) => sum + (columnWidths[columnKey] ?? getDefaultColumnWidth(columnKey)),
@@ -797,7 +778,7 @@ function buildColumnWeight(
 
 function normalizeColumnWidths(
   settings: TrackTableSettings,
-  columns: { key: string }[],
+  columns: PlaylistColumn[],
 ): Record<string, number> {
   const nextWidths: Record<string, number> = {};
 
@@ -835,38 +816,84 @@ function columnWidthsEqual(
   return true;
 }
 
-function clampColumnWidth(key: string, width: number): number {
-  const minimumWidth = ['track_number', 'disk_number', 'year', 'format', 'duration'].includes(key)
-    ? 76
-    : key === 'title'
-      ? 160
-      : 120;
+function clampColumnWidth(key: PlaylistColumnKey, width: number): number {
+  const minimumWidth =
+    key === 'playlist_order'
+      ? 72
+      : key === 'duration'
+        ? 88
+        : key === 'album'
+          ? 180
+          : key === 'title'
+            ? 220
+            : key === 'composer'
+              ? 180
+              : 200;
   return Math.max(minimumWidth, Math.min(520, Math.round(width)));
 }
 
-function getDefaultColumnWidth(key: string): number {
+function getDefaultColumnWidth(key: PlaylistColumnKey): number {
   switch (key) {
-    case 'track_number':
-    case 'disk_number':
-      return 96;
-    case 'year':
-    case 'format':
+    case 'playlist_order':
+      return 84;
     case 'duration':
       return 110;
-    case 'file_name':
-      return 220;
-    case 'path':
-      return 360;
+    case 'album':
+      return 240;
     case 'title':
       return 280;
-    case 'album':
-      return 260;
     case 'composer':
-    case 'conductor':
-    case 'ensemble':
-    case 'soloist':
       return 220;
+    case 'artists':
+      return 240;
     default:
       return 180;
   }
+}
+
+function getPlaylistColumnValue(
+  track: ScannedTrack,
+  key: PlaylistColumnKey,
+  order: number,
+): string {
+  switch (key) {
+    case 'playlist_order':
+      return String(order);
+    case 'album':
+      return albumTitleForTrack(track);
+    case 'title':
+      return firstField(track, 'title') || track.fileName;
+    case 'composer':
+      return joinField(track, 'composer');
+    case 'artists':
+      return buildPlaylistArtists(track);
+    case 'duration':
+      return formatDuration(track.audio.durationMs);
+    default:
+      return '';
+  }
+}
+
+function buildPlaylistArtists(track: ScannedTrack): string {
+  const parts = [
+    firstField(track, 'conductor'),
+    firstField(track, 'ensemble'),
+    firstField(track, 'performer') || firstField(track, 'soloist'),
+  ].filter(Boolean);
+
+  return parts.join(' / ');
+}
+
+function stringListsEqual(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+
+  return true;
 }
