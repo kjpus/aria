@@ -479,7 +479,7 @@ button:disabled {
 .queue-list {
   list-style: none;
   margin: 0;
-  padding: 0;
+  padding: 0 0.65rem;
 }
 
 .queue-pane__header {
@@ -523,7 +523,7 @@ button:disabled {
   background: rgba(214, 177, 106, 0.07);
   border-radius: 16px;
   padding-inline: 0.8rem;
-  margin-inline: -0.8rem;
+  margin-inline: -0.15rem;
 }
 
 .queue-list__summary {
