@@ -49,8 +49,10 @@ type DropIndicator = {
 
 type ResizeState = {
   key: string;
+  partnerKey: string;
   startX: number;
   startWidth: number;
+  startPartnerWidth: number;
 };
 
 type AlbumContextMenuState = {
@@ -184,14 +186,17 @@ export function AlbumPane({
         return;
       }
 
-      const nextWidth = clampColumnWidth(
+      const nextWidths = resizeAdjacentColumns(
         resizeState.key,
-        resizeState.startWidth + (event.clientX - resizeState.startX),
+        resizeState.partnerKey,
+        resizeState.startWidth,
+        resizeState.startPartnerWidth,
+        event.clientX - resizeState.startX,
       );
 
       setColumnWidths((current) => ({
         ...current,
-        [resizeState.key]: nextWidth,
+        ...nextWidths,
       }));
     };
 
@@ -459,14 +464,22 @@ export function AlbumPane({
   function handleResizeStart(
     event: ReactPointerEvent<HTMLDivElement>,
     key: string,
+    partnerKey: string | null,
   ) {
     event.preventDefault();
     event.stopPropagation();
 
+    if (!partnerKey) {
+      return;
+    }
+
     resizeStateRef.current = {
       key,
+      partnerKey,
       startX: event.clientX,
       startWidth: columnWidths[key] ?? getDefaultColumnWidth(key),
+      startPartnerWidth:
+        columnWidths[partnerKey] ?? getDefaultColumnWidth(partnerKey),
     };
     setResizingColumn(key);
   }
@@ -635,18 +648,26 @@ export function AlbumPane({
             </colgroup>
             <thead>
               <tr>
-                {visibleColumns.map((key) => (
+                {visibleColumns.map((key, index) => {
+                  const partnerKey = visibleColumns[index + 1] ?? null;
+
+                  return (
                   <th className="track-table__header" key={key}>
                     <div className="track-table__header-inner">
                       <span>{columnLookup.get(key)?.label ?? key}</span>
-                      <div
-                        className="track-table__resize-handle"
-                        onPointerDown={(event) => handleResizeStart(event, key)}
-                        role="presentation"
-                      />
+                      {partnerKey ? (
+                        <div
+                          className="track-table__resize-handle"
+                          onPointerDown={(event) =>
+                            handleResizeStart(event, key, partnerKey)
+                          }
+                          role="presentation"
+                        />
+                      ) : null}
                     </div>
                   </th>
-                ))}
+                  );
+                })}
               </tr>
             </thead>
             <tbody>
@@ -1051,12 +1072,50 @@ function stringListsEqual(left: string[], right: string[]): boolean {
 }
 
 function clampColumnWidth(key: string, width: number): number {
-  const minimumWidth = ['track_number', 'disk_number', 'year', 'format', 'duration'].includes(key)
-    ? 76
-    : key === 'title'
-      ? 160
-      : 120;
-  return Math.max(minimumWidth, Math.min(520, Math.round(width)));
+  const { min, max } = getColumnWidthBounds(key);
+  return Math.max(min, Math.min(max, Math.round(width)));
+}
+
+function getColumnWidthBounds(key: string): { min: number; max: number } {
+  return {
+    min: ['track_number', 'disk_number', 'year', 'format', 'duration'].includes(key)
+      ? 76
+      : key === 'title'
+        ? 160
+        : 120,
+    max: 520,
+  };
+}
+
+function resizeAdjacentColumns(
+  key: string,
+  partnerKey: string,
+  startWidth: number,
+  startPartnerWidth: number,
+  delta: number,
+): Record<string, number> {
+  const primaryBounds = getColumnWidthBounds(key);
+  const partnerBounds = getColumnWidthBounds(partnerKey);
+  const minimumDelta = Math.max(
+    primaryBounds.min - startWidth,
+    startPartnerWidth - partnerBounds.max,
+  );
+  const maximumDelta = Math.min(
+    primaryBounds.max - startWidth,
+    startPartnerWidth - partnerBounds.min,
+  );
+  const boundedDelta =
+    maximumDelta < minimumDelta
+      ? 0
+      : Math.max(minimumDelta, Math.min(maximumDelta, delta));
+
+  return {
+    [key]: clampColumnWidth(key, startWidth + boundedDelta),
+    [partnerKey]: clampColumnWidth(
+      partnerKey,
+      startPartnerWidth - boundedDelta,
+    ),
+  };
 }
 
 function getDefaultColumnWidth(key: string): number {

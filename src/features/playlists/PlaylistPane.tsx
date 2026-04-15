@@ -70,8 +70,10 @@ type PlaylistTrackContextMenuState = {
 
 type ResizeState = {
   key: PlaylistColumnKey;
+  partnerKey: PlaylistColumnKey;
   startX: number;
   startWidth: number;
+  startPartnerWidth: number;
 };
 
 export function PlaylistPane({
@@ -163,14 +165,17 @@ export function PlaylistPane({
         return;
       }
 
-      const nextWidth = clampColumnWidth(
+      const nextWidths = resizeAdjacentColumns(
         resizeState.key,
-        resizeState.startWidth + (event.clientX - resizeState.startX),
+        resizeState.partnerKey,
+        resizeState.startWidth,
+        resizeState.startPartnerWidth,
+        event.clientX - resizeState.startX,
       );
 
       setColumnWidths((current) => ({
         ...current,
-        [resizeState.key]: nextWidth,
+        ...nextWidths,
       }));
     };
 
@@ -402,14 +407,22 @@ export function PlaylistPane({
   function handleResizeStart(
     event: ReactPointerEvent<HTMLDivElement>,
     key: PlaylistColumnKey,
+    partnerKey: PlaylistColumnKey | null,
   ) {
     event.preventDefault();
     event.stopPropagation();
 
+    if (!partnerKey) {
+      return;
+    }
+
     resizeStateRef.current = {
       key,
+      partnerKey,
       startX: event.clientX,
       startWidth: columnWidths[key] ?? getDefaultColumnWidth(key),
+      startPartnerWidth:
+        columnWidths[partnerKey] ?? getDefaultColumnWidth(partnerKey),
     };
     setResizingColumn(key);
   }
@@ -545,18 +558,26 @@ export function PlaylistPane({
                     </colgroup>
                     <thead>
                       <tr>
-                        {visibleColumns.map((key) => (
+                        {visibleColumns.map((key, index) => {
+                          const partnerKey = visibleColumns[index + 1] ?? null;
+
+                          return (
                           <th className="track-table__header" key={key}>
                             <div className="track-table__header-inner">
                               <span>{columnLookup.get(key)?.label ?? key}</span>
-                              <div
-                                className="track-table__resize-handle"
-                                onPointerDown={(event) => handleResizeStart(event, key)}
-                                role="presentation"
-                              />
+                              {partnerKey ? (
+                                <div
+                                  className="track-table__resize-handle"
+                                  onPointerDown={(event) =>
+                                    handleResizeStart(event, key, partnerKey)
+                                  }
+                                  role="presentation"
+                                />
+                              ) : null}
                             </div>
                           </th>
-                        ))}
+                          );
+                        })}
                       </tr>
                     </thead>
                     <tbody>
@@ -817,19 +838,59 @@ function columnWidthsEqual(
 }
 
 function clampColumnWidth(key: PlaylistColumnKey, width: number): number {
-  const minimumWidth =
-    key === 'playlist_order'
-      ? 72
-      : key === 'duration'
-        ? 88
-        : key === 'album'
-          ? 180
-          : key === 'title'
-            ? 220
-            : key === 'composer'
-              ? 180
-              : 200;
-  return Math.max(minimumWidth, Math.min(520, Math.round(width)));
+  const { min, max } = getColumnWidthBounds(key);
+  return Math.max(min, Math.min(max, Math.round(width)));
+}
+
+function getColumnWidthBounds(
+  key: PlaylistColumnKey,
+): { min: number; max: number } {
+  return {
+    min:
+      key === 'playlist_order'
+        ? 72
+        : key === 'duration'
+          ? 88
+          : key === 'album'
+            ? 180
+            : key === 'title'
+              ? 220
+              : key === 'composer'
+                ? 180
+                : 200,
+    max: 520,
+  };
+}
+
+function resizeAdjacentColumns(
+  key: PlaylistColumnKey,
+  partnerKey: PlaylistColumnKey,
+  startWidth: number,
+  startPartnerWidth: number,
+  delta: number,
+): Record<string, number> {
+  const primaryBounds = getColumnWidthBounds(key);
+  const partnerBounds = getColumnWidthBounds(partnerKey);
+  const minimumDelta = Math.max(
+    primaryBounds.min - startWidth,
+    startPartnerWidth - partnerBounds.max,
+  );
+  const maximumDelta = Math.min(
+    primaryBounds.max - startWidth,
+    startPartnerWidth - partnerBounds.min,
+  );
+  const boundedDelta =
+    maximumDelta < minimumDelta
+      ? 0
+      : Math.max(minimumDelta, Math.min(maximumDelta, delta));
+
+  return {
+    [key]: clampColumnWidth(key, startWidth + boundedDelta),
+    [partnerKey]: clampColumnWidth(
+      partnerKey,
+      startPartnerWidth - boundedDelta,
+    ),
+  };
 }
 
 function getDefaultColumnWidth(key: PlaylistColumnKey): number {
