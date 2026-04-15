@@ -564,11 +564,7 @@ fn initialize_exclusive_output(
             .map_err(|error| PlaybackError::Output(error.to_string()))?
     };
 
-    let audio_client: Audio::IAudioClient = unsafe {
-        device
-            .Activate(Com::CLSCTX_ALL, None)
-            .map_err(|error| PlaybackError::Output(error.to_string()))?
-    };
+    let mut audio_client = activate_audio_client(&device)?;
 
     let output_format = choose_supported_format(&audio_client, stream_spec).ok_or_else(|| {
         PlaybackError::Output(format!(
@@ -586,10 +582,10 @@ fn initialize_exclusive_output(
             .GetDevicePeriod(Some(&mut default_period), Some(&mut minimum_period))
             .map_err(|error| PlaybackError::Output(error.to_string()))?;
     }
-    let requested_period = if default_period > 0 {
-        default_period
-    } else {
+    let requested_period = if minimum_period > 0 {
         minimum_period
+    } else {
+        default_period
     };
 
     let render_event = unsafe {
@@ -597,17 +593,15 @@ fn initialize_exclusive_output(
             .map_err(|error| PlaybackError::Output(error.to_string()))?
     };
 
+    initialize_audio_client_exclusive(
+        &device,
+        &mut audio_client,
+        requested_period,
+        output_format,
+        &wave_format,
+    )?;
+
     unsafe {
-        audio_client
-            .Initialize(
-                Audio::AUDCLNT_SHAREMODE_EXCLUSIVE,
-                Audio::AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                requested_period,
-                requested_period,
-                &wave_format.Format,
-                None,
-            )
-            .map_err(|error| PlaybackError::Output(error.to_string()))?;
         audio_client
             .SetEventHandle(render_event)
             .map_err(|error| PlaybackError::Output(error.to_string()))?;
@@ -637,6 +631,51 @@ fn initialize_exclusive_output(
         buffer_frames,
         output_format,
     })
+}
+
+fn activate_audio_client(device: &Audio::IMMDevice) -> Result<Audio::IAudioClient, PlaybackError> {
+    unsafe {
+        device
+            .Activate(Com::CLSCTX_ALL, None)
+            .map_err(|error| PlaybackError::Output(error.to_string()))
+    }
+}
+
+fn initialize_audio_client_exclusive(
+    device: &Audio::IMMDevice,
+    audio_client: &mut Audio::IAudioClient,
+    requested_period: i64,
+    output_format: WasapiPcmFormat,
+    wave_format: &Audio::WAVEFORMATEXTENSIBLE,
+) -> Result<(), PlaybackError> {
+    let initialize = |client: &Audio::IAudioClient, period: i64| unsafe {
+        client.Initialize(
+            Audio::AUDCLNT_SHAREMODE_EXCLUSIVE,
+            Audio::AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+            period,
+            period,
+            &wave_format.Format,
+            None,
+        )
+    };
+
+    match initialize(audio_client, requested_period) {
+        Ok(()) => Ok(()),
+        Err(error) if error.code() == Audio::AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED => {
+            let aligned_frames = unsafe {
+                audio_client
+                    .GetBufferSize()
+                    .map_err(|buffer_error| PlaybackError::Output(buffer_error.to_string()))?
+            };
+            let aligned_period =
+                frames_to_reference_time(aligned_frames, output_format.sample_rate);
+
+            *audio_client = activate_audio_client(device)?;
+            initialize(audio_client, aligned_period)
+                .map_err(|retry_error| PlaybackError::Output(retry_error.to_string()))
+        }
+        Err(error) => Err(PlaybackError::Output(error.to_string())),
+    }
 }
 
 fn fill_render_buffer(
@@ -868,6 +907,12 @@ fn position_to_frames(position: Duration, sample_rate: u32) -> u64 {
 
 fn frames_to_millis(frames: u64, sample_rate: u32) -> u64 {
     ((frames as f64 / sample_rate as f64) * 1000.0).round() as u64
+}
+
+fn frames_to_reference_time(frames: u32, sample_rate: u32) -> i64 {
+    let numerator = frames as u64 * 10_000_000u64;
+    let denominator = sample_rate.max(1) as u64;
+    numerator.div_ceil(denominator).max(1) as i64
 }
 
 fn build_wave_format(output_format: WasapiPcmFormat) -> Audio::WAVEFORMATEXTENSIBLE {

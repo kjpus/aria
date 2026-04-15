@@ -271,15 +271,19 @@ impl PlaybackService {
                 .find(|device| device.id == backend.output_device.id)
                 .cloned()
             {
-                if current_snapshot != backend.output_device {
-                    backend.output_device = current_snapshot;
+                let merged_snapshot =
+                    snapshot_with_backend_label(current_snapshot, backend_backend_label(&backend));
+                if merged_snapshot != backend.output_device {
+                    backend.output_device = merged_snapshot;
                     changed = true;
                 }
             } else if let Some(default_snapshot) =
                 devices.iter().find(|device| device.is_default).cloned()
             {
-                if default_snapshot != backend.output_device {
-                    backend.output_device = default_snapshot;
+                let merged_snapshot =
+                    snapshot_with_backend_label(default_snapshot, backend_backend_label(&backend));
+                if merged_snapshot != backend.output_device {
+                    backend.output_device = merged_snapshot;
                     changed = true;
                 }
             }
@@ -612,7 +616,7 @@ fn start_request(
                 }
                 Err(error) => {
                     eprintln!(
-                        "exclusive playback failed for '{}' on '{}', retrying shared mode: {error}",
+                        "exclusive playback failed for '{}' on '{}': {error}",
                         request.path,
                         backend
                             .preferences
@@ -620,6 +624,7 @@ fn start_request(
                             .as_deref()
                             .unwrap_or("default output")
                     );
+                    return Err(error);
                 }
             }
         }
@@ -627,9 +632,10 @@ fn start_request(
         #[cfg(not(target_os = "windows"))]
         {
             eprintln!(
-                "exclusive playback requested for '{}', but this platform uses shared mode instead",
+                "exclusive playback requested for '{}', but this platform does not support it",
                 request.path
             );
+            return Err(PlaybackError::ExclusiveModeUnavailable);
         }
     }
 
@@ -940,6 +946,23 @@ fn output_backend_label(exclusive_mode: bool) -> String {
     } else {
         "rodio".into()
     }
+}
+
+fn backend_backend_label(backend: &PlaybackBackend) -> String {
+    match backend.active {
+        #[cfg(target_os = "windows")]
+        Some(ActivePlayback::Exclusive { .. }) => output_backend_label(true),
+        Some(ActivePlayback::Shared { .. }) => output_backend_label(false),
+        None => output_backend_label(backend.preferences.exclusive_mode),
+    }
+}
+
+fn snapshot_with_backend_label(
+    mut snapshot: OutputDeviceSnapshot,
+    backend_label: String,
+) -> OutputDeviceSnapshot {
+    snapshot.backend = backend_label;
+    snapshot
 }
 
 fn shared_mode_preferences(preferences: &PlaybackPreferences) -> PlaybackPreferences {
