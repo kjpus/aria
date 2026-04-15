@@ -670,7 +670,7 @@ export function TrackPane({
                     return (
                       <th className="track-table__header" key={key}>
                         <div className="track-table__header-inner">
-                          <span>{column?.label ?? key}</span>
+                          <span title={column?.label ?? key}>{column?.label ?? key}</span>
                           {partnerKey ? (
                             <div
                               className="track-table__resize-handle"
@@ -1213,18 +1213,37 @@ function getDefaultColumnWidth(key: string): number {
 
 function clampColumnWidth(key: string, width: number): number {
   const { min, max } = getColumnWidthBounds(key);
-  return Math.max(min, Math.min(max, width));
+  return Math.max(min, Math.min(max, Math.round(width)));
 }
 
 function getColumnWidthBounds(key: string): { min: number; max: number } {
+  const min =
+    key === 'path'
+      ? 220
+      : key === 'title' || key === 'album'
+        ? 160
+        : 96;
+
+  const max =
+    key === 'path'
+      ? 1600
+      : key === 'title'
+        ? 1500
+        : key === 'album'
+          ? 1300
+          : key === 'file_name'
+            ? 1100
+            : key === 'composer'
+              ? 760
+              : ['conductor', 'ensemble', 'soloist'].includes(key)
+                ? 860
+                : ['track_number', 'disk_number', 'year', 'format', 'duration'].includes(key)
+                  ? 240
+                  : 720;
+
   return {
-    min:
-      key === 'path'
-        ? 220
-        : key === 'title' || key === 'album'
-          ? 160
-          : 96,
-    max: key === 'path' ? 720 : 520,
+    min,
+    max,
   };
 }
 

@@ -654,7 +654,9 @@ export function AlbumPane({
                   return (
                   <th className="track-table__header" key={key}>
                     <div className="track-table__header-inner">
-                      <span>{columnLookup.get(key)?.label ?? key}</span>
+                      <span title={columnLookup.get(key)?.label ?? key}>
+                        {columnLookup.get(key)?.label ?? key}
+                      </span>
                       {partnerKey ? (
                         <div
                           className="track-table__resize-handle"
@@ -1077,13 +1079,30 @@ function clampColumnWidth(key: string, width: number): number {
 }
 
 function getColumnWidthBounds(key: string): { min: number; max: number } {
+  const min = ['track_number', 'disk_number', 'year', 'format', 'duration'].includes(key)
+    ? 76
+    : key === 'title'
+      ? 160
+      : 120;
+
+  const max =
+    key === 'title'
+      ? 1500
+      : key === 'album'
+        ? 1300
+        : key === 'file_name' || key === 'path'
+          ? 1500
+          : key === 'composer'
+            ? 760
+            : ['conductor', 'ensemble', 'soloist'].includes(key)
+              ? 860
+              : ['track_number', 'disk_number', 'year', 'format', 'duration'].includes(key)
+                ? 240
+                : 720;
+
   return {
-    min: ['track_number', 'disk_number', 'year', 'format', 'duration'].includes(key)
-      ? 76
-      : key === 'title'
-        ? 160
-        : 120,
-    max: 520,
+    min,
+    max,
   };
 }
 

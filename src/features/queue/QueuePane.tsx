@@ -21,7 +21,7 @@ export function QueuePane({
   const trackLookup = new Map(tracks.map((track) => [track.id, track]));
 
   return (
-    <div className="pane-stack">
+    <div className="pane-stack queue-pane">
       <SectionCard hideHeader>
         <div className="queue-pane__header">
           <div>

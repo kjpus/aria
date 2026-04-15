@@ -564,7 +564,9 @@ export function PlaylistPane({
                           return (
                           <th className="track-table__header" key={key}>
                             <div className="track-table__header-inner">
-                              <span>{columnLookup.get(key)?.label ?? key}</span>
+                              <span title={columnLookup.get(key)?.label ?? key}>
+                                {columnLookup.get(key)?.label ?? key}
+                              </span>
                               {partnerKey ? (
                                 <div
                                   className="track-table__resize-handle"
@@ -845,20 +847,37 @@ function clampColumnWidth(key: PlaylistColumnKey, width: number): number {
 function getColumnWidthBounds(
   key: PlaylistColumnKey,
 ): { min: number; max: number } {
-  return {
-    min:
-      key === 'playlist_order'
-        ? 72
-        : key === 'duration'
-          ? 88
+  const min =
+    key === 'playlist_order'
+      ? 72
+      : key === 'duration'
+        ? 88
+        : key === 'album'
+          ? 180
+          : key === 'title'
+            ? 220
+            : key === 'composer'
+              ? 180
+              : 200;
+
+  const max =
+    key === 'playlist_order'
+      ? 160
+      : key === 'duration'
+        ? 180
+        : key === 'title'
+          ? 1500
           : key === 'album'
-            ? 180
-            : key === 'title'
-              ? 220
-              : key === 'composer'
-                ? 180
-                : 200,
-    max: 520,
+            ? 1300
+            : key === 'composer'
+              ? 760
+              : key === 'artists'
+                ? 1000
+                : 720;
+
+  return {
+    min,
+    max,
   };
 }
 

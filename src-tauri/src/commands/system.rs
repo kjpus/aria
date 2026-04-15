@@ -94,3 +94,12 @@ pub fn show_in_explorer(path: String) -> Result<(), CommandError> {
         ))
     }
 }
+
+#[tauri::command]
+pub fn debug_log(message: String) {
+    #[cfg(debug_assertions)]
+    eprintln!("[aria-ui] {message}");
+
+    #[cfg(not(debug_assertions))]
+    let _ = message;
+}

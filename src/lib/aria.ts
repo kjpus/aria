@@ -727,51 +727,85 @@ export async function updateTheme(
 export async function updateTrackTableSettings(
   trackTable: TrackTableSettings,
 ): Promise<SettingsSnapshot> {
+  const normalizedTrackTable = normalizeTrackTableSettingsPayload(trackTable);
+
   if (!isTauriRuntime) {
     previewBootstrap = {
       ...previewBootstrap,
       settings: {
         ...previewBootstrap.settings,
-        trackTable,
+        trackTable: normalizedTrackTable,
       },
     };
     return previewBootstrap.settings;
   }
-  return invoke<SettingsSnapshot>('update_track_table_settings', { trackTable });
+  return invoke<SettingsSnapshot>('update_track_table_settings', {
+    trackTable: normalizedTrackTable,
+  });
 }
 
 export async function updateAlbumTrackTableSettings(
   albumTrackTable: TrackTableSettings,
 ): Promise<SettingsSnapshot> {
+  const normalizedTrackTable =
+    normalizeTrackTableSettingsPayload(albumTrackTable);
+
   if (!isTauriRuntime) {
     previewBootstrap = {
       ...previewBootstrap,
       settings: {
         ...previewBootstrap.settings,
-        albumTrackTable,
+        albumTrackTable: normalizedTrackTable,
       },
     };
     return previewBootstrap.settings;
   }
-  return invoke<SettingsSnapshot>('update_album_track_table_settings', { albumTrackTable });
+  return invoke<SettingsSnapshot>('update_album_track_table_settings', {
+    albumTrackTable: normalizedTrackTable,
+  });
 }
 
 export async function updatePlaylistTrackTableSettings(
   playlistTrackTable: TrackTableSettings,
 ): Promise<SettingsSnapshot> {
+  const normalizedTrackTable =
+    normalizeTrackTableSettingsPayload(playlistTrackTable);
+
   if (!isTauriRuntime) {
     previewBootstrap = {
       ...previewBootstrap,
       settings: {
         ...previewBootstrap.settings,
-        playlistTrackTable,
+        playlistTrackTable: normalizedTrackTable,
       },
     };
     return previewBootstrap.settings;
   }
   return invoke<SettingsSnapshot>('update_playlist_track_table_settings', {
-    playlistTrackTable,
+    playlistTrackTable: normalizedTrackTable,
   });
+}
+
+export async function reportDebugMessage(
+  context: string,
+  error: unknown,
+): Promise<void> {
+  if (!import.meta.env.DEV) {
+    return;
+  }
+
+  const message = `[${context}] ${stringifyDebugError(error)}`;
+  console.error(message, error);
+
+  if (!isTauriRuntime) {
+    return;
+  }
+
+  try {
+    await invoke<void>('debug_log', { message });
+  } catch (invokeError) {
+    console.error('[debug_log]', invokeError);
+  }
 }
 
 export async function listOutputDevices(): Promise<OutputDeviceSnapshot[]> {
@@ -814,4 +848,36 @@ export async function listenToAppEvents(
   return listen<AppEvent>(APP_EVENT_NAME, (event) => {
     handler(event.payload);
   });
+}
+
+function stringifyDebugError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack ?? error.message;
+  }
+
+  if (typeof error === 'string') {
+    return error;
+  }
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function normalizeTrackTableSettingsPayload(
+  trackTable: TrackTableSettings,
+): TrackTableSettings {
+  return {
+    ...trackTable,
+    visibleColumns: [...trackTable.visibleColumns],
+    columnWidths: Object.fromEntries(
+      Object.entries(trackTable.columnWidths).map(([key, value]) => [
+        key,
+        Math.max(0, Math.round(value)),
+      ]),
+    ),
+    secondarySort: trackTable.secondarySort.map((criterion) => ({ ...criterion })),
+  };
 }

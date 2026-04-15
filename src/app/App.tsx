@@ -34,6 +34,7 @@ import {
   playTrack,
   previousTrack,
   regeneratePlaylistIcon,
+  reportDebugMessage,
   replaceQueue,
   renamePlaylist,
   removeLibraryRoot,
@@ -165,6 +166,31 @@ export function App() {
     return () => {
       active = false;
       void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) {
+      return undefined;
+    }
+
+    const handleError = (event: ErrorEvent) => {
+      void reportDebugMessage(
+        'window.error',
+        event.error ?? event.message ?? 'Unknown window error',
+      );
+    };
+
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      void reportDebugMessage('window.unhandledrejection', event.reason);
+    };
+
+    window.addEventListener('error', handleError);
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+
+    return () => {
+      window.removeEventListener('error', handleError);
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
     };
   }, []);
 
@@ -615,9 +641,8 @@ export function App() {
       setBootstrap((current) =>
         current ? { ...current, settings } : current,
       );
-      setError(null);
     } catch (reason) {
-      setError(String(reason));
+      void reportDebugMessage('update_album_track_table_settings', reason);
     }
   }
 
@@ -627,9 +652,8 @@ export function App() {
       setBootstrap((current) =>
         current ? { ...current, settings } : current,
       );
-      setError(null);
     } catch (reason) {
-      setError(String(reason));
+      void reportDebugMessage('update_playlist_track_table_settings', reason);
     }
   }
 
@@ -639,9 +663,8 @@ export function App() {
       setBootstrap((current) =>
         current ? { ...current, settings } : current,
       );
-      setError(null);
     } catch (reason) {
-      setError(String(reason));
+      void reportDebugMessage('update_track_table_settings', reason);
     }
   }
 

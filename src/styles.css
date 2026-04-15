@@ -486,6 +486,17 @@ button:disabled {
   box-sizing: border-box;
 }
 
+.queue-pane,
+.queue-pane .section-card,
+.queue-pane .section-card__body {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.queue-pane {
+  overflow-x: hidden;
+}
+
 .queue-pane__header {
   display: flex;
   justify-content: space-between;
@@ -1180,6 +1191,15 @@ button:disabled {
   justify-content: space-between;
   gap: 0.75rem;
   min-height: 1.35rem;
+}
+
+.track-table__header-inner > span {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .track-table__resize-handle {
