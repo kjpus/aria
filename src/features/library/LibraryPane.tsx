@@ -11,15 +11,15 @@ type LibraryPaneProps = {
   tracks: ScannedTrack[];
   selectedAlbumId: string | null;
   onOpenAlbum: (albumId: string) => void;
-  onAddToPlaylist: (albumId: string) => void | Promise<void>;
-  onAddToQueue: (albumId: string) => void | Promise<void>;
-  onReplaceQueue: (albumId: string) => void | Promise<void>;
-  onPlayAlbum: (albumId: string) => void | Promise<void>;
-  onGoToDirectory: (albumId: string) => void | Promise<void>;
+  onAddToPlaylist: (albumIds: string[]) => void | Promise<void>;
+  onAddToQueue: (albumIds: string[]) => void | Promise<void>;
+  onReplaceQueue: (albumIds: string[]) => void | Promise<void>;
+  onPlayAlbum: (albumIds: string[]) => void | Promise<void>;
+  onGoToDirectory: (albumIds: string[]) => void | Promise<void>;
 };
 
 type AlbumContextMenuState = {
-  albumId: string;
+  albumIds: string[];
   x: number;
   y: number;
 };
@@ -37,6 +37,12 @@ export function LibraryPane({
   const menuRef = useRef<HTMLDivElement>(null);
   const [filter, setFilter] = useState('');
   const [contextMenu, setContextMenu] = useState<AlbumContextMenuState | null>(null);
+  const [selectedAlbumIds, setSelectedAlbumIds] = useState<string[]>(
+    selectedAlbumId ? [selectedAlbumId] : [],
+  );
+  const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(
+    selectedAlbumId,
+  );
 
   const albums = useMemo(() => buildAlbumCards(tracks), [tracks]);
   const filteredAlbums = useMemo(() => {
@@ -52,6 +58,10 @@ export function LibraryPane({
         .includes(query),
     );
   }, [albums, filter]);
+  const selectedAlbumSet = useMemo(
+    () => new Set(selectedAlbumIds),
+    [selectedAlbumIds],
+  );
 
   useEffect(() => {
     if (!contextMenu) {
@@ -86,28 +96,92 @@ export function LibraryPane({
     };
   }, [contextMenu]);
 
+  useEffect(() => {
+    const availableIds = new Set(filteredAlbums.map((album) => album.id));
+
+    setSelectedAlbumIds((current) => {
+      const next = current.filter((albumId) => availableIds.has(albumId));
+      return stringListsEqual(current, next) ? current : next;
+    });
+
+    setSelectionAnchorId((current) =>
+      current && availableIds.has(current) ? current : null,
+    );
+  }, [filteredAlbums]);
+
+  useEffect(() => {
+    if (!selectedAlbumId) {
+      return;
+    }
+
+    setSelectedAlbumIds((current) =>
+      current.includes(selectedAlbumId) ? current : [selectedAlbumId],
+    );
+    setSelectionAnchorId((current) => current ?? selectedAlbumId);
+  }, [selectedAlbumId]);
+
+  function handleAlbumClick(
+    event: ReactMouseEvent<HTMLButtonElement>,
+    albumId: string,
+  ) {
+    const orderedIds = filteredAlbums.map((album) => album.id);
+
+    if (event.shiftKey && selectionAnchorId) {
+      const anchorIndex = orderedIds.indexOf(selectionAnchorId);
+      const targetIndex = orderedIds.indexOf(albumId);
+
+      if (anchorIndex !== -1 && targetIndex !== -1) {
+        const [start, end] =
+          anchorIndex < targetIndex
+            ? [anchorIndex, targetIndex]
+            : [targetIndex, anchorIndex];
+        setSelectedAlbumIds(orderedIds.slice(start, end + 1));
+        return;
+      }
+    }
+
+    if (event.ctrlKey || event.metaKey) {
+      setSelectedAlbumIds((current) =>
+        current.includes(albumId)
+          ? current.filter((id) => id !== albumId)
+          : [...current, albumId],
+      );
+      setSelectionAnchorId(albumId);
+      return;
+    }
+
+    setSelectedAlbumIds([albumId]);
+    setSelectionAnchorId(albumId);
+    onOpenAlbum(albumId);
+  }
+
   function openContextMenu(
     event: ReactMouseEvent<HTMLButtonElement>,
     albumId: string,
   ) {
     event.preventDefault();
+    const albumIds = selectedAlbumSet.has(albumId) ? selectedAlbumIds : [albumId];
+    if (!selectedAlbumSet.has(albumId)) {
+      setSelectedAlbumIds([albumId]);
+      setSelectionAnchorId(albumId);
+    }
     setContextMenu({
-      albumId,
+      albumIds,
       x: Math.min(event.clientX, window.innerWidth - 240),
       y: Math.min(event.clientY, window.innerHeight - 220),
     });
   }
 
   async function runContextAction(
-    action: (albumId: string) => void | Promise<void>,
+    action: (albumIds: string[]) => void | Promise<void>,
   ) {
     if (!contextMenu) {
       return;
     }
 
-    const { albumId } = contextMenu;
+    const { albumIds } = contextMenu;
     setContextMenu(null);
-    await action(albumId);
+    await action(albumIds);
   }
 
   return (
@@ -134,13 +208,13 @@ export function LibraryPane({
           ) : (
             filteredAlbums.map((album) => {
               const art = toLocalImageSrc(album.artPath);
-              const selected = selectedAlbumId === album.id;
+              const selected = selectedAlbumSet.has(album.id);
 
               return (
                 <button
                   className={`album-card album-card--button${selected ? ' album-card--selected' : ''}`}
                   key={album.id}
-                  onClick={() => onOpenAlbum(album.id)}
+                  onClick={(event) => handleAlbumClick(event, album.id)}
                   onContextMenu={(event) => openContextMenu(event, album.id)}
                   type="button"
                 >
@@ -204,4 +278,18 @@ export function LibraryPane({
       </SectionCard>
     </div>
   );
+}
+
+function stringListsEqual(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+
+  return true;
 }

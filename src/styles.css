@@ -593,8 +593,32 @@ button:disabled {
 }
 
 .album-card--selected {
-  border-color: rgba(214, 177, 106, 0.58);
-  box-shadow: inset 0 0 0 1px rgba(214, 177, 106, 0.28);
+  border-color: rgba(214, 177, 106, 0.92);
+  background:
+    linear-gradient(180deg, rgba(214, 177, 106, 0.16), rgba(214, 177, 106, 0.08)),
+    rgba(255, 255, 255, 0.04);
+  box-shadow:
+    inset 0 0 0 1px rgba(214, 177, 106, 0.38),
+    0 16px 34px rgba(0, 0, 0, 0.24);
+}
+
+.album-card--selected:hover {
+  background:
+    linear-gradient(180deg, rgba(214, 177, 106, 0.2), rgba(214, 177, 106, 0.1)),
+    rgba(255, 255, 255, 0.05);
+}
+
+.album-card--selected .album-card__art {
+  box-shadow: 0 0 0 1px rgba(214, 177, 106, 0.42);
+}
+
+.album-card--selected .album-card__title {
+  color: #fff1cc;
+}
+
+.album-card--selected .album-card__detail,
+.album-card--selected .album-card__footer span {
+  color: rgba(255, 238, 198, 0.84);
 }
 
 .album-card__art {

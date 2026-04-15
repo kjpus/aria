@@ -51,6 +51,12 @@ pub struct PlaybackService {
     backend: Arc<Mutex<PlaybackBackend>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct OutputDeviceRefresh {
+    pub playback_snapshot: PlaybackSnapshot,
+    pub updated_preferences: Option<PlaybackPreferences>,
+}
+
 struct PlaybackBackend {
     shared_output: Option<MixerDeviceSink>,
     output_device: OutputDeviceSnapshot,
@@ -233,6 +239,62 @@ impl PlaybackService {
 
     pub fn list_output_devices(&self) -> Result<Vec<OutputDeviceSnapshot>, PlaybackError> {
         list_output_devices()
+    }
+
+    pub async fn handle_output_device_change(
+        &self,
+        devices: &[OutputDeviceSnapshot],
+    ) -> Result<Option<OutputDeviceRefresh>, PlaybackError> {
+        let mut updated_preferences = None;
+        let mut changed = false;
+
+        {
+            let mut backend = self.backend.lock().expect("playback backend poisoned");
+            let previous_preferences = backend.preferences.clone();
+            let active_device_available = device_exists(devices, &backend.output_device.id);
+            let selected_device_missing = backend
+                .preferences
+                .output_device_id
+                .as_ref()
+                .is_some_and(|device_id| !device_exists(devices, device_id));
+
+            if selected_device_missing || (backend.active.is_some() && !active_device_available) {
+                let mut fallback_preferences = backend.preferences.clone();
+                fallback_preferences.output_device_id = None;
+                if fallback_preferences != previous_preferences {
+                    updated_preferences = Some(fallback_preferences.clone());
+                }
+                rebind_output(&mut backend, fallback_preferences.clone(), false)?;
+                changed = true;
+            } else if let Some(current_snapshot) = devices
+                .iter()
+                .find(|device| device.id == backend.output_device.id)
+                .cloned()
+            {
+                if current_snapshot != backend.output_device {
+                    backend.output_device = current_snapshot;
+                    changed = true;
+                }
+            } else if let Some(default_snapshot) =
+                devices.iter().find(|device| device.is_default).cloned()
+            {
+                if default_snapshot != backend.output_device {
+                    backend.output_device = default_snapshot;
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            return Ok(None);
+        }
+
+        let mut state = self.state.write().await;
+        self.refresh_state(&mut state);
+        Ok(Some(OutputDeviceRefresh {
+            playback_snapshot: state.clone(),
+            updated_preferences,
+        }))
     }
 
     pub async fn update_preferences(
@@ -532,25 +594,42 @@ fn start_request(
     if backend.preferences.exclusive_mode {
         #[cfg(target_os = "windows")]
         {
-            let target = resolve_output_target(&backend.preferences, false)?;
-            backend.shared_output = None;
-            let player = ExclusivePlayer::open(
-                &target.snapshot.id,
-                &request.path,
-                start_position,
-                start_paused,
-            )?;
-            backend.last_request = Some(request.clone());
-            backend.output_device = target.snapshot;
-            backend.active = Some(ActivePlayback::Exclusive { player, request });
-            return Ok(());
+            match resolve_output_target(&backend.preferences, false).and_then(|target| {
+                ExclusivePlayer::open(
+                    &target.snapshot.id,
+                    &request.path,
+                    start_position,
+                    start_paused,
+                )
+                .map(|player| (player, target.snapshot))
+            }) {
+                Ok((player, snapshot)) => {
+                    backend.shared_output = None;
+                    backend.last_request = Some(request.clone());
+                    backend.output_device = snapshot;
+                    backend.active = Some(ActivePlayback::Exclusive { player, request });
+                    return Ok(());
+                }
+                Err(error) => {
+                    eprintln!(
+                        "exclusive playback failed for '{}' on '{}', retrying shared mode: {error}",
+                        request.path,
+                        backend
+                            .preferences
+                            .output_device_id
+                            .as_deref()
+                            .unwrap_or("default output")
+                    );
+                }
+            }
         }
 
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = start_position;
-            let _ = start_paused;
-            return Err(PlaybackError::ExclusiveModeUnavailable);
+            eprintln!(
+                "exclusive playback requested for '{}', but this platform uses shared mode instead",
+                request.path
+            );
         }
     }
 
@@ -693,7 +772,7 @@ fn open_shared_output(
     preferences: &PlaybackPreferences,
     strict_selected: bool,
 ) -> Result<(MixerDeviceSink, OutputDeviceSnapshot), PlaybackError> {
-    let target = resolve_output_target(preferences, strict_selected)?;
+    let target = resolve_output_target(&shared_mode_preferences(preferences), strict_selected)?;
     let mut output = DeviceSinkBuilder::from_device(target.device)
         .map_err(|error| PlaybackError::Output(error.to_string()))?
         .open_sink_or_fallback()
@@ -861,4 +940,14 @@ fn output_backend_label(exclusive_mode: bool) -> String {
     } else {
         "rodio".into()
     }
+}
+
+fn shared_mode_preferences(preferences: &PlaybackPreferences) -> PlaybackPreferences {
+    let mut shared = preferences.clone();
+    shared.exclusive_mode = false;
+    shared
+}
+
+fn device_exists(devices: &[OutputDeviceSnapshot], device_id: &str) -> bool {
+    devices.iter().any(|device| device.id == device_id)
 }

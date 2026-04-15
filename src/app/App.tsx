@@ -86,7 +86,10 @@ function applyEvent(current: AppBootstrap | null, event: AppEvent): AppBootstrap
       }
       return current;
     case 'playback':
-      return { ...current, playback: event.payload.payload };
+      if (event.payload.kind === 'snapshot_changed') {
+        return { ...current, playback: event.payload.payload };
+      }
+      return current;
     case 'playlists':
       return { ...current, playlists: event.payload.payload };
     case 'settings':
@@ -140,6 +143,14 @@ export function App() {
       });
 
     const unlistenPromise = listenToAppEvents((event) => {
+      if (
+        event.topic === 'playback' &&
+        event.payload.kind === 'output_devices_changed'
+      ) {
+        setOutputDevices(event.payload.payload);
+        return;
+      }
+
       setBootstrap((current) => applyEvent(current, event));
     });
 
@@ -435,6 +446,25 @@ export function App() {
     }
   }
 
+  async function handleAddAlbumsToQueue(albumIds: string[]) {
+    if (!bootstrap) {
+      return;
+    }
+
+    const requests = buildAlbumRequestsForSelection(bootstrap.library.tracks, albumIds);
+    if (requests.length === 0) {
+      return;
+    }
+
+    try {
+      const playback = await addToQueue(requests);
+      setBootstrap((current) => (current ? { ...current, playback } : current));
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   async function handleReplaceQueue(albumId: string, startPlaying: boolean) {
     if (!bootstrap) {
       return;
@@ -457,6 +487,31 @@ export function App() {
     }
   }
 
+  async function handleReplaceQueueForAlbums(
+    albumIds: string[],
+    startPlaying: boolean,
+  ) {
+    if (!bootstrap) {
+      return;
+    }
+
+    const requests = buildAlbumRequestsForSelection(bootstrap.library.tracks, albumIds);
+    if (requests.length === 0) {
+      return;
+    }
+
+    try {
+      const playback = await replaceQueue(requests, startPlaying);
+      setBootstrap((current) => (current ? { ...current, playback } : current));
+      if (startPlaying && albumIds.length > 0) {
+        setSelectedAlbumId(albumIds[0]);
+      }
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   async function handleGoToAlbumDirectory(albumId: string) {
     if (!bootstrap) {
       return;
@@ -469,6 +524,33 @@ export function App() {
 
     try {
       await openDirectory(path);
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function handleGoToAlbumDirectories(albumIds: string[]) {
+    if (!bootstrap) {
+      return;
+    }
+
+    const paths = Array.from(
+      new Set(
+        albumIds
+          .map((albumId) => directoryForAlbum(bootstrap.library.tracks, albumId))
+          .filter((path): path is string => Boolean(path)),
+      ),
+    );
+
+    if (paths.length === 0) {
+      return;
+    }
+
+    try {
+      for (const path of paths) {
+        await openDirectory(path);
+      }
       setError(null);
     } catch (reason) {
       setError(String(reason));
@@ -680,6 +762,30 @@ export function App() {
     openPlaylistPicker(
       tracksForSelection.map((track) => track.id),
       tracksForSelection[0]?.mappedFields.album?.[0] ?? 'New playlist',
+    );
+  }
+
+  function handleAddAlbumsToPlaylist(albumIds: string[]) {
+    if (!bootstrap) {
+      return;
+    }
+
+    const tracksForSelection = albumIds.flatMap((albumId) =>
+      tracksForAlbum(bootstrap.library.tracks, albumId),
+    );
+
+    if (tracksForSelection.length === 0) {
+      return;
+    }
+
+    const suggestedName =
+      albumIds.length === 1
+        ? tracksForSelection[0]?.mappedFields.album?.[0] ?? 'New playlist'
+        : `Playlist from ${albumIds.length} albums`;
+
+    openPlaylistPicker(
+      tracksForSelection.map((track) => track.id),
+      suggestedName,
     );
   }
 
@@ -906,12 +1012,13 @@ export function App() {
         <section className="workspace__content">
           {activePane === 'library' ? (
             <LibraryPane
-              onAddToPlaylist={handleAddAlbumToPlaylist}
-              onAddToQueue={handleAddAlbumToQueue}
-              onGoToDirectory={handleGoToAlbumDirectory}
+              onAddToPlaylist={handleAddAlbumsToPlaylist}
+              onAddToQueue={handleAddAlbumsToQueue}
+              onGoToDirectory={handleGoToAlbumDirectories}
               onOpenAlbum={handleOpenAlbum}
-              onPlayAlbum={(albumId) => handleReplaceQueue(albumId, true)}
-              onReplaceQueue={(albumId) => handleReplaceQueue(albumId, false)}
+              onPlayAlbum={(albumIds) => handleReplaceQueueForAlbums(albumIds, true)}
+              onReplaceQueue={(albumIds) =>
+                handleReplaceQueueForAlbums(albumIds, false)}
               selectedAlbumId={selectedAlbumId}
               tracks={bootstrap.library.tracks}
             />
@@ -1055,4 +1162,11 @@ function normalizeLibraryPath(path: string) {
 
 function libraryPathsEqual(left: string, right: string) {
   return normalizeLibraryPath(left) === normalizeLibraryPath(right);
+}
+
+function buildAlbumRequestsForSelection(
+  tracks: ScannedTrack[],
+  albumIds: string[],
+) {
+  return albumIds.flatMap((albumId) => buildAlbumTrackRequests(tracks, albumId));
 }

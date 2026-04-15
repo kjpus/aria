@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{LibrarySnapshot, PlaybackSnapshot, PlaylistSnapshot, ScanProgress, SettingsSnapshot};
+use crate::{
+    LibrarySnapshot, OutputDeviceSnapshot, PlaybackSnapshot, PlaylistSnapshot, ScanProgress,
+    SettingsSnapshot,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
@@ -13,6 +16,7 @@ pub enum LibraryEvent {
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum PlaybackEvent {
     SnapshotChanged(PlaybackSnapshot),
+    OutputDevicesChanged(Vec<OutputDeviceSnapshot>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

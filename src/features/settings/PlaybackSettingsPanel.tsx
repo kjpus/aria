@@ -82,8 +82,8 @@ export function PlaybackSettingsPanel({
 
       <p className="dialog-section__note">
         {exclusiveSupported
-          ? 'Aria will try a WASAPI-exclusive output stream on Windows for the selected device and prefer track-native PCM layouts first. If the device rejects every compatible exclusive PCM layout, playback will fail instead of silently falling back to shared mode.'
-          : 'Exclusive WASAPI is only available for Windows output endpoints that Aria can address directly.'}
+          ? 'Aria will try a WASAPI-exclusive output stream on Windows for the selected device and prefer track-native PCM layouts first. If the device rejects exclusive playback, Aria will retry shared mode automatically.'
+          : 'Exclusive WASAPI is only available for Windows output endpoints that Aria can address directly. Aria also refreshes output-device availability automatically when Windows audio devices change.'}
       </p>
     </SectionCard>
   );

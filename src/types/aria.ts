@@ -149,10 +149,15 @@ export type LibraryEvent =
       payload: ScanProgress;
     };
 
-export type PlaybackEvent = {
-  kind: 'snapshot_changed';
-  payload: PlaybackSnapshot;
-};
+export type PlaybackEvent =
+  | {
+      kind: 'snapshot_changed';
+      payload: PlaybackSnapshot;
+    }
+  | {
+      kind: 'output_devices_changed';
+      payload: OutputDeviceSnapshot[];
+    };
 
 export type PlaylistEvent = {
   kind: 'snapshot_changed';

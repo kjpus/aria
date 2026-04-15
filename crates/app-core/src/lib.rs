@@ -51,6 +51,7 @@ impl AppCore {
 
         core.spawn_persistence_worker(database);
         core.spawn_playback_publisher();
+        core.spawn_output_device_monitor();
         Ok(core)
     }
 
@@ -455,6 +456,67 @@ impl AppCore {
                 });
             })
             .expect("failed to spawn aria-playback-publisher");
+    }
+
+    fn spawn_output_device_monitor(&self) {
+        let playback = self.playback.clone();
+        let settings = self.settings.clone();
+        let events = self.events.clone();
+
+        std::thread::Builder::new()
+            .name("aria-output-device-monitor".into())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .expect("failed to create output device monitor runtime");
+
+                runtime.block_on(async move {
+                    let mut last_devices = playback.list_output_devices().unwrap_or_default();
+
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+
+                        let devices = match playback.list_output_devices() {
+                            Ok(devices) => devices,
+                            Err(error) => {
+                                eprintln!("failed to list output devices: {error}");
+                                continue;
+                            }
+                        };
+
+                        if devices != last_devices {
+                            last_devices = devices.clone();
+                            let _ = events.send(AppEvent::Playback(
+                                PlaybackEvent::OutputDevicesChanged(devices.clone()),
+                            ));
+                        }
+
+                        match playback.handle_output_device_change(&devices).await {
+                            Ok(Some(refresh)) => {
+                                let _ = events.send(AppEvent::Playback(
+                                    PlaybackEvent::SnapshotChanged(
+                                        refresh.playback_snapshot.clone(),
+                                    ),
+                                ));
+
+                                if let Some(updated_preferences) =
+                                    refresh.updated_preferences.clone()
+                                {
+                                    let settings_snapshot =
+                                        settings.update_playback(updated_preferences).await;
+                                    let _ = events.send(AppEvent::Settings(settings_snapshot));
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                eprintln!("failed to refresh output device state: {error}");
+                            }
+                        }
+                    }
+                });
+            })
+            .expect("failed to spawn aria-output-device-monitor");
     }
 }
 
