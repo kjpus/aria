@@ -499,6 +499,19 @@ impl PlaybackService {
         Ok(state.clone())
     }
 
+    pub fn shutdown(&self) {
+        {
+            let mut backend = self.backend.lock().expect("playback backend poisoned");
+            backend.active = None;
+            backend.shared_output = None;
+        }
+
+        let mut state = self.state.blocking_write();
+        self.refresh_state(&mut state);
+        state.status = PlaybackStatus::Stopped;
+        state.position_ms = 0;
+    }
+
     fn refresh_state(&self, state: &mut PlaybackSnapshot) {
         let mut backend = self.backend.lock().expect("playback backend poisoned");
         sync_snapshot_queue_state(state, &backend);

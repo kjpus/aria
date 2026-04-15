@@ -869,6 +869,8 @@ button:disabled {
   background: var(--context-menu-bg);
   box-shadow: var(--context-menu-shadow);
   backdrop-filter: blur(18px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .album-context-menu button {

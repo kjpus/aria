@@ -68,6 +68,10 @@ impl AppCore {
         }
     }
 
+    pub fn shutdown(&self) {
+        self.playback.shutdown();
+    }
+
     pub async fn add_library_root(&self, path: String) -> Result<LibrarySnapshot, AppCoreError> {
         let snapshot = self.library.add_root(path).await?;
         self.emit(AppEvent::Library(LibraryEvent::SnapshotChanged(

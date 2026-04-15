@@ -14,6 +14,7 @@ pub struct AppState {
 pub fn run() {
     let core = Arc::new(AppCore::new().expect("failed to initialize Aria core"));
     let setup_core = core.clone();
+    let run_core = core.clone();
 
     tauri::Builder::default()
         .manage(AppState { core })
@@ -66,6 +67,17 @@ pub fn run() {
             commands::settings::list_output_devices,
             commands::settings::update_playback_preferences
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running aria");
+        .build(tauri::generate_context!())
+        .expect("error while building aria")
+        .run(move |_app_handle, event| match event {
+            tauri::RunEvent::WindowEvent {
+                event: tauri::WindowEvent::CloseRequested { .. },
+                ..
+            }
+            | tauri::RunEvent::ExitRequested { .. }
+            | tauri::RunEvent::Exit => {
+                run_core.shutdown();
+            }
+            _ => {}
+        });
 }

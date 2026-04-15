@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { ClearableInput } from '../../components/ClearableInput';
 import { SectionCard } from '../../components/SectionCard';
 import { toLocalImageSrc } from '../../lib/runtime';
@@ -20,8 +21,11 @@ type LibraryPaneProps = {
 
 type AlbumContextMenuState = {
   albumIds: string[];
+  anchorX: number;
+  anchorY: number;
   x: number;
   y: number;
+  maxHeight: number;
 };
 
 export function LibraryPane({
@@ -97,6 +101,35 @@ export function LibraryPane({
   }, [contextMenu]);
 
   useEffect(() => {
+    if (!contextMenu || !menuRef.current) {
+      return;
+    }
+
+    const menuBounds = menuRef.current.getBoundingClientRect();
+    const nextPlacement = resolveContextMenuPlacement(
+      contextMenu.anchorX,
+      contextMenu.anchorY,
+      menuBounds.width,
+      menuBounds.height,
+    );
+
+    if (
+      nextPlacement.x !== contextMenu.x ||
+      nextPlacement.y !== contextMenu.y ||
+      nextPlacement.maxHeight !== contextMenu.maxHeight
+    ) {
+      setContextMenu((current) =>
+        current
+          ? {
+              ...current,
+              ...nextPlacement,
+            }
+          : current,
+      );
+    }
+  }, [contextMenu]);
+
+  useEffect(() => {
     const availableIds = new Set(filteredAlbums.map((album) => album.id));
 
     setSelectedAlbumIds((current) => {
@@ -167,8 +200,9 @@ export function LibraryPane({
     }
     setContextMenu({
       albumIds,
-      x: Math.min(event.clientX, window.innerWidth - 240),
-      y: Math.min(event.clientY, window.innerHeight - 220),
+      ...resolveContextMenuPlacement(event.clientX, event.clientY, 240, 260),
+      anchorX: event.clientX,
+      anchorY: event.clientY,
     });
   }
 
@@ -252,32 +286,74 @@ export function LibraryPane({
           )}
         </div>
 
-        {contextMenu ? (
-          <div
-            className="album-context-menu"
-            ref={menuRef}
-            style={{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }}
-          >
-            <button onClick={() => void runContextAction(onAddToPlaylist)} type="button">
-              Add to playlist
-            </button>
-            <button onClick={() => void runContextAction(onAddToQueue)} type="button">
-              Add to queue
-            </button>
-            <button onClick={() => void runContextAction(onReplaceQueue)} type="button">
-              Put in queue
-            </button>
-            <button onClick={() => void runContextAction(onPlayAlbum)} type="button">
-              Play album
-            </button>
-            <button onClick={() => void runContextAction(onGoToDirectory)} type="button">
-              Go to directory
-            </button>
-          </div>
-        ) : null}
+        {contextMenu
+          ? createPortal(
+              <div
+                className="album-context-menu"
+                ref={menuRef}
+                style={{
+                  left: `${contextMenu.x}px`,
+                  top: `${contextMenu.y}px`,
+                  maxHeight: `${contextMenu.maxHeight}px`,
+                }}
+              >
+                <button
+                  onClick={() => void runContextAction(onAddToPlaylist)}
+                  type="button"
+                >
+                  Add to playlist
+                </button>
+                <button onClick={() => void runContextAction(onAddToQueue)} type="button">
+                  Add to queue
+                </button>
+                <button
+                  onClick={() => void runContextAction(onReplaceQueue)}
+                  type="button"
+                >
+                  Put in queue
+                </button>
+                <button onClick={() => void runContextAction(onPlayAlbum)} type="button">
+                  Play album
+                </button>
+                <button
+                  onClick={() => void runContextAction(onGoToDirectory)}
+                  type="button"
+                >
+                  Go to directory
+                </button>
+              </div>,
+              document.body,
+            )
+          : null}
       </SectionCard>
     </div>
   );
+}
+
+function resolveContextMenuPlacement(
+  anchorX: number,
+  anchorY: number,
+  menuWidth: number,
+  menuHeight: number,
+) {
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const playerBar = document.querySelector('.player-bar');
+  const playerTop =
+    playerBar instanceof HTMLElement
+      ? playerBar.getBoundingClientRect().top
+      : viewportHeight;
+  const padding = 12;
+  const rightLimit = Math.max(padding, viewportWidth - menuWidth - padding);
+  const bottomLimit = Math.max(padding, playerTop - padding);
+  const left = Math.max(padding, Math.min(anchorX, rightLimit));
+  const top = Math.max(
+    padding,
+    Math.min(anchorY, Math.max(padding, bottomLimit - menuHeight)),
+  );
+  const maxHeight = Math.max(120, bottomLimit - top);
+
+  return { x: left, y: top, maxHeight };
 }
 
 function stringListsEqual(left: string[], right: string[]): boolean {
