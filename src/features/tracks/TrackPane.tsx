@@ -414,9 +414,13 @@ export function TrackPane({
     () => buildAlbumGroups(filteredTracks, albumCards),
     [albumCards, filteredTracks],
   );
+  const visibleTracksInOrder = useMemo(
+    () => albumGroups.flatMap((group) => group.tracks),
+    [albumGroups],
+  );
 
   useEffect(() => {
-    const availableIds = new Set(filteredTracks.map((track) => track.id));
+    const availableIds = new Set(visibleTracksInOrder.map((track) => track.id));
 
     setSelectedTrackIds((current) => {
       const next = current.filter((trackId) => availableIds.has(trackId));
@@ -426,7 +430,7 @@ export function TrackPane({
     setSelectionAnchorId((current) =>
       current && availableIds.has(current) ? current : null,
     );
-  }, [filteredTracks]);
+  }, [visibleTracksInOrder]);
 
   function toggleColumn(key: string) {
     setVisibleColumns((current) => {
@@ -478,7 +482,7 @@ export function TrackPane({
     event: ReactMouseEvent<HTMLTableRowElement>,
     trackId: string,
   ) {
-    const orderedIds = filteredTracks.map((track) => track.id);
+    const orderedIds = visibleTracksInOrder.map((track) => track.id);
 
     if (event.shiftKey && selectionAnchorId) {
       const anchorIndex = orderedIds.indexOf(selectionAnchorId);
@@ -512,7 +516,7 @@ export function TrackPane({
 
   function handleTrackDoubleClick(track: ScannedTrack) {
     const selectedTracks = selectedTrackSet.has(track.id)
-      ? selectTracksInOrder(filteredTracks, selectedTrackIds)
+      ? selectTracksInOrder(visibleTracksInOrder, selectedTrackIds)
       : [track];
 
     void onPlayTracks(selectedTracks);
@@ -526,7 +530,7 @@ export function TrackPane({
     event.stopPropagation();
 
     const nextSelectedTrackIds = selectedTrackSet.has(track.id)
-      ? selectTrackIdsInOrder(filteredTracks, selectedTrackIds)
+      ? selectTrackIdsInOrder(visibleTracksInOrder, selectedTrackIds)
       : [track.id];
 
     if (!selectedTrackSet.has(track.id)) {
@@ -564,7 +568,10 @@ export function TrackPane({
       return;
     }
 
-    const selectedTracks = selectTracksInOrder(filteredTracks, trackContextMenu.trackIds);
+    const selectedTracks = selectTracksInOrder(
+      visibleTracksInOrder,
+      trackContextMenu.trackIds,
+    );
     if (selectedTracks.length === 0) {
       setTrackContextMenu(null);
       return;
@@ -672,7 +679,10 @@ export function TrackPane({
       return;
     }
 
-    const selectedTracks = selectTracksInOrder(filteredTracks, trackContextMenu.trackIds);
+    const selectedTracks = selectTracksInOrder(
+      visibleTracksInOrder,
+      trackContextMenu.trackIds,
+    );
     setTrackContextMenu(null);
     openExportDialog(selectedTracks);
   }
@@ -682,7 +692,10 @@ export function TrackPane({
       return;
     }
 
-    const selectedTracks = selectTracksInOrder(filteredTracks, trackContextMenu.trackIds);
+    const selectedTracks = selectTracksInOrder(
+      visibleTracksInOrder,
+      trackContextMenu.trackIds,
+    );
     setTrackContextMenu(null);
     openEditTagsDialog(selectedTracks);
   }
