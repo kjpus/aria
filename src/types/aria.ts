@@ -16,6 +16,7 @@ export type TrackTableSettings = {
 export type PlaybackPreferences = {
   outputDeviceId: string | null;
   exclusiveMode: boolean;
+  volume: number;
 };
 
 export type LibraryRoot = {

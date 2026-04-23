@@ -82,7 +82,7 @@ export function PlaybackSettingsPanel({
 
       <p className="dialog-section__note">
         {exclusiveSupported
-          ? 'Aria will use a WASAPI-exclusive output stream on Windows for the selected device and prefer track-native PCM layouts first. If exclusive playback cannot be opened, Aria will not fall back to shared mode while this setting is enabled.'
+          ? 'Aria will use a WASAPI-exclusive output stream on Windows for the selected device and prefer track-native PCM layouts first. If exclusive playback cannot be opened, Aria will not fall back to shared mode while this setting is enabled. The player-strip volume control is software attenuation, so leave it at 100% if you want an unchanged digital stream.'
           : 'Exclusive WASAPI is only available for Windows output endpoints that Aria can address directly. Aria also refreshes output-device availability automatically when Windows audio devices change.'}
       </p>
     </SectionCard>

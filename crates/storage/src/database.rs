@@ -564,6 +564,7 @@ mod tests {
             playback: PlaybackPreferences {
                 output_device_id: Some("wasapi:test-device".into()),
                 exclusive_mode: false,
+                volume: 1.0,
             },
         };
         let playback = PlaybackSessionSnapshot {

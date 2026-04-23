@@ -182,6 +182,7 @@ impl PlaybackService {
         preferences: PlaybackPreferences,
         session: PlaybackSessionSnapshot,
     ) -> Self {
+        let preferences = normalize_playback_preferences(preferences);
         let output_device = resolve_output_snapshot(&preferences, false)
             .unwrap_or_else(|_| OutputDeviceSnapshot::default());
         let normalized_session = normalize_session(session);
@@ -305,9 +306,16 @@ impl PlaybackService {
         &self,
         preferences: PlaybackPreferences,
     ) -> Result<PlaybackSnapshot, PlaybackError> {
+        let preferences = normalize_playback_preferences(preferences);
+
         {
             let mut backend = self.backend.lock().expect("playback backend poisoned");
-            rebind_output(&mut backend, preferences, true)?;
+            if output_binding_changed(&backend.preferences, &preferences) {
+                rebind_output(&mut backend, preferences, true)?;
+            } else {
+                backend.preferences = preferences;
+                apply_active_volume(&backend);
+            }
         }
 
         let mut state = self.state.write().await;
@@ -617,6 +625,7 @@ fn start_request(
                     &request.path,
                     start_position,
                     start_paused,
+                    backend.preferences.volume,
                 )
                 .map(|player| (player, target.snapshot))
             }) {
@@ -675,6 +684,7 @@ fn start_request(
             .mixer(),
     );
     player.append(decoder);
+    player.set_volume(backend.preferences.volume);
     if start_position > Duration::ZERO {
         let _ = player.try_seek(start_position);
     }
@@ -764,6 +774,8 @@ fn rebind_output(
     preferences: PlaybackPreferences,
     strict_selected: bool,
 ) -> Result<(), PlaybackError> {
+    let preferences = normalize_playback_preferences(preferences);
+
     if preferences.exclusive_mode && !exclusive_capable_for_preferences(&preferences) {
         return Err(PlaybackError::ExclusiveModeUnavailable);
     }
@@ -785,6 +797,17 @@ fn rebind_output(
     }
 
     Ok(())
+}
+
+fn apply_active_volume(backend: &PlaybackBackend) {
+    let volume = backend.preferences.volume;
+
+    match backend.active.as_ref() {
+        Some(ActivePlayback::Shared { player, .. }) => player.set_volume(volume),
+        #[cfg(target_os = "windows")]
+        Some(ActivePlayback::Exclusive { player, .. }) => player.set_volume(volume),
+        None => {}
+    }
 }
 
 fn open_shared_output(
@@ -982,6 +1005,29 @@ fn shared_mode_preferences(preferences: &PlaybackPreferences) -> PlaybackPrefere
     let mut shared = preferences.clone();
     shared.exclusive_mode = false;
     shared
+}
+
+fn output_binding_changed(
+    current: &PlaybackPreferences,
+    next: &PlaybackPreferences,
+) -> bool {
+    current.output_device_id != next.output_device_id
+        || current.exclusive_mode != next.exclusive_mode
+}
+
+fn normalize_playback_preferences(
+    mut preferences: PlaybackPreferences,
+) -> PlaybackPreferences {
+    preferences.volume = normalize_volume(preferences.volume);
+    preferences
+}
+
+fn normalize_volume(volume: f32) -> f32 {
+    if !volume.is_finite() {
+        return 1.0;
+    }
+
+    volume.clamp(0.0, 1.0)
 }
 
 fn device_exists(devices: &[OutputDeviceSnapshot], device_id: &str) -> bool {

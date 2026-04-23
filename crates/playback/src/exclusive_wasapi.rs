@@ -6,7 +6,7 @@ use std::{
     path::Path,
     ptr,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
         Arc,
     },
@@ -51,6 +51,7 @@ struct ExclusiveState {
     paused: AtomicBool,
     finished: AtomicBool,
     position_ms: AtomicU64,
+    volume_bits: AtomicU32,
 }
 
 enum ExclusiveCommand {
@@ -119,6 +120,7 @@ impl ExclusivePlayer {
         path: &str,
         start_position: Duration,
         start_paused: bool,
+        volume: f32,
     ) -> Result<Self, PlaybackError> {
         let endpoint_id = wasapi_endpoint_id(device_id).ok_or_else(|| {
             PlaybackError::Output(format!("unsupported Windows device id: {device_id}"))
@@ -127,6 +129,7 @@ impl ExclusivePlayer {
             paused: AtomicBool::new(start_paused),
             finished: AtomicBool::new(false),
             position_ms: AtomicU64::new(start_position.as_millis() as u64),
+            volume_bits: AtomicU32::new(normalize_volume(volume).to_bits()),
         });
         let (command_tx, command_rx) = mpsc::channel();
         let (init_tx, init_rx) = mpsc::channel();
@@ -184,6 +187,12 @@ impl ExclusivePlayer {
 
     pub fn get_pos(&self) -> Duration {
         Duration::from_millis(self.state.position_ms.load(Ordering::Relaxed))
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        self.state
+            .volume_bits
+            .store(normalize_volume(volume).to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -269,6 +278,7 @@ impl ExclusiveDecoder {
         &mut self,
         destination: &mut [u8],
         output_format: WasapiPcmFormat,
+        volume: f32,
     ) -> Result<usize, PlaybackError> {
         let mut copied = 0usize;
 
@@ -278,7 +288,7 @@ impl ExclusiveDecoder {
                     break;
                 }
 
-                self.refill_pending_bytes(output_format)?;
+                self.refill_pending_bytes(output_format, volume)?;
                 if self.pending_cursor >= self.pending_bytes.len() {
                     break;
                 }
@@ -299,6 +309,7 @@ impl ExclusiveDecoder {
     fn refill_pending_bytes(
         &mut self,
         output_format: WasapiPcmFormat,
+        volume: f32,
     ) -> Result<(), PlaybackError> {
         self.pending_bytes.clear();
         self.pending_cursor = 0;
@@ -324,7 +335,12 @@ impl ExclusiveDecoder {
 
             match self.decoder.decode(&packet) {
                 Ok(audio_buffer) => {
-                    write_audio_buffer_bytes(&mut self.pending_bytes, audio_buffer, output_format)?;
+                    write_audio_buffer_bytes(
+                        &mut self.pending_bytes,
+                        audio_buffer,
+                        output_format,
+                        volume,
+                    )?;
                     if self.pending_bytes.is_empty() {
                         continue;
                     }
@@ -694,7 +710,8 @@ fn fill_render_buffer(
     };
     let bytes = unsafe { std::slice::from_raw_parts_mut(buffer as *mut u8, byte_count) };
 
-    let bytes_written = decoder.copy_next_bytes_into(bytes, output_format)?;
+    let bytes_written =
+        decoder.copy_next_bytes_into(bytes, output_format, current_volume(state))?;
     if bytes_written < byte_count {
         bytes[bytes_written..].fill(0);
     }
@@ -833,6 +850,7 @@ fn write_audio_buffer_bytes(
     destination: &mut Vec<u8>,
     audio_buffer: AudioBufferRef<'_>,
     output_format: WasapiPcmFormat,
+    volume: f32,
 ) -> Result<(), PlaybackError> {
     destination.clear();
 
@@ -841,18 +859,21 @@ fn write_audio_buffer_bytes(
             let mut buffer =
                 SampleBuffer::<i16>::new(audio_buffer.frames() as u64, *audio_buffer.spec());
             buffer.copy_interleaved_ref(audio_buffer);
+            apply_i16_volume(buffer.samples_mut(), volume);
             destination.extend_from_slice(as_bytes(buffer.samples()));
         }
         WasapiSampleKind::I32 => {
             let mut buffer =
                 SampleBuffer::<i32>::new(audio_buffer.frames() as u64, *audio_buffer.spec());
             buffer.copy_interleaved_ref(audio_buffer);
+            apply_i32_volume(buffer.samples_mut(), volume);
             destination.extend_from_slice(as_bytes(buffer.samples()));
         }
         WasapiSampleKind::F32 => {
             let mut buffer =
                 SampleBuffer::<f32>::new(audio_buffer.frames() as u64, *audio_buffer.spec());
             buffer.copy_interleaved_ref(audio_buffer);
+            apply_f32_volume(buffer.samples_mut(), volume);
             destination.extend_from_slice(as_bytes(buffer.samples()));
         }
     }
@@ -950,5 +971,69 @@ fn as_bytes<T>(samples: &[T]) -> &[u8] {
             samples.as_ptr() as *const u8,
             std::mem::size_of_val(samples),
         )
+    }
+}
+
+fn current_volume(state: &ExclusiveState) -> f32 {
+    f32::from_bits(state.volume_bits.load(Ordering::Relaxed))
+}
+
+fn normalize_volume(volume: f32) -> f32 {
+    if !volume.is_finite() {
+        return 1.0;
+    }
+
+    volume.clamp(0.0, 1.0)
+}
+
+fn apply_i16_volume(samples: &mut [i16], volume: f32) {
+    if volume >= 0.999_9 {
+        return;
+    }
+
+    if volume <= 0.000_1 {
+        samples.fill(0);
+        return;
+    }
+
+    for sample in samples {
+        let scaled = (*sample as f32 * volume)
+            .round()
+            .clamp(i16::MIN as f32, i16::MAX as f32);
+        *sample = scaled as i16;
+    }
+}
+
+fn apply_i32_volume(samples: &mut [i32], volume: f32) {
+    if volume >= 0.999_9 {
+        return;
+    }
+
+    if volume <= 0.000_1 {
+        samples.fill(0);
+        return;
+    }
+
+    let factor = volume as f64;
+    for sample in samples {
+        let scaled = (*sample as f64 * factor)
+            .round()
+            .clamp(i32::MIN as f64, i32::MAX as f64);
+        *sample = scaled as i32;
+    }
+}
+
+fn apply_f32_volume(samples: &mut [f32], volume: f32) {
+    if volume >= 0.999_9 {
+        return;
+    }
+
+    if volume <= 0.000_1 {
+        samples.fill(0.0);
+        return;
+    }
+
+    for sample in samples {
+        *sample = (*sample * volume).clamp(-1.0, 1.0);
     }
 }

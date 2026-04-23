@@ -254,6 +254,7 @@ let previewBootstrap: AppBootstrap = {
     playback: {
       outputDeviceId: null,
       exclusiveMode: false,
+      volume: 1,
     },
   },
 };
@@ -818,23 +819,27 @@ export async function listOutputDevices(): Promise<OutputDeviceSnapshot[]> {
 export async function updatePlaybackPreferences(
   playback: PlaybackPreferences,
 ): Promise<SettingsSnapshot> {
+  const normalizedPlayback = normalizePlaybackPreferencesPayload(playback);
+
   if (!isTauriRuntime) {
     previewBootstrap = {
       ...previewBootstrap,
       settings: {
         ...previewBootstrap.settings,
-        playback,
+        playback: normalizedPlayback,
       },
       playback: {
         ...previewBootstrap.playback,
         outputDevice:
-          previewOutputDevices.find((device) => device.id === playback.outputDeviceId) ??
+          previewOutputDevices.find((device) => device.id === normalizedPlayback.outputDeviceId) ??
           previewOutputDevices[0],
       },
     };
     return previewBootstrap.settings;
   }
-  return invoke<SettingsSnapshot>('update_playback_preferences', { playback });
+  return invoke<SettingsSnapshot>('update_playback_preferences', {
+    playback: normalizedPlayback,
+  });
 }
 
 export async function listenToAppEvents(
@@ -880,4 +885,21 @@ function normalizeTrackTableSettingsPayload(
     ),
     secondarySort: trackTable.secondarySort.map((criterion) => ({ ...criterion })),
   };
+}
+
+function normalizePlaybackPreferencesPayload(
+  playback: PlaybackPreferences,
+): PlaybackPreferences {
+  return {
+    ...playback,
+    volume: clampPlaybackVolume(playback.volume),
+  };
+}
+
+function clampPlaybackVolume(volume: number): number {
+  if (!Number.isFinite(volume)) {
+    return 1;
+  }
+
+  return Math.min(Math.max(volume, 0), 1);
 }

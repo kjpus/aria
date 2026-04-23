@@ -7,26 +7,34 @@ import { buildPlayerSubtitle, formatDuration } from '../library/view-models';
 type PlayerBarProps = {
   playback: PlaybackSnapshot;
   currentTrack: ScannedTrack | null;
+  volume: number;
   onPrevious: () => void;
   onPlay: () => void;
   onPause: () => void;
   onNext: () => void;
   onSeek: (positionMs: number) => void | Promise<void>;
+  onVolumeChange: (volume: number) => void | Promise<void>;
 };
 
 export function PlayerBar({
   playback,
   currentTrack,
+  volume,
   onPrevious,
   onPlay,
   onPause,
   onNext,
   onSeek,
+  onVolumeChange,
 }: PlayerBarProps) {
   const progressRef = useRef<HTMLDivElement>(null);
   const [scrubPositionMs, setScrubPositionMs] = useState<number | null>(null);
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [previewPositionMs, setPreviewPositionMs] = useState<number | null>(null);
+  const normalizedVolume = clampUnitVolume(volume);
+  const [draftVolumePercent, setDraftVolumePercent] = useState(() =>
+    Math.round(normalizedVolume * 100),
+  );
   const duration = playback.currentTrack?.durationMs ?? 0;
   const displayPositionMs =
     isScrubbing && scrubPositionMs !== null ? scrubPositionMs : playback.positionMs;
@@ -58,6 +66,10 @@ export function PlayerBar({
       setScrubPositionMs(null);
     }
   }, [isScrubbing, playback.positionMs]);
+
+  useEffect(() => {
+    setDraftVolumePercent(Math.round(normalizedVolume * 100));
+  }, [normalizedVolume]);
 
   function beginScrub() {
     if (duration <= 0) {
@@ -226,6 +238,26 @@ export function PlayerBar({
       </div>
 
       <div className="player-bar__facts">
+        <label className="player-bar__volume" htmlFor="player-volume-range">
+          <VolumeIcon muted={draftVolumePercent === 0} />
+          <input
+            aria-label="Playback volume"
+            className="player-bar__volume-range"
+            id="player-volume-range"
+            max={100}
+            min={0}
+            onChange={(event) => {
+              const nextVolumePercent = Number(event.currentTarget.value);
+              setDraftVolumePercent(nextVolumePercent);
+              void onVolumeChange(nextVolumePercent / 100);
+            }}
+            step={1}
+            type="range"
+            value={draftVolumePercent}
+          />
+          <span>{draftVolumePercent}%</span>
+        </label>
+
         <div className="player-bar__device player-bar__device--source">
           <span>Source</span>
           <strong>{formatDetails}</strong>
@@ -348,6 +380,14 @@ function clampPosition(positionMs: number, durationMs: number): number {
   return Math.min(Math.max(0, Math.round(positionMs)), durationMs);
 }
 
+function clampUnitVolume(volume: number): number {
+  if (!Number.isFinite(volume)) {
+    return 1;
+  }
+
+  return Math.min(Math.max(volume, 0), 1);
+}
+
 function PlayIcon() {
   return (
     <svg
@@ -395,6 +435,23 @@ function NextIcon() {
     >
       <path d="M6.05 6.08c-.82-.54-1.93.05-1.93 1.04v9.76c0 .99 1.11 1.58 1.93 1.04l6.93-4.88a1.25 1.25 0 0 0 0-2.08L6.05 6.08Z" />
       <rect height="13" rx="1.1" width="2.8" x="16.45" y="5.5" />
+    </svg>
+  );
+}
+
+function VolumeIcon({ muted }: { muted: boolean }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className="player-bar__volume-icon"
+      viewBox="0 0 24 24"
+    >
+      <path d="M4.8 9.15a1 1 0 0 1 1-1h3.1l4.03-3.42a1 1 0 0 1 1.65.76v13.02a1 1 0 0 1-1.65.76L8.9 15.85H5.8a1 1 0 0 1-1-1V9.15Z" />
+      {muted ? (
+        <path d="M17.1 8.1a1 1 0 0 1 1.41 0L20 9.6l1.49-1.5a1 1 0 1 1 1.41 1.42L21.42 11l1.48 1.49a1 1 0 0 1-1.41 1.41L20 12.42l-1.49 1.48a1 1 0 0 1-1.41-1.41L18.58 11 17.1 9.51a1 1 0 0 1 0-1.41Z" />
+      ) : (
+        <path d="M17.42 8.05a1 1 0 0 1 1.4.12 5.38 5.38 0 0 1 0 7.66 1 1 0 1 1-1.52-1.3 3.38 3.38 0 0 0 0-5.06 1 1 0 0 1 .12-1.42Zm2.9-2.63a1 1 0 0 1 1.4.12 9.83 9.83 0 0 1 0 13.92 1 1 0 0 1-1.53-1.29 7.83 7.83 0 0 0 0-11.34 1 1 0 0 1 .13-1.41Z" />
+      )}
     </svg>
   );
 }

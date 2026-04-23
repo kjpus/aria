@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlbumPane } from '../features/albums/AlbumPane';
 import { LibraryPane } from '../features/library/LibraryPane';
 import {
@@ -117,6 +117,7 @@ export function App() {
   const [draftCatalogRules, setDraftCatalogRules] = useState<CatalogRule[]>([]);
   const [outputDevices, setOutputDevices] = useState<OutputDeviceSnapshot[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const playbackPreferencesRequestId = useRef(0);
   const [playlistPickerState, setPlaylistPickerState] = useState<{
     trackIds: string[];
     suggestedName: string;
@@ -671,15 +672,32 @@ export function App() {
   async function handlePlaybackPreferencesChange(
     playback: PlaybackPreferences,
   ) {
+    const requestId = ++playbackPreferencesRequestId.current;
+
     try {
       const settings = await updatePlaybackPreferences(playback);
-      setBootstrap((current) =>
-        current ? { ...current, settings } : current,
-      );
-      setError(null);
+      if (playbackPreferencesRequestId.current === requestId) {
+        setBootstrap((current) =>
+          current ? { ...current, settings } : current,
+        );
+        setError(null);
+      }
     } catch (reason) {
-      setError(String(reason));
+      if (playbackPreferencesRequestId.current === requestId) {
+        setError(String(reason));
+      }
     }
+  }
+
+  function handleVolumeChange(volume: number) {
+    if (!bootstrap) {
+      return;
+    }
+
+    void handlePlaybackPreferencesChange({
+      ...bootstrap.settings.playback,
+      volume,
+    });
   }
 
   async function handleShuffleQueue() {
@@ -1176,7 +1194,9 @@ export function App() {
         onPlay={handlePlay}
         onPrevious={handlePreviousTrack}
         onSeek={handleSeek}
+        onVolumeChange={handleVolumeChange}
         playback={bootstrap.playback}
+        volume={bootstrap.settings.playback.volume}
       />
 
       {playlistPickerState ? (

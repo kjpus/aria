@@ -130,13 +130,29 @@ fn default_track_column_widths() -> BTreeMap<String, u32> {
     ])
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+fn default_playback_volume() -> f32 {
+    1.0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackPreferences {
     #[serde(default)]
     pub output_device_id: Option<String>,
     #[serde(default)]
     pub exclusive_mode: bool,
+    #[serde(default = "default_playback_volume")]
+    pub volume: f32,
+}
+
+impl Default for PlaybackPreferences {
+    fn default() -> Self {
+        Self {
+            output_device_id: None,
+            exclusive_mode: false,
+            volume: default_playback_volume(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
