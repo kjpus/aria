@@ -20,6 +20,7 @@ import {
   albumIdForTrack,
   buildAlbumCards,
   buildTrackColumns,
+  compareTracksWithinAlbum,
   getTrackColumnValue,
 } from '../library/view-models';
 import { HoverScrollText } from '../albums/HoverScrollText';
@@ -909,8 +910,8 @@ export function TrackPane({
                   </div>
                 </div>
                 <p className="dialog-section__note">
-                  Tracks are sorted by the first rule, then ties fall through to
-                  the next rules in order.
+                  Album groups follow the configured sort priority. Tracks inside
+                  each album keep album order.
                 </p>
                 <div className="sort-criteria">
                   {sortCriteria.map((criterion, index) => (
@@ -1072,7 +1073,7 @@ function buildAlbumGroups(
   return Array.from(groups.entries()).map(([albumId, albumTracks]) => ({
     albumId,
     album: albumCards.get(albumId) ?? null,
-    tracks: albumTracks,
+    tracks: [...albumTracks].sort(compareTracksWithinAlbum),
   }));
 }
 

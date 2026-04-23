@@ -205,7 +205,7 @@ export function formatDuration(durationMs: number): string {
 export function tracksForAlbum(tracks: ScannedTrack[], albumId: string): ScannedTrack[] {
   return tracks
     .filter((track) => albumIdForTrack(track) === albumId)
-    .sort(compareAlbumTracks);
+    .sort(compareTracksWithinAlbum);
 }
 
 export function tracksForPlaylist(
@@ -226,54 +226,102 @@ function hashTrack(input: string): number {
   return hash;
 }
 
-function compareAlbumTracks(left: ScannedTrack, right: ScannedTrack): number {
-  return (
-    compareNumericField(left, right, 'disk_number') ||
-    compareNumericField(left, right, 'track_number') ||
-    compareTextField(left, right, 'title') ||
-    left.fileName.localeCompare(right.fileName)
-  );
-}
+const trackTotalTagKeys = ['TRACKTOTAL', 'TOTALTRACKS', 'TRACKC'];
 
-function compareNumericField(
+export function compareTracksWithinAlbum(
   left: ScannedTrack,
   right: ScannedTrack,
-  key: string,
 ): number {
-  const leftValue = numericFieldValue(left, key);
-  const rightValue = numericFieldValue(right, key);
+  const leftDiskNumber = numericMappedFieldValue(left, 'disk_number');
+  const rightDiskNumber = numericMappedFieldValue(right, 'disk_number');
 
-  if (leftValue === rightValue) {
+  if (leftDiskNumber !== null || rightDiskNumber !== null) {
+    const diskComparison = compareNullableNumbers(leftDiskNumber, rightDiskNumber);
+    if (diskComparison !== 0) {
+      return diskComparison;
+    }
+
+    const leftTrackNumber = numericMappedFieldValue(left, 'track_number');
+    const rightTrackNumber = numericMappedFieldValue(right, 'track_number');
+    const trackComparison = compareNullableNumbers(
+      leftTrackNumber,
+      rightTrackNumber,
+    );
+    if (trackComparison !== 0) {
+      return trackComparison;
+    }
+
+    return compareTrackTitleOrFileName(left, right);
+  }
+
+  const leftNoDiscValue =
+    numericRawTagValue(left, trackTotalTagKeys) ??
+    numericMappedFieldValue(left, 'track_number');
+  const rightNoDiscValue =
+    numericRawTagValue(right, trackTotalTagKeys) ??
+    numericMappedFieldValue(right, 'track_number');
+  const noDiscComparison = compareNullableNumbers(leftNoDiscValue, rightNoDiscValue);
+
+  return noDiscComparison || compareTrackTitleOrFileName(left, right);
+}
+
+function compareNullableNumbers(
+  left: number | null,
+  right: number | null,
+): number {
+  if (left === right) {
     return 0;
   }
 
-  if (leftValue === Number.MAX_SAFE_INTEGER) {
+  if (left === null) {
     return 1;
   }
 
-  if (rightValue === Number.MAX_SAFE_INTEGER) {
+  if (right === null) {
     return -1;
   }
 
-  return leftValue - rightValue;
+  return left - right;
 }
 
-function compareTextField(
+function compareTrackTitleOrFileName(
   left: ScannedTrack,
   right: ScannedTrack,
-  key: string,
 ): number {
-  return firstField(left, key).localeCompare(firstField(right, key));
+  const leftValue = firstField(left, 'title') || left.fileName;
+  const rightValue = firstField(right, 'title') || right.fileName;
+
+  return leftValue.localeCompare(rightValue, undefined, {
+    numeric: true,
+    sensitivity: 'base',
+  });
 }
 
-function numericFieldValue(track: ScannedTrack, key: string): number {
-  const rawValue = firstField(track, key);
-  if (!rawValue) {
-    return Number.MAX_SAFE_INTEGER;
+function numericMappedFieldValue(track: ScannedTrack, key: string): number | null {
+  return parseNumericValue(firstField(track, key));
+}
+
+function numericRawTagValue(track: ScannedTrack, keys: string[]): number | null {
+  for (const key of keys) {
+    const rawValue = track.rawTags[key]?.[0];
+    const parsedValue = parseNumericValue(rawValue ?? '');
+
+    if (parsedValue !== null) {
+      return parsedValue;
+    }
   }
 
-  const match = rawValue.match(/\d+/);
-  return match ? Number(match[0]) : Number.MAX_SAFE_INTEGER;
+  return null;
+}
+
+function parseNumericValue(value: string): number | null {
+  const match = value.match(/\d+/);
+  if (!match) {
+    return null;
+  }
+
+  const parsedValue = Number.parseInt(match[0], 10);
+  return Number.isNaN(parsedValue) ? null : parsedValue;
 }
 
 function mergeAlbumText(existing: string, next: string): string {

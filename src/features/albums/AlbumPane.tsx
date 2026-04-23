@@ -18,6 +18,7 @@ import {
   albumTitleForTrack,
   buildAlbumCards,
   buildTrackColumns,
+  compareTracksWithinAlbum,
   firstField,
   getTrackColumnValue,
 } from '../library/view-models';
@@ -136,7 +137,7 @@ export function AlbumPane({
           (track) =>
             selectedAlbumId !== null && albumIdForTrack(track) === selectedAlbumId,
         )
-        .sort((left, right) => compareAlbumTracks(left, right)),
+        .sort(compareTracksWithinAlbum),
     [selectedAlbumId, tracks],
   );
   const normalizedVisibleColumns = useMemo(
@@ -938,41 +939,6 @@ export function AlbumPane({
       ) : null}
     </div>
   );
-}
-
-function compareAlbumTracks(left: ScannedTrack, right: ScannedTrack): number {
-  const discDiff =
-    parseSortNumber(firstField(left, 'disk_number')) -
-    parseSortNumber(firstField(right, 'disk_number'));
-  if (discDiff !== 0) {
-    return discDiff;
-  }
-
-  const trackDiff =
-    parseSortNumber(firstField(left, 'track_number')) -
-    parseSortNumber(firstField(right, 'track_number'));
-  if (trackDiff !== 0) {
-    return trackDiff;
-  }
-
-  return (firstField(left, 'title') || left.fileName).localeCompare(
-    firstField(right, 'title') || right.fileName,
-    undefined,
-    {
-      numeric: true,
-      sensitivity: 'base',
-    },
-  );
-}
-
-function parseSortNumber(value: string): number {
-  const matched = value.match(/\d+/);
-  if (!matched) {
-    return Number.MAX_SAFE_INTEGER;
-  }
-
-  const parsed = Number.parseInt(matched[0], 10);
-  return Number.isNaN(parsed) ? Number.MAX_SAFE_INTEGER : parsed;
 }
 
 function trackPosition(track: ScannedTrack): string {
