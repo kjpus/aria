@@ -4,6 +4,7 @@ import type {
 } from 'react';
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { ClearableInput } from '../../components/ClearableInput';
+import { EditTrackTagsDialog } from '../../components/EditTrackTagsDialog';
 import { ExportFieldDialog } from '../../components/ExportFieldDialog';
 import { SectionCard } from '../../components/SectionCard';
 import { TrackRawTagsDialog } from '../../components/TrackRawTagsDialog';
@@ -11,6 +12,7 @@ import { readTrackRawTags } from '../../lib/aria';
 import type {
   LibraryFieldMapping,
   ScannedTrack,
+  TrackTagEditUpdate,
   TrackRawTags,
   TrackSortCriterion,
   TrackSortDirection,
@@ -38,6 +40,10 @@ type TrackPaneProps = {
     tracks: ScannedTrack[],
     fieldKey: string,
     tagName: string,
+  ) => void | Promise<void>;
+  onEditTrackTags: (
+    tracks: ScannedTrack[],
+    updates: TrackTagEditUpdate[],
   ) => void | Promise<void>;
   onRememberExportTag: (tagName: string) => void;
   onPlayTracks: (tracks: ScannedTrack[]) => void | Promise<void>;
@@ -108,6 +114,7 @@ export function TrackPane({
   onGoToDirectory,
   onPlayAlbum,
   onExportField,
+  onEditTrackTags,
   onRememberExportTag,
   onPlayTracks,
   onAddToQueue,
@@ -150,6 +157,10 @@ export function TrackPane({
   const [tagInspectorError, setTagInspectorError] = useState<string | null>(null);
   const [isTagInspectorOpen, setIsTagInspectorOpen] = useState(false);
   const [isTagInspectorLoading, setIsTagInspectorLoading] = useState(false);
+  const [editTagTracks, setEditTagTracks] = useState<ScannedTrack[]>([]);
+  const [editTagError, setEditTagError] = useState<string | null>(null);
+  const [isEditTagsDialogOpen, setIsEditTagsDialogOpen] = useState(false);
+  const [isEditingTags, setIsEditingTags] = useState(false);
   const [exportTracks, setExportTracks] = useState<ScannedTrack[]>([]);
   const [exportError, setExportError] = useState<string | null>(null);
   const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
@@ -312,7 +323,12 @@ export function TrackPane({
   ]);
 
   useEffect(() => {
-    if (!isLayoutDialogOpen && !isTagInspectorOpen && !isExportDialogOpen) {
+    if (
+      !isLayoutDialogOpen &&
+      !isTagInspectorOpen &&
+      !isEditTagsDialogOpen &&
+      !isExportDialogOpen
+    ) {
       return;
     }
 
@@ -320,13 +336,14 @@ export function TrackPane({
       if (event.key === 'Escape') {
         setIsLayoutDialogOpen(false);
         setIsTagInspectorOpen(false);
+        setIsEditTagsDialogOpen(false);
         setIsExportDialogOpen(false);
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isExportDialogOpen, isLayoutDialogOpen, isTagInspectorOpen]);
+  }, [isEditTagsDialogOpen, isExportDialogOpen, isLayoutDialogOpen, isTagInspectorOpen]);
 
   useEffect(() => {
     if (!albumContextMenu && !trackContextMenu) {
@@ -520,7 +537,7 @@ export function TrackPane({
     setAlbumContextMenu(null);
     setTrackContextMenu({
       x: Math.min(event.clientX, window.innerWidth - 240),
-      y: Math.min(event.clientY, window.innerHeight - 180),
+      y: Math.min(event.clientY, window.innerHeight - 230),
       trackIds: nextSelectedTrackIds,
       primaryTrackId: track.id,
     });
@@ -628,6 +645,16 @@ export function TrackPane({
     setIsExportDialogOpen(true);
   }
 
+  function openEditTagsDialog(tracksToEdit: ScannedTrack[]) {
+    if (tracksToEdit.length === 0) {
+      return;
+    }
+
+    setEditTagTracks(tracksToEdit);
+    setEditTagError(null);
+    setIsEditTagsDialogOpen(true);
+  }
+
   function runAlbumExportField() {
     if (!albumContextMenu) {
       return;
@@ -650,6 +677,16 @@ export function TrackPane({
     openExportDialog(selectedTracks);
   }
 
+  function runTrackEditTags() {
+    if (!trackContextMenu) {
+      return;
+    }
+
+    const selectedTracks = selectTracksInOrder(filteredTracks, trackContextMenu.trackIds);
+    setTrackContextMenu(null);
+    openEditTagsDialog(selectedTracks);
+  }
+
   async function handleExportField(fieldKey: string, tagName: string) {
     setExportError(null);
     setIsExportingField(true);
@@ -661,6 +698,20 @@ export function TrackPane({
       setExportError(String(reason));
     } finally {
       setIsExportingField(false);
+    }
+  }
+
+  async function handleEditTrackTags(updates: TrackTagEditUpdate[]) {
+    setEditTagError(null);
+    setIsEditingTags(true);
+
+    try {
+      await onEditTrackTags(editTagTracks, updates);
+      setIsEditTagsDialogOpen(false);
+    } catch (reason) {
+      setEditTagError(String(reason));
+    } finally {
+      setIsEditingTags(false);
     }
   }
 
@@ -900,6 +951,9 @@ export function TrackPane({
             </button>
             <button onClick={() => void runTrackContextAction(onPlayTracks)} type="button">
               Play
+            </button>
+            <button onClick={() => runTrackEditTags()} type="button">
+              Edit tags
             </button>
             <button onClick={() => runTrackExportField()} type="button">
               Export field
@@ -1144,6 +1198,15 @@ export function TrackPane({
         onClose={() => setIsTagInspectorOpen(false)}
         tags={tagInspectorTags}
         track={tagInspectorTrack}
+      />
+
+      <EditTrackTagsDialog
+        error={editTagError}
+        isOpen={isEditTagsDialogOpen}
+        isSubmitting={isEditingTags}
+        onClose={() => setIsEditTagsDialogOpen(false)}
+        onSubmit={handleEditTrackTags}
+        tracks={editTagTracks}
       />
 
       <ExportFieldDialog

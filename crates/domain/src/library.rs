@@ -65,6 +65,20 @@ pub struct FieldExportRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct TrackTagEditUpdate {
+    pub tag_name: String,
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackTagEditRequest {
+    pub track_paths: Vec<String>,
+    pub updates: Vec<TrackTagEditUpdate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct CatalogRule {
     pub label: String,
     #[serde(default)]

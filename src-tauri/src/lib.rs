@@ -44,6 +44,7 @@ pub fn run() {
             commands::library::set_catalog_rules,
             commands::library::read_track_raw_tags,
             commands::library::export_field_to_tag,
+            commands::library::edit_track_tags,
             commands::playback::play,
             commands::playback::play_track,
             commands::playback::add_to_queue,

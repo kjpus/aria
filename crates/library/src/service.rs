@@ -10,7 +10,7 @@ use std::{
 use aria_domain::{
     default_catalog_rules, AppEvent, AudioPropertiesSnapshot, CatalogRule, FieldExportRequest,
     LibraryEvent, LibraryFieldMapping, LibraryRoot, LibrarySnapshot, ScanProgress, ScannedTrack,
-    TagInventoryEntry,
+    TagInventoryEntry, TrackTagEditRequest, TrackTagEditUpdate,
 };
 use chrono::Utc;
 use lofty::{
@@ -318,8 +318,73 @@ impl LibraryService {
             )
         })
         .await
-        .map_err(|_| LibraryError::FieldExportRefreshFailure)?
-        ?;
+        .map_err(|_| LibraryError::FieldExportRefreshFailure)??;
+
+        let updated_track_lookup = updated_tracks
+            .into_iter()
+            .map(|track| (track.path.clone(), track))
+            .collect::<HashMap<_, _>>();
+
+        let mut state = self.state.write().await;
+        for track in &mut state.tracks {
+            if let Some(updated) = updated_track_lookup.get(&track.path) {
+                *track = updated.clone();
+            }
+        }
+        state.tag_inventory = build_tag_inventory(&state.tracks);
+
+        Ok(state.clone())
+    }
+
+    pub async fn edit_track_tags(
+        &self,
+        request: TrackTagEditRequest,
+    ) -> Result<LibrarySnapshot, LibraryError> {
+        let track_paths = dedupe_preserve_order(
+            request
+                .track_paths
+                .into_iter()
+                .map(|path| path.trim().to_string())
+                .filter(|path| !path.is_empty())
+                .collect(),
+        );
+
+        if track_paths.is_empty() {
+            return Err(LibraryError::EmptyTrackTagEditSelection);
+        }
+
+        let updates = sanitize_track_tag_edit_updates(request.updates)?;
+        let snapshot = self.state.read().await.clone();
+        if updates.is_empty() {
+            return Ok(snapshot);
+        }
+
+        if snapshot.is_scanning {
+            return Err(LibraryError::AlreadyScanning);
+        }
+
+        let track_lookup = snapshot
+            .tracks
+            .iter()
+            .cloned()
+            .map(|track| (track.path.clone(), track))
+            .collect::<HashMap<_, _>>();
+        let mappings = snapshot.field_mappings.clone();
+        let compiled_catalog_rules = compile_catalog_rules(&snapshot.catalog_rules);
+        let cache_root = album_art_cache_root();
+
+        let updated_tracks = spawn_blocking(move || {
+            edit_track_tags_from_tracks(
+                &track_lookup,
+                &track_paths,
+                &updates,
+                &mappings,
+                &compiled_catalog_rules,
+                &cache_root,
+            )
+        })
+        .await
+        .map_err(|_| LibraryError::FieldExportRefreshFailure)??;
 
         let updated_track_lookup = updated_tracks
             .into_iter()
@@ -528,6 +593,40 @@ fn read_raw_tags_from_path(path: &Path) -> Result<BTreeMap<String, Vec<String>>,
     Ok(raw_tags)
 }
 
+fn sanitize_track_tag_edit_updates(
+    updates: Vec<TrackTagEditUpdate>,
+) -> Result<Vec<TrackTagEditUpdate>, LibraryError> {
+    let mut sanitized_updates: Vec<TrackTagEditUpdate> = Vec::new();
+
+    for update in updates {
+        let tag_name = normalize_tag_name(&update.tag_name);
+        if tag_name.is_empty() {
+            return Err(LibraryError::InvalidTrackTagEdit);
+        }
+
+        let values = dedupe_preserve_order(
+            update
+                .values
+                .into_iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect(),
+        );
+
+        if let Some(existing) = sanitized_updates
+            .iter_mut()
+            .find(|existing| existing.tag_name == tag_name)
+        {
+            existing.values = values;
+            continue;
+        }
+
+        sanitized_updates.push(TrackTagEditUpdate { tag_name, values });
+    }
+
+    Ok(sanitized_updates)
+}
+
 fn export_field_to_tag_from_tracks(
     track_lookup: &HashMap<String, ScannedTrack>,
     track_paths: &[String],
@@ -549,7 +648,7 @@ fn export_field_to_tag_from_tracks(
         let values = track.mapped_fields.get(field_key).cloned().unwrap_or_default();
         let path = PathBuf::from(track_path);
 
-        write_field_values_to_path(&path, tag_name, &values)?;
+        write_tag_values_to_path(&path, tag_name, &values)?;
 
         let refreshed_track = scan_single_track(&path, mappings, catalog_rules, cache_root)
             .map_err(|_| LibraryError::FieldExportTrackRefreshFailure {
@@ -561,7 +660,39 @@ fn export_field_to_tag_from_tracks(
     Ok(updated_tracks)
 }
 
-fn write_field_values_to_path(
+fn edit_track_tags_from_tracks(
+    track_lookup: &HashMap<String, ScannedTrack>,
+    track_paths: &[String],
+    updates: &[TrackTagEditUpdate],
+    mappings: &[LibraryFieldMapping],
+    catalog_rules: &[CompiledCatalogRule],
+    cache_root: &Path,
+) -> Result<Vec<ScannedTrack>, LibraryError> {
+    let mut updated_tracks = Vec::with_capacity(track_paths.len());
+
+    for track_path in track_paths {
+        if !track_lookup.contains_key(track_path) {
+            return Err(LibraryError::FieldExportTrackNotFound {
+                path: track_path.clone(),
+            });
+        }
+
+        let path = PathBuf::from(track_path);
+        for update in updates {
+            write_tag_values_to_path(&path, &update.tag_name, &update.values)?;
+        }
+
+        let refreshed_track = scan_single_track(&path, mappings, catalog_rules, cache_root)
+            .map_err(|_| LibraryError::FieldExportTrackRefreshFailure {
+                path: track_path.clone(),
+            })?;
+        updated_tracks.push(refreshed_track);
+    }
+
+    Ok(updated_tracks)
+}
+
+fn write_tag_values_to_path(
     path: &Path,
     tag_name: &str,
     values: &[String],

@@ -23,6 +23,7 @@ import {
   clearLibrary,
   createPlaylist,
   deletePlaylist,
+  editTrackTags,
   exportFieldToTag,
   exportPlaylistM3u,
   listOutputDevices,
@@ -62,6 +63,7 @@ import type {
   PlaybackPreferences,
   ScannedTrack,
   ThemePreference,
+  TrackTagEditUpdate,
   TrackTableSettings,
 } from '../types/aria';
 
@@ -661,6 +663,28 @@ export function App() {
     }
   }
 
+  async function handleEditTrackTags(
+    tracksToEdit: ScannedTrack[],
+    updates: TrackTagEditUpdate[],
+  ) {
+    if (tracksToEdit.length === 0 || updates.length === 0) {
+      return;
+    }
+
+    try {
+      const library = await editTrackTags({
+        trackPaths: tracksToEdit.map((track) => track.path),
+        updates,
+      });
+      setBootstrap((current) => (current ? { ...current, library } : current));
+      setError(null);
+    } catch (reason) {
+      const message = String(reason);
+      setError(message);
+      throw reason instanceof Error ? reason : message;
+    }
+  }
+
   function rememberSessionExportTag(tagName: string) {
     const normalized = normalizeSessionExportTag(tagName);
     if (!normalized) {
@@ -1171,6 +1195,7 @@ export function App() {
               onAddAlbumToPlaylist={handleAddAlbumToPlaylist}
               onAddToPlaylist={handleAddTracksToPlaylist}
               onAddAlbumToQueue={handleAddAlbumToQueue}
+              onEditTrackTags={handleEditTrackTags}
               onExportField={handleExportField}
               onRememberExportTag={rememberSessionExportTag}
               mappings={bootstrap.library.fieldMappings}

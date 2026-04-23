@@ -66,6 +66,16 @@ export type FieldExportRequest = {
   tagName: string;
 };
 
+export type TrackTagEditUpdate = {
+  tagName: string;
+  values: string[];
+};
+
+export type TrackTagEditRequest = {
+  trackPaths: string[];
+  updates: TrackTagEditUpdate[];
+};
+
 export type CatalogRule = {
   label: string;
   composers: string[];

@@ -2,7 +2,7 @@ use aria_domain::{
     AppBootstrap, AppEvent, CatalogRule, FieldExportRequest, LibraryEvent, LibraryFieldMapping,
     LibrarySnapshot, OutputDeviceSnapshot, PlayTrackRequest, PlaybackEvent, PlaybackPreferences,
     PlaylistEvent, PlaylistSnapshot, PlaybackSessionSnapshot, PlaybackSnapshot, SettingsSnapshot,
-    ThemePreference, TrackTableSettings,
+    ThemePreference, TrackTableSettings, TrackTagEditRequest,
 };
 use aria_library::{LibraryError, LibraryService};
 use aria_playback::{PlaybackError, PlaybackService};
@@ -246,6 +246,17 @@ impl AppCore {
         request: FieldExportRequest,
     ) -> Result<LibrarySnapshot, AppCoreError> {
         let snapshot = self.library.export_field_to_tag(request).await?;
+        self.emit(AppEvent::Library(LibraryEvent::SnapshotChanged(
+            snapshot.clone(),
+        )));
+        Ok(snapshot)
+    }
+
+    pub async fn edit_track_tags(
+        &self,
+        request: TrackTagEditRequest,
+    ) -> Result<LibrarySnapshot, AppCoreError> {
+        let snapshot = self.library.edit_track_tags(request).await?;
         self.emit(AppEvent::Library(LibraryEvent::SnapshotChanged(
             snapshot.clone(),
         )));

@@ -14,10 +14,14 @@ pub enum LibraryError {
     TrackReadFailure,
     #[error("select at least one track to export")]
     EmptyFieldExportSelection,
+    #[error("select at least one track to edit")]
+    EmptyTrackTagEditSelection,
     #[error("the selected field could not be exported")]
     InvalidFieldExportField,
     #[error("tag names cannot be empty")]
     InvalidFieldExportTag,
+    #[error("one or more tag edits are invalid")]
+    InvalidTrackTagEdit,
     #[error("the selected track is no longer in the library: {path}")]
     FieldExportTrackNotFound { path: String },
     #[error("could not write tags for {path}: {message}")]

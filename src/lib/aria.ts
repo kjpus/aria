@@ -15,6 +15,7 @@ import type {
   PlaybackSnapshot,
   SettingsSnapshot,
   ThemePreference,
+  TrackTagEditRequest,
   TrackRawTags,
   TrackTableSettings,
 } from '../types/aria';
@@ -748,6 +749,46 @@ export async function exportFieldToTag(
   }
 
   return invoke<LibrarySnapshot>('export_field_to_tag', { request });
+}
+
+export async function editTrackTags(
+  request: TrackTagEditRequest,
+): Promise<LibrarySnapshot> {
+  if (!isTauriRuntime) {
+    const requestedPaths = new Set(request.trackPaths);
+    const nextTracks = previewBootstrap.library.tracks.map((track) => {
+      if (!requestedPaths.has(track.path)) {
+        return track;
+      }
+
+      const nextRawTags = { ...track.rawTags };
+      for (const update of request.updates) {
+        if (update.values.length > 0) {
+          nextRawTags[update.tagName] = [...update.values];
+        } else {
+          delete nextRawTags[update.tagName];
+        }
+      }
+
+      return {
+        ...track,
+        rawTags: nextRawTags,
+      };
+    });
+
+    previewBootstrap = {
+      ...previewBootstrap,
+      library: {
+        ...previewBootstrap.library,
+        tracks: nextTracks,
+        tagInventory: rebuildPreviewTagInventory(nextTracks),
+      },
+    };
+
+    return previewBootstrap.library;
+  }
+
+  return invoke<LibrarySnapshot>('edit_track_tags', { request });
 }
 
 export async function updateTheme(

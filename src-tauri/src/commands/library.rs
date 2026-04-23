@@ -1,4 +1,6 @@
-use aria_domain::{CatalogRule, FieldExportRequest, LibraryFieldMapping, LibrarySnapshot};
+use aria_domain::{
+    CatalogRule, FieldExportRequest, LibraryFieldMapping, LibrarySnapshot, TrackTagEditRequest,
+};
 use std::collections::BTreeMap;
 use tauri::State;
 
@@ -60,4 +62,12 @@ pub async fn export_field_to_tag(
     request: FieldExportRequest,
 ) -> Result<LibrarySnapshot, CommandError> {
     Ok(state.core.export_field_to_tag(request).await?)
+}
+
+#[tauri::command]
+pub async fn edit_track_tags(
+    state: State<'_, AppState>,
+    request: TrackTagEditRequest,
+) -> Result<LibrarySnapshot, CommandError> {
+    Ok(state.core.edit_track_tags(request).await?)
 }
