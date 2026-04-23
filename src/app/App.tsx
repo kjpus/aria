@@ -124,6 +124,16 @@ export function App() {
   } | null>(null);
 
   useEffect(() => {
+    // Native webview context menus should never appear unless we add a custom handler.
+    const suppressNativeContextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+    };
+
+    window.addEventListener('contextmenu', suppressNativeContextMenu);
+    return () => window.removeEventListener('contextmenu', suppressNativeContextMenu);
+  }, []);
+
+  useEffect(() => {
     let active = true;
 
     void bootstrapApp()
@@ -1117,11 +1127,16 @@ export function App() {
 
           {activePane === 'tracks' ? (
             <TrackPane
+              onAddAlbumToPlaylist={handleAddAlbumToPlaylist}
               onAddToPlaylist={handleAddTracksToPlaylist}
+              onAddAlbumToQueue={handleAddAlbumToQueue}
               mappings={bootstrap.library.fieldMappings}
               onAddToQueue={handleAddTracksToQueue}
+              onGoToDirectory={handleGoToAlbumDirectory}
               onOpenAlbum={handleOpenAlbum}
+              onPlayAlbum={(albumId) => handleReplaceQueue(albumId, true)}
               onPlayTracks={handlePlayTracks}
+              onReplaceQueue={(albumId) => handleReplaceQueue(albumId, false)}
               onShowInExplorer={handleShowTrackInExplorer}
               onTrackTableChange={handleTrackTableChange}
               settings={bootstrap.settings.trackTable}

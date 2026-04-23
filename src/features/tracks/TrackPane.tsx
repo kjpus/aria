@@ -29,10 +29,15 @@ type TrackPaneProps = {
   tracks: ScannedTrack[];
   mappings: LibraryFieldMapping[];
   settings: TrackTableSettings;
+  onAddAlbumToPlaylist: (albumId: string) => void | Promise<void>;
+  onAddAlbumToQueue: (albumId: string) => void | Promise<void>;
+  onGoToDirectory: (albumId: string) => void | Promise<void>;
+  onPlayAlbum: (albumId: string) => void | Promise<void>;
   onPlayTracks: (tracks: ScannedTrack[]) => void | Promise<void>;
   onAddToQueue: (tracks: ScannedTrack[]) => void | Promise<void>;
   onAddToPlaylist: (tracks: ScannedTrack[]) => void | Promise<void>;
   onOpenAlbum: (albumId: string) => void;
+  onReplaceQueue: (albumId: string) => void | Promise<void>;
   onShowInExplorer: (track: ScannedTrack) => void | Promise<void>;
   onTrackTableChange: (settings: TrackTableSettings) => void;
 };
@@ -75,6 +80,12 @@ type TrackContextMenuState = {
   primaryTrackId: string;
 };
 
+type AlbumContextMenuState = {
+  x: number;
+  y: number;
+  albumId: string;
+};
+
 type AlbumTrackGroup = {
   albumId: string;
   album: AlbumCardModel | null;
@@ -84,10 +95,15 @@ type AlbumTrackGroup = {
 export function TrackPane({
   tracks,
   mappings,
+  onAddAlbumToPlaylist,
+  onAddAlbumToQueue,
+  onGoToDirectory,
+  onPlayAlbum,
   onPlayTracks,
   onAddToQueue,
   onAddToPlaylist,
   onOpenAlbum,
+  onReplaceQueue,
   onShowInExplorer,
   settings,
   onTrackTableChange,
@@ -114,7 +130,10 @@ export function TrackPane({
   const [visibleDropIndicator, setVisibleDropIndicator] =
     useState<DropIndicator | null>(null);
   const [resizingColumn, setResizingColumn] = useState<string | null>(null);
-  const [contextMenu, setContextMenu] = useState<TrackContextMenuState | null>(null);
+  const [albumContextMenu, setAlbumContextMenu] =
+    useState<AlbumContextMenuState | null>(null);
+  const [trackContextMenu, setTrackContextMenu] =
+    useState<TrackContextMenuState | null>(null);
   const [tagInspectorTrack, setTagInspectorTrack] = useState<ScannedTrack | null>(null);
   const [tagInspectorTags, setTagInspectorTags] = useState<TrackRawTags>({});
   const [tagInspectorError, setTagInspectorError] = useState<string | null>(null);
@@ -294,7 +313,7 @@ export function TrackPane({
   }, [isLayoutDialogOpen, isTagInspectorOpen]);
 
   useEffect(() => {
-    if (!contextMenu) {
+    if (!albumContextMenu && !trackContextMenu) {
       return undefined;
     }
 
@@ -310,7 +329,8 @@ export function TrackPane({
         return;
       }
 
-      setContextMenu(null);
+      setAlbumContextMenu(null);
+      setTrackContextMenu(null);
     };
 
     window.addEventListener('pointerdown', closeMenu);
@@ -324,7 +344,7 @@ export function TrackPane({
       window.removeEventListener('keydown', closeMenu);
       window.removeEventListener('scroll', closeMenu, true);
     };
-  }, [contextMenu]);
+  }, [albumContextMenu, trackContextMenu]);
 
   const sortSummary = useMemo(
     () => describeSortCriteria(sortCriteria, columnLookup),
@@ -481,7 +501,8 @@ export function TrackPane({
       setSelectionAnchorId(track.id);
     }
 
-    setContextMenu({
+    setAlbumContextMenu(null);
+    setTrackContextMenu({
       x: Math.min(event.clientX, window.innerWidth - 240),
       y: Math.min(event.clientY, window.innerHeight - 180),
       trackIds: nextSelectedTrackIds,
@@ -489,56 +510,82 @@ export function TrackPane({
     });
   }
 
+  function handleAlbumContextMenu(
+    event: ReactMouseEvent<HTMLTableRowElement>,
+    albumId: string,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    setTrackContextMenu(null);
+    setAlbumContextMenu({
+      albumId,
+      x: Math.min(event.clientX, window.innerWidth - 240),
+      y: Math.min(event.clientY, window.innerHeight - 220),
+    });
+  }
+
   async function runTrackContextAction(
     action: (tracks: ScannedTrack[]) => void | Promise<void>,
   ) {
-    if (!contextMenu) {
+    if (!trackContextMenu) {
       return;
     }
 
-    const selectedTracks = selectTracksInOrder(filteredTracks, contextMenu.trackIds);
+    const selectedTracks = selectTracksInOrder(filteredTracks, trackContextMenu.trackIds);
     if (selectedTracks.length === 0) {
-      setContextMenu(null);
+      setTrackContextMenu(null);
       return;
     }
 
-    setContextMenu(null);
+    setTrackContextMenu(null);
     await action(selectedTracks);
   }
 
+  async function runAlbumContextAction(
+    action: (albumId: string) => void | Promise<void>,
+  ) {
+    if (!albumContextMenu) {
+      return;
+    }
+
+    const { albumId } = albumContextMenu;
+    setAlbumContextMenu(null);
+    await action(albumId);
+  }
+
   async function runShowInExplorer() {
-    if (!contextMenu || contextMenu.trackIds.length !== 1) {
+    if (!trackContextMenu || trackContextMenu.trackIds.length !== 1) {
       return;
     }
 
     const track = filteredTracks.find(
-      (candidate) => candidate.id === contextMenu.primaryTrackId,
+      (candidate) => candidate.id === trackContextMenu.primaryTrackId,
     );
 
     if (!track) {
-      setContextMenu(null);
+      setTrackContextMenu(null);
       return;
     }
 
-    setContextMenu(null);
+    setTrackContextMenu(null);
     await onShowInExplorer(track);
   }
 
   async function runShowAllTags() {
-    if (!contextMenu || contextMenu.trackIds.length !== 1) {
+    if (!trackContextMenu || trackContextMenu.trackIds.length !== 1) {
       return;
     }
 
     const track = filteredTracks.find(
-      (candidate) => candidate.id === contextMenu.primaryTrackId,
+      (candidate) => candidate.id === trackContextMenu.primaryTrackId,
     );
 
     if (!track) {
-      setContextMenu(null);
+      setTrackContextMenu(null);
       return;
     }
 
-    setContextMenu(null);
+    setTrackContextMenu(null);
     setTagInspectorTrack(track);
     setTagInspectorTags({});
     setTagInspectorError(null);
@@ -693,6 +740,7 @@ export function TrackPane({
                     <tr
                       className="track-table__album-row"
                       onClick={() => onOpenAlbum(group.albumId)}
+                      onContextMenu={(event) => handleAlbumContextMenu(event, group.albumId)}
                     >
                       <td colSpan={Math.max(visibleColumns.length, 1)}>
                         <div className="track-table__album-meta">
@@ -743,11 +791,38 @@ export function TrackPane({
           </div>
         )}
 
-        {contextMenu ? (
+        {albumContextMenu ? (
           <div
             className="album-context-menu"
             ref={menuRef}
-            style={{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }}
+            style={{ left: `${albumContextMenu.x}px`, top: `${albumContextMenu.y}px` }}
+          >
+            <button
+              onClick={() => void runAlbumContextAction(onAddAlbumToPlaylist)}
+              type="button"
+            >
+              Add to playlist
+            </button>
+            <button onClick={() => void runAlbumContextAction(onAddAlbumToQueue)} type="button">
+              Add to queue
+            </button>
+            <button onClick={() => void runAlbumContextAction(onReplaceQueue)} type="button">
+              Put in queue
+            </button>
+            <button onClick={() => void runAlbumContextAction(onPlayAlbum)} type="button">
+              Play album
+            </button>
+            <button onClick={() => void runAlbumContextAction(onGoToDirectory)} type="button">
+              Go to directory
+            </button>
+          </div>
+        ) : null}
+
+        {trackContextMenu ? (
+          <div
+            className="album-context-menu"
+            ref={menuRef}
+            style={{ left: `${trackContextMenu.x}px`, top: `${trackContextMenu.y}px` }}
           >
             <button
               onClick={() => void runTrackContextAction(onAddToPlaylist)}
@@ -761,12 +836,12 @@ export function TrackPane({
             <button onClick={() => void runTrackContextAction(onPlayTracks)} type="button">
               Play
             </button>
-            {contextMenu.trackIds.length === 1 ? (
+            {trackContextMenu.trackIds.length === 1 ? (
               <button onClick={() => void runShowAllTags()} type="button">
                 Show all tags
               </button>
             ) : null}
-            {contextMenu.trackIds.length === 1 ? (
+            {trackContextMenu.trackIds.length === 1 ? (
               <button onClick={() => void runShowInExplorer()} type="button">
                 Show in Explorer
               </button>
