@@ -4,6 +4,7 @@ import type {
 } from 'react';
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { ClearableInput } from '../../components/ClearableInput';
+import { ExportFieldDialog } from '../../components/ExportFieldDialog';
 import { SectionCard } from '../../components/SectionCard';
 import { TrackRawTagsDialog } from '../../components/TrackRawTagsDialog';
 import { readTrackRawTags } from '../../lib/aria';
@@ -33,11 +34,18 @@ type TrackPaneProps = {
   onAddAlbumToQueue: (albumId: string) => void | Promise<void>;
   onGoToDirectory: (albumId: string) => void | Promise<void>;
   onPlayAlbum: (albumId: string) => void | Promise<void>;
+  onExportField: (
+    tracks: ScannedTrack[],
+    fieldKey: string,
+    tagName: string,
+  ) => void | Promise<void>;
+  onRememberExportTag: (tagName: string) => void;
   onPlayTracks: (tracks: ScannedTrack[]) => void | Promise<void>;
   onAddToQueue: (tracks: ScannedTrack[]) => void | Promise<void>;
   onAddToPlaylist: (tracks: ScannedTrack[]) => void | Promise<void>;
   onOpenAlbum: (albumId: string) => void;
   onReplaceQueue: (albumId: string) => void | Promise<void>;
+  sessionExportTags: string[];
   onShowInExplorer: (track: ScannedTrack) => void | Promise<void>;
   onTrackTableChange: (settings: TrackTableSettings) => void;
 };
@@ -99,11 +107,14 @@ export function TrackPane({
   onAddAlbumToQueue,
   onGoToDirectory,
   onPlayAlbum,
+  onExportField,
+  onRememberExportTag,
   onPlayTracks,
   onAddToQueue,
   onAddToPlaylist,
   onOpenAlbum,
   onReplaceQueue,
+  sessionExportTags,
   onShowInExplorer,
   settings,
   onTrackTableChange,
@@ -139,6 +150,10 @@ export function TrackPane({
   const [tagInspectorError, setTagInspectorError] = useState<string | null>(null);
   const [isTagInspectorOpen, setIsTagInspectorOpen] = useState(false);
   const [isTagInspectorLoading, setIsTagInspectorLoading] = useState(false);
+  const [exportTracks, setExportTracks] = useState<ScannedTrack[]>([]);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
+  const [isExportingField, setIsExportingField] = useState(false);
   const [hasHydrated, setHasHydrated] = useState(false);
   const resizeStateRef = useRef<ResizeState | null>(null);
   const visibleDropIndicatorRef = useRef<DropIndicator | null>(null);
@@ -297,7 +312,7 @@ export function TrackPane({
   ]);
 
   useEffect(() => {
-    if (!isLayoutDialogOpen && !isTagInspectorOpen) {
+    if (!isLayoutDialogOpen && !isTagInspectorOpen && !isExportDialogOpen) {
       return;
     }
 
@@ -305,12 +320,13 @@ export function TrackPane({
       if (event.key === 'Escape') {
         setIsLayoutDialogOpen(false);
         setIsTagInspectorOpen(false);
+        setIsExportDialogOpen(false);
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isLayoutDialogOpen, isTagInspectorOpen]);
+  }, [isExportDialogOpen, isLayoutDialogOpen, isTagInspectorOpen]);
 
   useEffect(() => {
     if (!albumContextMenu && !trackContextMenu) {
@@ -602,6 +618,52 @@ export function TrackPane({
     }
   }
 
+  function openExportDialog(tracksToExport: ScannedTrack[]) {
+    if (tracksToExport.length === 0) {
+      return;
+    }
+
+    setExportTracks(tracksToExport);
+    setExportError(null);
+    setIsExportDialogOpen(true);
+  }
+
+  function runAlbumExportField() {
+    if (!albumContextMenu) {
+      return;
+    }
+
+    const group =
+      albumGroups.find((candidate) => candidate.albumId === albumContextMenu.albumId) ??
+      null;
+    setAlbumContextMenu(null);
+    openExportDialog(group?.tracks ?? []);
+  }
+
+  function runTrackExportField() {
+    if (!trackContextMenu) {
+      return;
+    }
+
+    const selectedTracks = selectTracksInOrder(filteredTracks, trackContextMenu.trackIds);
+    setTrackContextMenu(null);
+    openExportDialog(selectedTracks);
+  }
+
+  async function handleExportField(fieldKey: string, tagName: string) {
+    setExportError(null);
+    setIsExportingField(true);
+
+    try {
+      await onExportField(exportTracks, fieldKey, tagName);
+      setIsExportDialogOpen(false);
+    } catch (reason) {
+      setExportError(String(reason));
+    } finally {
+      setIsExportingField(false);
+    }
+  }
+
   function addSortCriterion() {
     const nextColumn = columns.find(
       (column) => !sortCriteria.some((criterion) => criterion.key === column.key),
@@ -812,6 +874,9 @@ export function TrackPane({
             <button onClick={() => void runAlbumContextAction(onPlayAlbum)} type="button">
               Play album
             </button>
+            <button onClick={() => runAlbumExportField()} type="button">
+              Export field
+            </button>
             <button onClick={() => void runAlbumContextAction(onGoToDirectory)} type="button">
               Go to directory
             </button>
@@ -835,6 +900,9 @@ export function TrackPane({
             </button>
             <button onClick={() => void runTrackContextAction(onPlayTracks)} type="button">
               Play
+            </button>
+            <button onClick={() => runTrackExportField()} type="button">
+              Export field
             </button>
             {trackContextMenu.trackIds.length === 1 ? (
               <button onClick={() => void runShowAllTags()} type="button">
@@ -1076,6 +1144,18 @@ export function TrackPane({
         onClose={() => setIsTagInspectorOpen(false)}
         tags={tagInspectorTags}
         track={tagInspectorTrack}
+      />
+
+      <ExportFieldDialog
+        error={exportError}
+        fieldMappings={mappings}
+        isOpen={isExportDialogOpen}
+        isSubmitting={isExportingField}
+        onAddTagOption={onRememberExportTag}
+        onClose={() => setIsExportDialogOpen(false)}
+        onSubmit={handleExportField}
+        sessionTagOptions={sessionExportTags}
+        tracks={exportTracks}
       />
     </div>
   );

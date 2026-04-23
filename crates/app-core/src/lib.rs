@@ -1,7 +1,7 @@
 use aria_domain::{
-    AppBootstrap, AppEvent, CatalogRule, LibraryEvent, LibraryFieldMapping, LibrarySnapshot,
-    OutputDeviceSnapshot, PlayTrackRequest, PlaybackEvent, PlaybackPreferences, PlaylistEvent,
-    PlaylistSnapshot, PlaybackSessionSnapshot, PlaybackSnapshot, SettingsSnapshot,
+    AppBootstrap, AppEvent, CatalogRule, FieldExportRequest, LibraryEvent, LibraryFieldMapping,
+    LibrarySnapshot, OutputDeviceSnapshot, PlayTrackRequest, PlaybackEvent, PlaybackPreferences,
+    PlaylistEvent, PlaylistSnapshot, PlaybackSessionSnapshot, PlaybackSnapshot, SettingsSnapshot,
     ThemePreference, TrackTableSettings,
 };
 use aria_library::{LibraryError, LibraryService};
@@ -239,6 +239,17 @@ impl AppCore {
         path: String,
     ) -> Result<BTreeMap<String, Vec<String>>, AppCoreError> {
         Ok(self.library.read_track_raw_tags(path).await?)
+    }
+
+    pub async fn export_field_to_tag(
+        &self,
+        request: FieldExportRequest,
+    ) -> Result<LibrarySnapshot, AppCoreError> {
+        let snapshot = self.library.export_field_to_tag(request).await?;
+        self.emit(AppEvent::Library(LibraryEvent::SnapshotChanged(
+            snapshot.clone(),
+        )));
+        Ok(snapshot)
     }
 
     pub async fn play(&self) -> Result<PlaybackSnapshot, AppCoreError> {

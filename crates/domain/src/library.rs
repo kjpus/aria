@@ -57,6 +57,14 @@ pub struct LibraryFieldMapping {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct FieldExportRequest {
+    pub track_paths: Vec<String>,
+    pub field_key: String,
+    pub tag_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct CatalogRule {
     pub label: String,
     #[serde(default)]

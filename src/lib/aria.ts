@@ -5,6 +5,7 @@ import type {
   AppBootstrap,
   AppEvent,
   CatalogRule,
+  FieldExportRequest,
   LibraryFieldMapping,
   LibrarySnapshot,
   OutputDeviceSnapshot,
@@ -709,6 +710,46 @@ export async function readTrackRawTags(
   return invoke<TrackRawTags>('read_track_raw_tags', { path });
 }
 
+export async function exportFieldToTag(
+  request: FieldExportRequest,
+): Promise<LibrarySnapshot> {
+  if (!isTauriRuntime) {
+    const requestedPaths = new Set(request.trackPaths);
+    const nextTracks = previewBootstrap.library.tracks.map((track) => {
+      if (!requestedPaths.has(track.path)) {
+        return track;
+      }
+
+      const values = [...(track.mappedFields[request.fieldKey] ?? [])];
+      const nextRawTags = { ...track.rawTags };
+
+      if (values.length > 0) {
+        nextRawTags[request.tagName] = values;
+      } else {
+        delete nextRawTags[request.tagName];
+      }
+
+      return {
+        ...track,
+        rawTags: nextRawTags,
+      };
+    });
+
+    previewBootstrap = {
+      ...previewBootstrap,
+      library: {
+        ...previewBootstrap.library,
+        tracks: nextTracks,
+        tagInventory: rebuildPreviewTagInventory(nextTracks),
+      },
+    };
+
+    return previewBootstrap.library;
+  }
+
+  return invoke<LibrarySnapshot>('export_field_to_tag', { request });
+}
+
 export async function updateTheme(
   theme: ThemePreference,
 ): Promise<SettingsSnapshot> {
@@ -902,4 +943,40 @@ function clampPlaybackVolume(volume: number): number {
   }
 
   return Math.min(Math.max(volume, 0), 1);
+}
+
+function rebuildPreviewTagInventory(tracks: LibrarySnapshot['tracks']) {
+  const inventory = new Map<string, { occurrences: number; exampleValues: string[] }>();
+
+  for (const track of tracks) {
+    for (const [tag, values] of Object.entries(track.rawTags)) {
+      const existing = inventory.get(tag) ?? {
+        occurrences: 0,
+        exampleValues: [],
+      };
+      existing.occurrences += 1;
+
+      for (const value of values) {
+        if (existing.exampleValues.length >= 3) {
+          break;
+        }
+        if (!existing.exampleValues.includes(value)) {
+          existing.exampleValues.push(value);
+        }
+      }
+
+      inventory.set(tag, existing);
+    }
+  }
+
+  return Array.from(inventory.entries())
+    .map(([tag, entry]) => ({
+      tag,
+      occurrences: entry.occurrences,
+      exampleValues: entry.exampleValues,
+    }))
+    .sort(
+      (left, right) =>
+        right.occurrences - left.occurrences || left.tag.localeCompare(right.tag),
+    );
 }

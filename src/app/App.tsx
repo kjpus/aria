@@ -23,6 +23,7 @@ import {
   clearLibrary,
   createPlaylist,
   deletePlaylist,
+  exportFieldToTag,
   exportPlaylistM3u,
   listOutputDevices,
   listenToAppEvents,
@@ -113,6 +114,7 @@ export function App() {
   const [activePane, setActivePane] = useState<PaneKey>('library');
   const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(null);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
+  const [sessionExportTags, setSessionExportTags] = useState<string[]>([]);
   const [draftMappings, setDraftMappings] = useState<LibraryFieldMapping[]>([]);
   const [draftCatalogRules, setDraftCatalogRules] = useState<CatalogRule[]>([]);
   const [outputDevices, setOutputDevices] = useState<OutputDeviceSnapshot[]>([]);
@@ -634,6 +636,42 @@ export function App() {
     }
   }
 
+  async function handleExportField(
+    tracksToExport: ScannedTrack[],
+    fieldKey: string,
+    tagName: string,
+  ) {
+    if (tracksToExport.length === 0) {
+      return;
+    }
+
+    try {
+      const library = await exportFieldToTag({
+        trackPaths: tracksToExport.map((track) => track.path),
+        fieldKey,
+        tagName,
+      });
+      rememberSessionExportTag(tagName);
+      setBootstrap((current) => (current ? { ...current, library } : current));
+      setError(null);
+    } catch (reason) {
+      const message = String(reason);
+      setError(message);
+      throw reason instanceof Error ? reason : message;
+    }
+  }
+
+  function rememberSessionExportTag(tagName: string) {
+    const normalized = normalizeSessionExportTag(tagName);
+    if (!normalized) {
+      return;
+    }
+
+    setSessionExportTags((current) =>
+      current.includes(normalized) ? current : [...current, normalized],
+    );
+  }
+
   async function handleThemeChange(theme: ThemePreference) {
     try {
       const settings = await updateTheme(theme);
@@ -1109,6 +1147,8 @@ export function App() {
           {activePane === 'album' ? (
             <AlbumPane
               onAddAlbumToPlaylist={handleAddAlbumToPlaylist}
+              onExportField={handleExportField}
+              onRememberExportTag={rememberSessionExportTag}
               onAddTracksToPlaylist={handleAddTracksToPlaylist}
               mappings={bootstrap.library.fieldMappings}
               onAddTracksToQueue={handleAddTracksToQueue}
@@ -1118,6 +1158,7 @@ export function App() {
               onPlayTracks={handlePlayTracks}
               onReplaceQueue={(albumId) => handleReplaceQueue(albumId, false)}
               onShowInExplorer={handleShowTrackInExplorer}
+              sessionExportTags={sessionExportTags}
               selectedAlbumId={selectedAlbumId}
               settings={bootstrap.settings.albumTrackTable}
               onTrackTableChange={handleAlbumTrackTableChange}
@@ -1130,6 +1171,8 @@ export function App() {
               onAddAlbumToPlaylist={handleAddAlbumToPlaylist}
               onAddToPlaylist={handleAddTracksToPlaylist}
               onAddAlbumToQueue={handleAddAlbumToQueue}
+              onExportField={handleExportField}
+              onRememberExportTag={rememberSessionExportTag}
               mappings={bootstrap.library.fieldMappings}
               onAddToQueue={handleAddTracksToQueue}
               onGoToDirectory={handleGoToAlbumDirectory}
@@ -1137,6 +1180,7 @@ export function App() {
               onPlayAlbum={(albumId) => handleReplaceQueue(albumId, true)}
               onPlayTracks={handlePlayTracks}
               onReplaceQueue={(albumId) => handleReplaceQueue(albumId, false)}
+              sessionExportTags={sessionExportTags}
               onShowInExplorer={handleShowTrackInExplorer}
               onTrackTableChange={handleTrackTableChange}
               settings={bootstrap.settings.trackTable}
@@ -1226,6 +1270,10 @@ export function App() {
       ) : null}
     </main>
   );
+}
+
+function normalizeSessionExportTag(tagName: string): string {
+  return tagName.trim().toUpperCase();
 }
 
 function shuffleTrackRequests<T>(items: T[]): T[] {

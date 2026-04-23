@@ -1,4 +1,4 @@
-use aria_domain::{CatalogRule, LibraryFieldMapping, LibrarySnapshot};
+use aria_domain::{CatalogRule, FieldExportRequest, LibraryFieldMapping, LibrarySnapshot};
 use std::collections::BTreeMap;
 use tauri::State;
 
@@ -52,4 +52,12 @@ pub async fn read_track_raw_tags(
     path: String,
 ) -> Result<BTreeMap<String, Vec<String>>, CommandError> {
     Ok(state.core.read_track_raw_tags(path).await?)
+}
+
+#[tauri::command]
+pub async fn export_field_to_tag(
+    state: State<'_, AppState>,
+    request: FieldExportRequest,
+) -> Result<LibrarySnapshot, CommandError> {
+    Ok(state.core.export_field_to_tag(request).await?)
 }

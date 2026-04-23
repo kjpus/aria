@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap},
     fs::File as StdFile,
     hash::{Hash, Hasher},
@@ -7,18 +8,24 @@ use std::{
 };
 
 use aria_domain::{
-    default_catalog_rules, AppEvent, AudioPropertiesSnapshot, CatalogRule, LibraryEvent,
-    LibraryFieldMapping, LibraryRoot, LibrarySnapshot, ScanProgress, ScannedTrack, TagInventoryEntry,
+    default_catalog_rules, AppEvent, AudioPropertiesSnapshot, CatalogRule, FieldExportRequest,
+    LibraryEvent, LibraryFieldMapping, LibraryRoot, LibrarySnapshot, ScanProgress, ScannedTrack,
+    TagInventoryEntry,
 };
 use chrono::Utc;
 use lofty::{
-    config::ParseOptions,
-    file::{AudioFile, TaggedFileExt},
+    aac::AacFile,
+    config::{ParseOptions, WriteOptions},
+    file::{AudioFile, FileType, TaggedFileExt},
     flac::FlacFile,
+    id3::v2::Id3v2Tag,
+    iff::{aiff::AiffFile, wav::WavFile},
+    mp4::{Atom, AtomData, AtomIdent, Ilst, Mp4File},
+    mpeg::MpegFile,
     ogg::{OggPictureStorage, OpusFile, SpeexFile, VorbisComments, VorbisFile},
     picture::{MimeType, Picture, PictureType},
     read_from_path,
-    tag::{ItemKey, ItemValue, TagType},
+    tag::{ItemKey, ItemValue, MergeTag, SplitTag, TagExt, TagItem, TagType},
 };
 use regex::Regex;
 use tokio::{
@@ -243,6 +250,92 @@ impl LibraryService {
             .await
             .map_err(|_| LibraryError::TrackReadFailure)?
     }
+
+    pub async fn export_field_to_tag(
+        &self,
+        request: FieldExportRequest,
+    ) -> Result<LibrarySnapshot, LibraryError> {
+        let track_paths = dedupe_preserve_order(
+            request
+                .track_paths
+                .into_iter()
+                .map(|path| path.trim().to_string())
+                .filter(|path| !path.is_empty())
+                .collect(),
+        );
+        let field_key = request.field_key.trim().to_string();
+        let tag_name = request.tag_name.trim().to_string();
+
+        if track_paths.is_empty() {
+            return Err(LibraryError::EmptyFieldExportSelection);
+        }
+
+        if field_key.is_empty() {
+            return Err(LibraryError::InvalidFieldExportField);
+        }
+
+        if tag_name.is_empty() {
+            return Err(LibraryError::InvalidFieldExportTag);
+        }
+
+        let snapshot = self.state.read().await.clone();
+        if snapshot.is_scanning {
+            return Err(LibraryError::AlreadyScanning);
+        }
+
+        let field_exists = snapshot
+            .field_mappings
+            .iter()
+            .any(|mapping| mapping.key == field_key)
+            || snapshot
+                .tracks
+                .iter()
+                .any(|track| track.mapped_fields.contains_key(&field_key));
+
+        if !field_exists {
+            return Err(LibraryError::InvalidFieldExportField);
+        }
+
+        let track_lookup = snapshot
+            .tracks
+            .iter()
+            .cloned()
+            .map(|track| (track.path.clone(), track))
+            .collect::<HashMap<_, _>>();
+        let mappings = snapshot.field_mappings.clone();
+        let compiled_catalog_rules = compile_catalog_rules(&snapshot.catalog_rules);
+        let cache_root = album_art_cache_root();
+
+        let updated_tracks = spawn_blocking(move || {
+            export_field_to_tag_from_tracks(
+                &track_lookup,
+                &track_paths,
+                &field_key,
+                &tag_name,
+                &mappings,
+                &compiled_catalog_rules,
+                &cache_root,
+            )
+        })
+        .await
+        .map_err(|_| LibraryError::FieldExportRefreshFailure)?
+        ?;
+
+        let updated_track_lookup = updated_tracks
+            .into_iter()
+            .map(|track| (track.path.clone(), track))
+            .collect::<HashMap<_, _>>();
+
+        let mut state = self.state.write().await;
+        for track in &mut state.tracks {
+            if let Some(updated) = updated_track_lookup.get(&track.path) {
+                *track = updated.clone();
+            }
+        }
+        state.tag_inventory = build_tag_inventory(&state.tracks);
+
+        Ok(state.clone())
+    }
 }
 
 fn scan_library(
@@ -257,14 +350,12 @@ fn scan_library(
     let discovered_files = audio_files.len() as u64;
     let mut failed_files = 0_u64;
     let mut tracks = Vec::new();
-    let mut inventory: HashMap<String, InventoryAccumulator> = HashMap::new();
 
     std::fs::create_dir_all(cache_root).ok();
 
     for (index, path) in audio_files.iter().enumerate() {
         match scan_single_track(path, mappings, &compiled_catalog_rules, cache_root) {
             Ok(track) => {
-                merge_inventory(&mut inventory, &track.raw_tags);
                 tracks.push(track);
             }
             Err(_) => {
@@ -287,21 +378,7 @@ fn scan_library(
 
     tracks.sort_by(|left, right| left.path.cmp(&right.path));
 
-    let mut tag_inventory = inventory
-        .into_iter()
-        .map(|(tag, accumulator)| TagInventoryEntry {
-            tag,
-            occurrences: accumulator.occurrences,
-            example_values: accumulator.example_values,
-        })
-        .collect::<Vec<_>>();
-
-    tag_inventory.sort_by(|left, right| {
-        right
-            .occurrences
-            .cmp(&left.occurrences)
-            .then_with(|| left.tag.cmp(&right.tag))
-    });
+    let tag_inventory = build_tag_inventory(&tracks);
 
     Ok(ScanArtifacts {
         indexed_files: tracks.len() as u64,
@@ -449,6 +526,559 @@ fn read_raw_tags_from_path(path: &Path) -> Result<BTreeMap<String, Vec<String>>,
     let mut raw_tags = collect_raw_tags(&tagged_file);
     merge_format_specific_raw_tags(path, &mut raw_tags);
     Ok(raw_tags)
+}
+
+fn export_field_to_tag_from_tracks(
+    track_lookup: &HashMap<String, ScannedTrack>,
+    track_paths: &[String],
+    field_key: &str,
+    tag_name: &str,
+    mappings: &[LibraryFieldMapping],
+    catalog_rules: &[CompiledCatalogRule],
+    cache_root: &Path,
+) -> Result<Vec<ScannedTrack>, LibraryError> {
+    let mut updated_tracks = Vec::with_capacity(track_paths.len());
+
+    for track_path in track_paths {
+        let Some(track) = track_lookup.get(track_path) else {
+            return Err(LibraryError::FieldExportTrackNotFound {
+                path: track_path.clone(),
+            });
+        };
+
+        let values = track.mapped_fields.get(field_key).cloned().unwrap_or_default();
+        let path = PathBuf::from(track_path);
+
+        write_field_values_to_path(&path, tag_name, &values)?;
+
+        let refreshed_track = scan_single_track(&path, mappings, catalog_rules, cache_root)
+            .map_err(|_| LibraryError::FieldExportTrackRefreshFailure {
+                path: track_path.clone(),
+            })?;
+        updated_tracks.push(refreshed_track);
+    }
+
+    Ok(updated_tracks)
+}
+
+fn write_field_values_to_path(
+    path: &Path,
+    tag_name: &str,
+    values: &[String],
+) -> Result<(), LibraryError> {
+    let Some(file_type) = path.extension().and_then(FileType::from_ext) else {
+        return Err(LibraryError::FieldExportWriteFailure {
+            path: path.to_string_lossy().into_owned(),
+            message: "unsupported audio format".into(),
+        });
+    };
+
+    match file_type {
+        FileType::Aac => {
+            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
+                path: path.to_string_lossy().into_owned(),
+                message: error.to_string(),
+            })?;
+            let mut audio =
+                AacFile::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
+                    LibraryError::FieldExportWriteFailure {
+                        path: path.to_string_lossy().into_owned(),
+                        message: error.to_string(),
+                    }
+                })?;
+
+            apply_id3v2_export(&mut audio, values, tag_name);
+            audio
+                .save_to_path(path, WriteOptions::default())
+                .map_err(|error| LibraryError::FieldExportWriteFailure {
+                    path: path.to_string_lossy().into_owned(),
+                    message: error.to_string(),
+                })?;
+        }
+        FileType::Aiff => {
+            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
+                path: path.to_string_lossy().into_owned(),
+                message: error.to_string(),
+            })?;
+            let mut audio =
+                AiffFile::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
+                    LibraryError::FieldExportWriteFailure {
+                        path: path.to_string_lossy().into_owned(),
+                        message: error.to_string(),
+                    }
+                })?;
+
+            apply_id3v2_export(&mut audio, values, tag_name);
+            audio
+                .save_to_path(path, WriteOptions::default())
+                .map_err(|error| LibraryError::FieldExportWriteFailure {
+                    path: path.to_string_lossy().into_owned(),
+                    message: error.to_string(),
+                })?;
+        }
+        FileType::Flac => {
+            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
+                path: path.to_string_lossy().into_owned(),
+                message: error.to_string(),
+            })?;
+            let mut audio =
+                FlacFile::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
+                    LibraryError::FieldExportWriteFailure {
+                        path: path.to_string_lossy().into_owned(),
+                        message: error.to_string(),
+                    }
+                })?;
+
+            apply_vorbis_export(&mut audio, values, tag_name);
+            audio
+                .save_to_path(path, WriteOptions::default())
+                .map_err(|error| LibraryError::FieldExportWriteFailure {
+                    path: path.to_string_lossy().into_owned(),
+                    message: error.to_string(),
+                })?;
+        }
+        FileType::Mpeg => {
+            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
+                path: path.to_string_lossy().into_owned(),
+                message: error.to_string(),
+            })?;
+            let mut audio =
+                MpegFile::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
+                    LibraryError::FieldExportWriteFailure {
+                        path: path.to_string_lossy().into_owned(),
+                        message: error.to_string(),
+                    }
+                })?;
+
+            apply_id3v2_export(&mut audio, values, tag_name);
+            audio
+                .save_to_path(path, WriteOptions::default())
+                .map_err(|error| LibraryError::FieldExportWriteFailure {
+                    path: path.to_string_lossy().into_owned(),
+                    message: error.to_string(),
+                })?;
+        }
+        FileType::Mp4 => {
+            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
+                path: path.to_string_lossy().into_owned(),
+                message: error.to_string(),
+            })?;
+            let mut audio =
+                Mp4File::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
+                    LibraryError::FieldExportWriteFailure {
+                        path: path.to_string_lossy().into_owned(),
+                        message: error.to_string(),
+                    }
+                })?;
+
+            apply_ilst_export(&mut audio, values, tag_name);
+            audio
+                .save_to_path(path, WriteOptions::default())
+                .map_err(|error| LibraryError::FieldExportWriteFailure {
+                    path: path.to_string_lossy().into_owned(),
+                    message: error.to_string(),
+                })?;
+        }
+        FileType::Opus => {
+            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
+                path: path.to_string_lossy().into_owned(),
+                message: error.to_string(),
+            })?;
+            let mut audio =
+                OpusFile::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
+                    LibraryError::FieldExportWriteFailure {
+                        path: path.to_string_lossy().into_owned(),
+                        message: error.to_string(),
+                    }
+                })?;
+
+            apply_vorbis_export(&mut audio, values, tag_name);
+            audio
+                .save_to_path(path, WriteOptions::default())
+                .map_err(|error| LibraryError::FieldExportWriteFailure {
+                    path: path.to_string_lossy().into_owned(),
+                    message: error.to_string(),
+                })?;
+        }
+        FileType::Vorbis => {
+            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
+                path: path.to_string_lossy().into_owned(),
+                message: error.to_string(),
+            })?;
+            let mut audio =
+                VorbisFile::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
+                    LibraryError::FieldExportWriteFailure {
+                        path: path.to_string_lossy().into_owned(),
+                        message: error.to_string(),
+                    }
+                })?;
+
+            apply_vorbis_export(&mut audio, values, tag_name);
+            audio
+                .save_to_path(path, WriteOptions::default())
+                .map_err(|error| LibraryError::FieldExportWriteFailure {
+                    path: path.to_string_lossy().into_owned(),
+                    message: error.to_string(),
+                })?;
+        }
+        FileType::Speex => {
+            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
+                path: path.to_string_lossy().into_owned(),
+                message: error.to_string(),
+            })?;
+            let mut audio =
+                SpeexFile::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
+                    LibraryError::FieldExportWriteFailure {
+                        path: path.to_string_lossy().into_owned(),
+                        message: error.to_string(),
+                    }
+                })?;
+
+            apply_vorbis_export(&mut audio, values, tag_name);
+            audio
+                .save_to_path(path, WriteOptions::default())
+                .map_err(|error| LibraryError::FieldExportWriteFailure {
+                    path: path.to_string_lossy().into_owned(),
+                    message: error.to_string(),
+                })?;
+        }
+        FileType::Wav => {
+            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
+                path: path.to_string_lossy().into_owned(),
+                message: error.to_string(),
+            })?;
+            let mut audio =
+                WavFile::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
+                    LibraryError::FieldExportWriteFailure {
+                        path: path.to_string_lossy().into_owned(),
+                        message: error.to_string(),
+                    }
+                })?;
+
+            apply_id3v2_export(&mut audio, values, tag_name);
+            audio
+                .save_to_path(path, WriteOptions::default())
+                .map_err(|error| LibraryError::FieldExportWriteFailure {
+                    path: path.to_string_lossy().into_owned(),
+                    message: error.to_string(),
+                })?;
+        }
+        _ => {
+            return Err(LibraryError::FieldExportWriteFailure {
+                path: path.to_string_lossy().into_owned(),
+                message: "unsupported audio format".into(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_id3v2_export<T>(file: &mut T, values: &[String], tag_name: &str)
+where
+    T: Id3v2TagContainer,
+{
+    let should_remove = if let Some(tag) = file.id3v2_tag_mut() {
+        write_values_to_id3v2_tag(tag, tag_name, values);
+        tag.is_empty()
+    } else {
+        false
+    };
+
+    if should_remove {
+        file.remove_id3v2_tag();
+        return;
+    }
+
+    if file.id3v2_tag_mut().is_some() || values.is_empty() {
+        return;
+    }
+
+    let mut tag = Id3v2Tag::new();
+    write_values_to_id3v2_tag(&mut tag, tag_name, values);
+    if !tag.is_empty() {
+        file.set_id3v2_tag(tag);
+    }
+}
+
+fn apply_vorbis_export<T>(file: &mut T, values: &[String], tag_name: &str)
+where
+    T: VorbisTagContainer,
+{
+    let should_remove = if let Some(tag) = file.vorbis_tag_mut() {
+        write_values_to_vorbis_tag(tag, tag_name, values);
+        tag.is_empty()
+    } else {
+        false
+    };
+
+    if should_remove {
+        file.remove_vorbis_tag();
+        return;
+    }
+
+    if file.vorbis_tag_mut().is_some() || values.is_empty() {
+        return;
+    }
+
+    let mut tag = VorbisComments::new();
+    write_values_to_vorbis_tag(&mut tag, tag_name, values);
+    if !tag.is_empty() {
+        file.set_vorbis_tag(tag);
+    }
+}
+
+fn apply_ilst_export<T>(file: &mut T, values: &[String], tag_name: &str)
+where
+    T: IlstTagContainer,
+{
+    let should_remove = if let Some(tag) = file.ilst_tag_mut() {
+        write_values_to_ilst_tag(tag, tag_name, values);
+        tag.is_empty()
+    } else {
+        false
+    };
+
+    if should_remove {
+        file.remove_ilst_tag();
+        return;
+    }
+
+    if file.ilst_tag_mut().is_some() || values.is_empty() {
+        return;
+    }
+
+    let mut tag = Ilst::new();
+    write_values_to_ilst_tag(&mut tag, tag_name, values);
+    if !tag.is_empty() {
+        file.set_ilst_tag(tag);
+    }
+}
+
+fn write_values_to_id3v2_tag(tag: &mut Id3v2Tag, tag_name: &str, values: &[String]) {
+    if let Some(item_key) = ItemKey::from_key(TagType::Id3v2, tag_name) {
+        let (remainder, mut generic_tag) = std::mem::take(tag).split_tag();
+        apply_values_to_generic_tag(&mut generic_tag, item_key, values);
+        *tag = remainder.merge_tag(generic_tag);
+        return;
+    }
+
+    tag.remove_user_text(tag_name);
+    if !values.is_empty() {
+        tag.insert_user_text(tag_name.to_string(), join_single_slot_values(values));
+    }
+}
+
+fn write_values_to_vorbis_tag(tag: &mut VorbisComments, tag_name: &str, values: &[String]) {
+    let key = tag_name.to_string();
+    let _ = tag.remove(&key).count();
+    for value in values {
+        tag.push(key.clone(), value.clone());
+    }
+}
+
+fn write_values_to_ilst_tag(tag: &mut Ilst, tag_name: &str, values: &[String]) {
+    if let Some(item_key) = ItemKey::from_key(TagType::Mp4Ilst, tag_name) {
+        let (remainder, mut generic_tag) = std::mem::take(tag).split_tag();
+        apply_values_to_generic_tag(&mut generic_tag, item_key, values);
+        *tag = remainder.merge_tag(generic_tag);
+        return;
+    }
+
+    let ident = parse_mp4_freeform_ident(tag_name);
+    let _ = tag.remove(&ident);
+
+    if let Some((first_value, remaining_values)) = values.split_first() {
+        tag.replace_atom(Atom::new(ident.clone(), AtomData::UTF8(first_value.clone())));
+        for value in remaining_values {
+            tag.insert(Atom::new(ident.clone(), AtomData::UTF8(value.clone())));
+        }
+    }
+}
+
+fn apply_values_to_generic_tag(
+    tag: &mut lofty::tag::Tag,
+    item_key: ItemKey,
+    values: &[String],
+) {
+    tag.remove_key(item_key);
+    for value in values {
+        tag.push(TagItem::new(item_key, ItemValue::Text(value.clone())));
+    }
+}
+
+fn join_single_slot_values(values: &[String]) -> String {
+    values.join("; ")
+}
+
+fn parse_mp4_freeform_ident(tag_name: &str) -> AtomIdent<'static> {
+    if let Some(remainder) = tag_name.strip_prefix("----:") {
+        let mut parts = remainder.splitn(2, ':');
+        let mean = parts.next().unwrap_or_default().trim();
+        let name = parts.next().unwrap_or_default().trim();
+
+        if !mean.is_empty() && !name.is_empty() {
+            return AtomIdent::Freeform {
+                mean: Cow::Owned(mean.to_string()),
+                name: Cow::Owned(name.to_string()),
+            };
+        }
+    }
+
+    AtomIdent::Freeform {
+        mean: Cow::Owned("com.apple.iTunes".to_string()),
+        name: Cow::Owned(tag_name.to_string()),
+    }
+}
+
+fn tag_write_parse_options() -> ParseOptions {
+    ParseOptions::new()
+        .read_properties(false)
+        .read_cover_art(true)
+}
+
+trait Id3v2TagContainer {
+    fn id3v2_tag_mut(&mut self) -> Option<&mut Id3v2Tag>;
+    fn set_id3v2_tag(&mut self, tag: Id3v2Tag);
+    fn remove_id3v2_tag(&mut self);
+}
+
+impl Id3v2TagContainer for AacFile {
+    fn id3v2_tag_mut(&mut self) -> Option<&mut Id3v2Tag> {
+        self.id3v2_mut()
+    }
+
+    fn set_id3v2_tag(&mut self, tag: Id3v2Tag) {
+        let _ = self.set_id3v2(tag);
+    }
+
+    fn remove_id3v2_tag(&mut self) {
+        let _ = self.remove_id3v2();
+    }
+}
+
+impl Id3v2TagContainer for AiffFile {
+    fn id3v2_tag_mut(&mut self) -> Option<&mut Id3v2Tag> {
+        self.id3v2_mut()
+    }
+
+    fn set_id3v2_tag(&mut self, tag: Id3v2Tag) {
+        let _ = self.set_id3v2(tag);
+    }
+
+    fn remove_id3v2_tag(&mut self) {
+        let _ = self.remove_id3v2();
+    }
+}
+
+impl Id3v2TagContainer for MpegFile {
+    fn id3v2_tag_mut(&mut self) -> Option<&mut Id3v2Tag> {
+        self.id3v2_mut()
+    }
+
+    fn set_id3v2_tag(&mut self, tag: Id3v2Tag) {
+        let _ = self.set_id3v2(tag);
+    }
+
+    fn remove_id3v2_tag(&mut self) {
+        let _ = self.remove_id3v2();
+    }
+}
+
+impl Id3v2TagContainer for WavFile {
+    fn id3v2_tag_mut(&mut self) -> Option<&mut Id3v2Tag> {
+        self.id3v2_mut()
+    }
+
+    fn set_id3v2_tag(&mut self, tag: Id3v2Tag) {
+        let _ = self.set_id3v2(tag);
+    }
+
+    fn remove_id3v2_tag(&mut self) {
+        let _ = self.remove_id3v2();
+    }
+}
+
+trait VorbisTagContainer {
+    fn vorbis_tag_mut(&mut self) -> Option<&mut VorbisComments>;
+    fn set_vorbis_tag(&mut self, tag: VorbisComments);
+    fn remove_vorbis_tag(&mut self);
+}
+
+impl VorbisTagContainer for FlacFile {
+    fn vorbis_tag_mut(&mut self) -> Option<&mut VorbisComments> {
+        self.vorbis_comments_mut()
+    }
+
+    fn set_vorbis_tag(&mut self, tag: VorbisComments) {
+        let _ = self.set_vorbis_comments(tag);
+    }
+
+    fn remove_vorbis_tag(&mut self) {
+        let _ = self.remove_vorbis_comments();
+    }
+}
+
+impl VorbisTagContainer for OpusFile {
+    fn vorbis_tag_mut(&mut self) -> Option<&mut VorbisComments> {
+        Some(self.vorbis_comments_mut())
+    }
+
+    fn set_vorbis_tag(&mut self, tag: VorbisComments) {
+        let _ = self.set_vorbis_comments(tag);
+    }
+
+    fn remove_vorbis_tag(&mut self) {
+        let _ = self.remove_vorbis_comments();
+    }
+}
+
+impl VorbisTagContainer for SpeexFile {
+    fn vorbis_tag_mut(&mut self) -> Option<&mut VorbisComments> {
+        Some(self.vorbis_comments_mut())
+    }
+
+    fn set_vorbis_tag(&mut self, tag: VorbisComments) {
+        let _ = self.set_vorbis_comments(tag);
+    }
+
+    fn remove_vorbis_tag(&mut self) {
+        let _ = self.remove_vorbis_comments();
+    }
+}
+
+impl VorbisTagContainer for VorbisFile {
+    fn vorbis_tag_mut(&mut self) -> Option<&mut VorbisComments> {
+        Some(self.vorbis_comments_mut())
+    }
+
+    fn set_vorbis_tag(&mut self, tag: VorbisComments) {
+        let _ = self.set_vorbis_comments(tag);
+    }
+
+    fn remove_vorbis_tag(&mut self) {
+        let _ = self.remove_vorbis_comments();
+    }
+}
+
+trait IlstTagContainer {
+    fn ilst_tag_mut(&mut self) -> Option<&mut Ilst>;
+    fn set_ilst_tag(&mut self, tag: Ilst);
+    fn remove_ilst_tag(&mut self);
+}
+
+impl IlstTagContainer for Mp4File {
+    fn ilst_tag_mut(&mut self) -> Option<&mut Ilst> {
+        self.ilst_mut()
+    }
+
+    fn set_ilst_tag(&mut self, tag: Ilst) {
+        let _ = self.set_ilst(tag);
+    }
+
+    fn remove_ilst_tag(&mut self) {
+        let _ = self.remove_ilst();
+    }
 }
 
 fn read_flac_vorbis_comments(path: &Path) -> Option<VorbisComments> {
@@ -622,6 +1252,32 @@ fn merge_inventory(
             }
         }
     }
+}
+
+fn build_tag_inventory(tracks: &[ScannedTrack]) -> Vec<TagInventoryEntry> {
+    let mut inventory: HashMap<String, InventoryAccumulator> = HashMap::new();
+
+    for track in tracks {
+        merge_inventory(&mut inventory, &track.raw_tags);
+    }
+
+    let mut entries = inventory
+        .into_iter()
+        .map(|(tag, accumulator)| TagInventoryEntry {
+            tag,
+            occurrences: accumulator.occurrences,
+            example_values: accumulator.example_values,
+        })
+        .collect::<Vec<_>>();
+
+    entries.sort_by(|left, right| {
+        right
+            .occurrences
+            .cmp(&left.occurrences)
+            .then_with(|| left.tag.cmp(&right.tag))
+    });
+
+    entries
 }
 
 fn map_fields(
@@ -1030,7 +1686,8 @@ fn cover_art_parse_options() -> ParseOptions {
 mod tests {
     use super::{
         compile_catalog_rules, extract_catalog_numbers, find_album_art, scan_library,
-        scan_single_track,
+        parse_mp4_freeform_ident, scan_single_track, write_values_to_id3v2_tag,
+        write_values_to_vorbis_tag,
     };
     use std::{
         collections::BTreeMap,
@@ -1039,6 +1696,7 @@ mod tests {
     };
 
     use aria_domain::{default_catalog_rules, default_field_mappings, LibraryRoot};
+    use lofty::{id3::v2::{FrameId, Id3v2Tag}, mp4::AtomIdent, ogg::VorbisComments};
     use tokio::sync::broadcast;
 
     #[test]
@@ -1296,6 +1954,63 @@ mod tests {
         let values = extract_catalog_numbers(&raw_tags, &rules);
 
         assert_eq!(values, vec!["Hob. XVI 52"]);
+    }
+
+    #[test]
+    fn id3v2_export_updates_known_frame_values() {
+        let mut tag = Id3v2Tag::new();
+        write_values_to_id3v2_tag(
+            &mut tag,
+            "TCOM",
+            &["Claude Debussy".into(), "Maurice Ravel".into()],
+        );
+
+        let frame_id = FrameId::new("TCOM").expect("TCOM should be a valid frame id");
+        let composers = tag
+            .get_text(&frame_id)
+            .expect("composer frame should be written")
+            .split('\0')
+            .collect::<Vec<_>>();
+        assert_eq!(composers, vec!["Claude Debussy", "Maurice Ravel"]);
+    }
+
+    #[test]
+    fn id3v2_export_uses_user_text_for_custom_tags() {
+        let mut tag = Id3v2Tag::new();
+        write_values_to_id3v2_tag(
+            &mut tag,
+            "CATALOG",
+            &["BWV 1007".into(), "BWV 1008".into()],
+        );
+
+        assert_eq!(tag.get_user_text("CATALOG"), Some("BWV 1007; BWV 1008"));
+    }
+
+    #[test]
+    fn vorbis_export_replaces_target_tag_with_all_values() {
+        let mut tag = VorbisComments::new();
+        tag.push("CATALOGNUMBER".into(), "OLD 1".into());
+        tag.push("CATALOGNUMBER".into(), "OLD 2".into());
+
+        write_values_to_vorbis_tag(
+            &mut tag,
+            "CATALOGNUMBER",
+            &["HOB. XVI 52".into(), "OP. 57".into()],
+        );
+
+        let values = tag.get_all("CATALOGNUMBER").collect::<Vec<_>>();
+        assert_eq!(values, vec!["HOB. XVI 52", "OP. 57"]);
+    }
+
+    #[test]
+    fn mp4_freeform_ident_parser_preserves_explicit_mean_and_name() {
+        let ident = parse_mp4_freeform_ident("----:com.apple.iTunes:CATALOGNUMBER");
+
+        assert!(matches!(
+            ident,
+            AtomIdent::Freeform { mean, name }
+                if mean == "com.apple.iTunes" && name == "CATALOGNUMBER"
+        ));
     }
 
 }

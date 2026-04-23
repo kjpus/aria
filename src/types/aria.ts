@@ -60,6 +60,12 @@ export type LibraryFieldMapping = {
   tagPriorities: string[];
 };
 
+export type FieldExportRequest = {
+  trackPaths: string[];
+  fieldKey: string;
+  tagName: string;
+};
+
 export type CatalogRule = {
   label: string;
   composers: string[];
