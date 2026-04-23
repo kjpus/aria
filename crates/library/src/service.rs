@@ -700,18 +700,22 @@ fn extract_catalog_matches_from_value(source_value: &str, regex: &Regex) -> Vec<
     }
 
     for segment in segments.into_iter().rev() {
-        let matches = regex
-            .find_iter(segment)
-            .filter(|matched| !match_is_followed_by_catalog_range(segment, matched.end()))
-            .map(|matched| matched.as_str().trim().to_string())
-            .collect::<Vec<_>>();
+        let matches = collect_catalog_matches(segment, regex);
 
         if !matches.is_empty() {
             return matches;
         }
     }
 
-    Vec::new()
+    collect_catalog_matches(source_value, regex)
+}
+
+fn collect_catalog_matches(value: &str, regex: &Regex) -> Vec<String> {
+    regex
+        .find_iter(value)
+        .filter(|matched| !match_is_followed_by_catalog_range(value, matched.end()))
+        .map(|matched| matched.as_str().trim().to_string())
+        .collect()
 }
 
 fn match_is_followed_by_catalog_range(value: &str, match_end: usize) -> bool {
@@ -818,7 +822,7 @@ fn build_catalog_label_regex(label: &str) -> Result<Regex, LibraryError> {
     }
 
     Regex::new(&format!(
-        r"(?i)\b{prefix}\s*(?:[IVXLCM]+\s*[:.]\s*)?\d+[A-Za-z]?(?:\s*[:.]\s*[A-Za-z0-9]+)?(?:\s*No\.?\s*\d+)?\b"
+        r"(?i)\b{prefix}\s*(?:(?:XXXII|XXXI|XXX|XXIX|XXVIII|XXVII|XXVI|XXV|XXIV|XXIII|XXII|XXI|XX|XIX|XVIII|XVII|XVI|XV|XIV|XIII|XII|XI|X|IX|VIII|VII|VI|V|IV|III|II|I)[ab]?\s*:?\s*)?\d+[A-Za-z]?(?:\s*[:.]\s*[A-Za-z0-9]+)?(?:\s*No\.?\s*\d+)?\b"
     ))
     .map_err(|error| LibraryError::InvalidCatalogRule {
         label: normalized,
@@ -1260,6 +1264,38 @@ mod tests {
         let values = extract_catalog_numbers(&raw_tags, &rules);
 
         assert_eq!(values, vec!["Op. 57"]);
+    }
+
+    #[test]
+    fn haydn_hob_catalog_extracts_sectioned_catalog_number() {
+        let rules = compile_catalog_rules(&default_catalog_rules());
+        let raw_tags = BTreeMap::from([
+            ("COMPOSER".into(), vec!["Joseph Haydn".into()]),
+            (
+                "TITLE".into(),
+                vec!["String Quartet in C major, Hob. IIIb:2".into()],
+            ),
+        ]);
+
+        let values = extract_catalog_numbers(&raw_tags, &rules);
+
+        assert_eq!(values, vec!["Hob. IIIb:2"]);
+    }
+
+    #[test]
+    fn haydn_hob_catalog_allows_missing_colon_before_number() {
+        let rules = compile_catalog_rules(&default_catalog_rules());
+        let raw_tags = BTreeMap::from([
+            ("COMPOSER".into(), vec!["Franz Joseph Haydn".into()]),
+            (
+                "TITLE".into(),
+                vec!["Piano Sonata in E-flat major, Hob. XVI 52".into()],
+            ),
+        ]);
+
+        let values = extract_catalog_numbers(&raw_tags, &rules);
+
+        assert_eq!(values, vec!["Hob. XVI 52"]);
     }
 
 }

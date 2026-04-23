@@ -117,6 +117,7 @@ export function AlbumPane({
   const [tagInspectorError, setTagInspectorError] = useState<string | null>(null);
   const [isTagInspectorOpen, setIsTagInspectorOpen] = useState(false);
   const [isTagInspectorLoading, setIsTagInspectorLoading] = useState(false);
+  const [isArtViewerOpen, setIsArtViewerOpen] = useState(false);
   const [hasHydrated, setHasHydrated] = useState(false);
   const albums = useMemo(() => buildAlbumCards(tracks), [tracks]);
   const columns = useMemo(() => buildTrackColumns(mappings), [mappings]);
@@ -319,7 +320,7 @@ export function AlbumPane({
   }, [albumContextMenu, trackContextMenu]);
 
   useEffect(() => {
-    if (!isLayoutDialogOpen && !isTagInspectorOpen) {
+    if (!isLayoutDialogOpen && !isTagInspectorOpen && !isArtViewerOpen) {
       return undefined;
     }
 
@@ -327,12 +328,13 @@ export function AlbumPane({
       if (event.key === 'Escape') {
         setIsLayoutDialogOpen(false);
         setIsTagInspectorOpen(false);
+        setIsArtViewerOpen(false);
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isLayoutDialogOpen, isTagInspectorOpen]);
+  }, [isArtViewerOpen, isLayoutDialogOpen, isTagInspectorOpen]);
 
   useEffect(() => {
     if (!hasHydrated) {
@@ -588,7 +590,12 @@ export function AlbumPane({
           <div className="album-detail__hero">
             <div className="album-detail__art-column">
               {art ? (
-                <img alt="" className="album-detail__art" src={art} />
+                <img
+                  alt={`${selectedAlbum.title} cover art`}
+                  className="album-detail__art album-detail__art--interactive"
+                  onDoubleClick={() => setIsArtViewerOpen(true)}
+                  src={art}
+                />
               ) : (
                 <div className="album-detail__art album-card__art--empty">Aria</div>
               )}
@@ -900,6 +907,35 @@ export function AlbumPane({
         tags={tagInspectorTags}
         track={tagInspectorTrack}
       />
+
+      {isArtViewerOpen && art ? (
+        <div
+          className="dialog-backdrop dialog-backdrop--image-viewer"
+          onClick={() => setIsArtViewerOpen(false)}
+          role="presentation"
+        >
+          <div
+            aria-label="Album cover viewer"
+            aria-modal="true"
+            className="image-viewer"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+          >
+            <button
+              className="ghost-button image-viewer__close"
+              onClick={() => setIsArtViewerOpen(false)}
+              type="button"
+            >
+              Close
+            </button>
+            <img
+              alt={`${selectedAlbum.title} cover art`}
+              className="image-viewer__image"
+              src={art}
+            />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

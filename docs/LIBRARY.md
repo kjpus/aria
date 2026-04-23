@@ -234,6 +234,8 @@ Instead, all labels share the same extraction logic:
 - look for the configured label plus a catalog number
 - keep the first segment that yields matches
 
+The shared parser also supports sectioned forms like `Hob. XVI:52` and `Hob. IIIb:2`, where the label is followed by a Roman-numeral section, an optional `a` or `b`, and then the item number.
+
 The only per-rule difference is the catalog label itself, plus optional composer hints. The built-in `Op` rule is the catch-all fallback.
 
 ### Colon-segment preference
