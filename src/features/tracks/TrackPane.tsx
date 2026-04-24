@@ -557,7 +557,7 @@ export function TrackPane({
     setAlbumContextMenu({
       albumId,
       x: Math.min(event.clientX, window.innerWidth - 240),
-      y: Math.min(event.clientY, window.innerHeight - 220),
+      y: Math.min(event.clientY, window.innerHeight - 250),
     });
   }
 
@@ -672,6 +672,18 @@ export function TrackPane({
       null;
     setAlbumContextMenu(null);
     openExportDialog(group?.tracks ?? []);
+  }
+
+  function runAlbumEditTags() {
+    if (!albumContextMenu) {
+      return;
+    }
+
+    const group =
+      albumGroups.find((candidate) => candidate.albumId === albumContextMenu.albumId) ??
+      null;
+    setAlbumContextMenu(null);
+    openEditTagsDialog(group?.tracks ?? []);
   }
 
   function runTrackExportField() {
@@ -937,6 +949,9 @@ export function TrackPane({
             </button>
             <button onClick={() => void runAlbumContextAction(onPlayAlbum)} type="button">
               Play album
+            </button>
+            <button onClick={() => runAlbumEditTags()} type="button">
+              Edit tags
             </button>
             <button onClick={() => runAlbumExportField()} type="button">
               Export field
