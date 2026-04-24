@@ -226,43 +226,28 @@ function hashTrack(input: string): number {
   return hash;
 }
 
-const trackTotalTagKeys = ['TRACKTOTAL', 'TOTALTRACKS', 'TRACKC'];
-
 export function compareTracksWithinAlbum(
   left: ScannedTrack,
   right: ScannedTrack,
 ): number {
   const leftDiskNumber = numericMappedFieldValue(left, 'disk_number');
   const rightDiskNumber = numericMappedFieldValue(right, 'disk_number');
+  const leftTrackNumber = numericMappedFieldValue(left, 'track_number');
+  const rightTrackNumber = numericMappedFieldValue(right, 'track_number');
 
-  if (leftDiskNumber !== null || rightDiskNumber !== null) {
+  if (leftDiskNumber !== null && rightDiskNumber !== null) {
     const diskComparison = compareNullableNumbers(leftDiskNumber, rightDiskNumber);
     if (diskComparison !== 0) {
       return diskComparison;
     }
-
-    const leftTrackNumber = numericMappedFieldValue(left, 'track_number');
-    const rightTrackNumber = numericMappedFieldValue(right, 'track_number');
-    const trackComparison = compareNullableNumbers(
-      leftTrackNumber,
-      rightTrackNumber,
-    );
-    if (trackComparison !== 0) {
-      return trackComparison;
-    }
-
-    return compareTrackTitleOrFileName(left, right);
   }
 
-  const leftNoDiscValue =
-    numericRawTagValue(left, trackTotalTagKeys) ??
-    numericMappedFieldValue(left, 'track_number');
-  const rightNoDiscValue =
-    numericRawTagValue(right, trackTotalTagKeys) ??
-    numericMappedFieldValue(right, 'track_number');
-  const noDiscComparison = compareNullableNumbers(leftNoDiscValue, rightNoDiscValue);
+  const trackComparison = compareNullableNumbers(leftTrackNumber, rightTrackNumber);
+  if (trackComparison !== 0) {
+    return trackComparison;
+  }
 
-  return noDiscComparison || compareTrackTitleOrFileName(left, right);
+  return compareTrackTitleOrFileName(left, right);
 }
 
 function compareNullableNumbers(
@@ -299,19 +284,6 @@ function compareTrackTitleOrFileName(
 
 function numericMappedFieldValue(track: ScannedTrack, key: string): number | null {
   return parseNumericValue(firstField(track, key));
-}
-
-function numericRawTagValue(track: ScannedTrack, keys: string[]): number | null {
-  for (const key of keys) {
-    const rawValue = track.rawTags[key]?.[0];
-    const parsedValue = parseNumericValue(rawValue ?? '');
-
-    if (parsedValue !== null) {
-      return parsedValue;
-    }
-  }
-
-  return null;
 }
 
 function parseNumericValue(value: string): number | null {
