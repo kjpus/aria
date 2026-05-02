@@ -213,4 +213,4 @@ Aria is licensed under the Apache License, Version 2.0. See [LICENSE](./LICENSE)
 
 ## Note
 
-This app is vibe-coded using OpenAI's Codex with GPT-5.4 on Extra High reasoning. I've had a idea of a music player more suited for classical music (at least in my mind) for a while. I recently got my hands on Codex and decided to try vibe-coding as a learning experience. GPT came up with a few tech-stack options at the beginning. I made the choice because I don't know any of the technologies, perfect for a vibe-coding exercise. 
+This app is vibe-coded using OpenAI's Codex with GPT-5.4 on Extra High reasoning. I've had the idea of a music player more suited for classical music (at least in my mind) for a while. I recently got my hands on Codex and decided to try vibe-coding as a learning experience. GPT came up with a few tech-stack options at the beginning. I made the choice because I don't know any of the technologies, perfect for a vibe-coding exercise. 
