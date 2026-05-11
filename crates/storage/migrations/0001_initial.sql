@@ -19,6 +19,7 @@ create table if not exists library_roots (
 
 create table if not exists field_mappings (
   position integer primary key,
+  format text not null default 'DEFAULT',
   field_key text not null,
   label text not null,
   tag_priorities_json text not null

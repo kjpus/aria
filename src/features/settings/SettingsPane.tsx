@@ -14,6 +14,11 @@ import { FieldMappingsPanel } from '../library/FieldMappingsPanel';
 import { LibraryPanel } from '../library/LibraryPanel';
 import { PlaybackSettingsPanel } from './PlaybackSettingsPanel';
 import { SettingsPanel } from './SettingsPanel';
+import {
+  fieldMappingFormatLabel,
+  normalizeFieldMappingFormat,
+  type FieldMappingFormat,
+} from '../../lib/field-mapping-presets';
 
 type SettingsPaneProps = {
   library: LibrarySnapshot;
@@ -21,16 +26,22 @@ type SettingsPaneProps = {
   outputDevices: OutputDeviceSnapshot[];
   draftMappings: LibraryFieldMapping[];
   draftCatalogRules: CatalogRule[];
+  selectedMappingFormat: FieldMappingFormat;
   settings: SettingsSnapshot;
   onAddDirectory: () => void;
   onClearLibrary: () => void;
   onRemoveRoot: (path: string) => void;
   onRescanAll: () => void;
-  onAddField: () => void;
+  onAddField: (format: FieldMappingFormat) => void;
   onAddCatalogRule: () => void;
-  onRemoveField: (index: number) => void;
+  onRemoveField: (format: FieldMappingFormat, index: number) => void;
   onRemoveCatalogRule: (index: number) => void;
-  onUpdateField: (index: number, patch: Partial<LibraryFieldMapping>) => void;
+  onSelectMappingFormat: (format: FieldMappingFormat) => void;
+  onUpdateField: (
+    format: FieldMappingFormat,
+    index: number,
+    patch: Partial<LibraryFieldMapping>,
+  ) => void;
   onUpdateCatalogRule: (index: number, patch: Partial<CatalogRule>) => void;
   onSaveMappings: () => void;
   onSaveCatalogRules: () => void;
@@ -44,6 +55,7 @@ export function SettingsPane({
   outputDevices,
   draftMappings,
   draftCatalogRules,
+  selectedMappingFormat,
   settings,
   onAddDirectory,
   onClearLibrary,
@@ -53,6 +65,7 @@ export function SettingsPane({
   onAddCatalogRule,
   onRemoveField,
   onRemoveCatalogRule,
+  onSelectMappingFormat,
   onUpdateField,
   onUpdateCatalogRule,
   onSaveMappings,
@@ -79,6 +92,10 @@ export function SettingsPane({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isCatalogRulesDialogOpen, isMappingsDialogOpen]);
 
+  const selectedFormatFieldCount = draftMappings.filter(
+    (mapping) => normalizeFieldMappingFormat(mapping.format) === selectedMappingFormat,
+  ).length;
+
   return (
     <div className="pane-stack">
       <div className="settings-grid">
@@ -104,11 +121,13 @@ export function SettingsPane({
             }
           >
             <p className="panel-copy">
-              Choose which normalized fields Aria stores and which source tags
-              fill them in priority order.
+              Choose which normalized fields Aria stores, then switch the dialog
+              between common file formats to set source-tag priorities per format.
             </p>
             <div className="device-chip">
-              <strong>{draftMappings.length} fields configured</strong>
+              <strong>
+                {selectedFormatFieldCount} fields in {fieldMappingFormatLabel(selectedMappingFormat)}
+              </strong>
               <span>Empty fields are allowed and multi-value tags are preserved.</span>
             </div>
           </SectionCard>
@@ -154,17 +173,19 @@ export function SettingsPane({
 
       {isMappingsDialogOpen ? (
         <ConfigDialog
-          copy="Adjust the database fields Aria stores and define which tags populate each field in descending priority."
+          copy="Choose a file format, then adjust the database fields Aria stores and the tags that populate each field in descending priority."
           eyebrow="Mappings"
           onClose={() => setIsMappingsDialogOpen(false)}
-          title="Database field mapping"
+          title="Database field mappings"
         >
           <FieldMappingsPanel
             mappings={draftMappings}
             onAddField={onAddField}
             onRemoveField={onRemoveField}
             onSave={onSaveMappings}
+            onSelectFormat={onSelectMappingFormat}
             onUpdateField={onUpdateField}
+            selectedFormat={selectedMappingFormat}
             variant="dialog"
           />
         </ConfigDialog>

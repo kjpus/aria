@@ -4,6 +4,8 @@ import { toLocalImageSrc } from '../../lib/runtime';
 import type { PlaybackSnapshot, ScannedTrack } from '../../types/aria';
 import { buildPlayerSubtitle, formatDuration } from '../library/view-models';
 
+const SLEEP_TIMER_PRESETS_MINUTES = [15, 30, 45, 60, 90] as const;
+
 type PlayerBarProps = {
   playback: PlaybackSnapshot;
   currentTrack: ScannedTrack | null;
@@ -28,9 +30,16 @@ export function PlayerBar({
   onVolumeChange,
 }: PlayerBarProps) {
   const progressRef = useRef<HTMLDivElement>(null);
+  const sleepMenuRef = useRef<HTMLDivElement>(null);
+  const onPauseRef = useRef(onPause);
+  onPauseRef.current = onPause;
+
   const [scrubPositionMs, setScrubPositionMs] = useState<number | null>(null);
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [previewPositionMs, setPreviewPositionMs] = useState<number | null>(null);
+  const [sleepTimerEndsAt, setSleepTimerEndsAt] = useState<number | null>(null);
+  const [sleepMenuOpen, setSleepMenuOpen] = useState(false);
+  const [sleepRemainingMs, setSleepRemainingMs] = useState<number | null>(null);
   const normalizedVolume = clampUnitVolume(volume);
   const [draftVolumePercent, setDraftVolumePercent] = useState(() =>
     Math.round(normalizedVolume * 100),
@@ -70,6 +79,36 @@ export function PlayerBar({
   useEffect(() => {
     setDraftVolumePercent(Math.round(normalizedVolume * 100));
   }, [normalizedVolume]);
+
+  useEffect(() => {
+    if (sleepTimerEndsAt === null) {
+      setSleepRemainingMs(null);
+      return;
+    }
+    setSleepRemainingMs(Math.max(0, sleepTimerEndsAt - Date.now()));
+    const id = setInterval(() => {
+      const remaining = sleepTimerEndsAt - Date.now();
+      if (remaining <= 0) {
+        setSleepTimerEndsAt(null);
+        setSleepRemainingMs(null);
+        onPauseRef.current();
+      } else {
+        setSleepRemainingMs(remaining);
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, [sleepTimerEndsAt]);
+
+  useEffect(() => {
+    if (!sleepMenuOpen) return;
+    function handleClickOutside(event: MouseEvent) {
+      if (sleepMenuRef.current && !sleepMenuRef.current.contains(event.target as Node)) {
+        setSleepMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [sleepMenuOpen]);
 
   function beginScrub() {
     if (duration <= 0) {
@@ -268,6 +307,53 @@ export function PlayerBar({
           <strong title={playback.outputDevice.name}>{outputDeviceName}</strong>
           <small>{outputMode}</small>
         </div>
+
+        <div className="player-bar__sleep-timer" ref={sleepMenuRef}>
+          <button
+            aria-expanded={sleepMenuOpen}
+            aria-haspopup="true"
+            aria-label={sleepTimerEndsAt !== null ? `Sleep timer active: ${formatSleepRemaining(sleepRemainingMs)} remaining` : 'Set sleep timer'}
+            className={`ghost-button player-bar__sleep-button${sleepTimerEndsAt !== null ? ' player-bar__sleep-button--active' : ''}`}
+            onClick={() => setSleepMenuOpen((prev) => !prev)}
+            type="button"
+          >
+            <MoonIcon />
+            {sleepRemainingMs !== null && (
+              <span className="player-bar__sleep-remaining">{formatSleepRemaining(sleepRemainingMs)}</span>
+            )}
+          </button>
+          {sleepMenuOpen && (
+            <div className="player-bar__sleep-menu" role="menu">
+              {SLEEP_TIMER_PRESETS_MINUTES.map((minutes) => (
+                <button
+                  className="player-bar__sleep-menu-item"
+                  key={minutes}
+                  onClick={() => {
+                    setSleepTimerEndsAt(Date.now() + minutes * 60 * 1000);
+                    setSleepMenuOpen(false);
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  {minutes} min
+                </button>
+              ))}
+              {sleepTimerEndsAt !== null && (
+                <button
+                  className="player-bar__sleep-menu-item player-bar__sleep-menu-item--cancel"
+                  onClick={() => {
+                    setSleepTimerEndsAt(null);
+                    setSleepMenuOpen(false);
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  Cancel timer
+                </button>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </section>
   );
@@ -388,6 +474,18 @@ function clampUnitVolume(volume: number): number {
   return Math.min(Math.max(volume, 0), 1);
 }
 
+function formatSleepRemaining(ms: number | null): string {
+  if (ms === null) return '';
+  const totalSeconds = Math.ceil(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
 function PlayIcon() {
   return (
     <svg
@@ -452,6 +550,18 @@ function VolumeIcon({ muted }: { muted: boolean }) {
       ) : (
         <path d="M17.42 8.05a1 1 0 0 1 1.4.12 5.38 5.38 0 0 1 0 7.66 1 1 0 1 1-1.52-1.3 3.38 3.38 0 0 0 0-5.06 1 1 0 0 1 .12-1.42Zm2.9-2.63a1 1 0 0 1 1.4.12 9.83 9.83 0 0 1 0 13.92 1 1 0 0 1-1.53-1.29 7.83 7.83 0 0 0 0-11.34 1 1 0 0 1 .13-1.41Z" />
       )}
+    </svg>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="player-bar__sleep-icon"
+      viewBox="0 0 24 24"
+    >
+      <path d="M12.1 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9Z" />
     </svg>
   );
 }

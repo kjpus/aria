@@ -8,9 +8,10 @@ use std::{
 };
 
 use aria_domain::{
-    default_catalog_rules, AppEvent, AudioPropertiesSnapshot, CatalogRule, FieldExportRequest,
-    LibraryEvent, LibraryFieldMapping, LibraryRoot, LibrarySnapshot, ScanProgress, ScannedTrack,
-    TagInventoryEntry, TrackTagEditRequest, TrackTagEditUpdate,
+    canonical_field_mapping_format, default_catalog_rules, AppEvent, AudioPropertiesSnapshot,
+    CatalogRule, FieldExportRequest, LibraryEvent, LibraryFieldMapping, LibraryRoot,
+    LibrarySnapshot, ScanProgress, ScannedTrack, TagInventoryEntry, TrackTagEditRequest,
+    TrackTagEditUpdate,
 };
 use chrono::Utc;
 use lofty::{
@@ -134,6 +135,7 @@ impl LibraryService {
             .into_iter()
             .filter(|mapping| !mapping.key.trim().is_empty() && !mapping.label.trim().is_empty())
             .map(|mut mapping| {
+                mapping.format = canonical_field_mapping_format(&mapping.format);
                 mapping.tag_priorities = mapping
                     .tag_priorities
                     .into_iter()
@@ -147,7 +149,8 @@ impl LibraryService {
         let mappings = state.field_mappings.clone();
         let catalog_rules = compile_catalog_rules(&state.catalog_rules);
         for track in &mut state.tracks {
-            track.mapped_fields = map_fields(&track.raw_tags, &mappings, &catalog_rules);
+            track.mapped_fields =
+                map_fields(&track.raw_tags, &mappings, &track.audio.format, &catalog_rules);
         }
 
         state.clone()
@@ -166,7 +169,8 @@ impl LibraryService {
         let mappings = state.field_mappings.clone();
         let catalog_rules = compile_catalog_rules(&state.catalog_rules);
         for track in &mut state.tracks {
-            track.mapped_fields = map_fields(&track.raw_tags, &mappings, &catalog_rules);
+            track.mapped_fields =
+                map_fields(&track.raw_tags, &mappings, &track.audio.format, &catalog_rules);
         }
 
         Ok(state.clone())
@@ -501,7 +505,16 @@ fn scan_single_track(
     let tagged_file = read_from_path(path).map_err(|_| LibraryError::ScanFailure)?;
     let mut raw_tags = collect_raw_tags(&tagged_file);
     merge_format_specific_raw_tags(path, &mut raw_tags);
-    let mapped_fields = map_fields(&raw_tags, mappings, catalog_rules);
+    let mapped_fields = map_fields(
+        &raw_tags,
+        mappings,
+        &path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_uppercase())
+            .unwrap_or_else(|| "UNKNOWN".into()),
+        catalog_rules,
+    );
     let album_art_path = find_album_art(path, cache_root);
     let properties = tagged_file.properties();
 
@@ -1414,11 +1427,21 @@ fn build_tag_inventory(tracks: &[ScannedTrack]) -> Vec<TagInventoryEntry> {
 fn map_fields(
     raw_tags: &BTreeMap<String, Vec<String>>,
     mappings: &[LibraryFieldMapping],
+    track_format: &str,
     catalog_rules: &[CompiledCatalogRule],
 ) -> BTreeMap<String, Vec<String>> {
     let mut mapped = BTreeMap::new();
+    let normalized_track_format = canonical_field_mapping_format(track_format);
 
-    for mapping in mappings {
+    let default_mappings = mappings
+        .iter()
+        .filter(|mapping| canonical_field_mapping_format(&mapping.format) == "DEFAULT");
+    let format_mappings = mappings.iter().filter(|mapping| {
+        canonical_field_mapping_format(&mapping.format) == normalized_track_format
+            && normalized_track_format != "DEFAULT"
+    });
+
+    for mapping in default_mappings.chain(format_mappings) {
         let mut resolved_values = Vec::new();
 
         for source_tag in &mapping.tag_priorities {
@@ -1667,14 +1690,23 @@ fn catalog_rule_matches_composer(
 }
 
 fn find_album_art(track_path: &Path, cache_root: &Path) -> Option<PathBuf> {
-    if track_path
+    match track_path
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("flac"))
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
     {
-        if let Some(embedded_art) = extract_embedded_flac_art(track_path, cache_root) {
-            return Some(embedded_art);
+        Some("flac") => {
+            if let Some(embedded_art) = extract_embedded_flac_art(track_path, cache_root) {
+                return Some(embedded_art);
+            }
         }
+        Some("m4a") | Some("mp4") => {
+            if let Some(embedded_art) = extract_embedded_mp4_art(track_path, cache_root) {
+                return Some(embedded_art);
+            }
+        }
+        _ => {}
     }
 
     find_sidecar_album_art(track_path)
@@ -1684,6 +1716,23 @@ fn extract_embedded_flac_art(track_path: &Path, cache_root: &Path) -> Option<Pat
     let mut file = StdFile::open(track_path).ok()?;
     let flac = FlacFile::read_from(&mut file, cover_art_parse_options()).ok()?;
     let picture = choose_embedded_cover(flac.pictures())?;
+    cache_embedded_picture(track_path, cache_root, picture)
+}
+
+fn extract_embedded_mp4_art(track_path: &Path, cache_root: &Path) -> Option<PathBuf> {
+    let mut file = StdFile::open(track_path).ok()?;
+    let mp4 = Mp4File::read_from(&mut file, cover_art_parse_options()).ok()?;
+    let ilst = mp4.ilst()?;
+    cache_first_mp4_picture(track_path, cache_root, ilst)
+}
+
+fn cache_first_mp4_picture(track_path: &Path, cache_root: &Path, ilst: &Ilst) -> Option<PathBuf> {
+    let mut pictures = ilst.pictures()?;
+    let picture = pictures.find(|picture| !picture.data().is_empty())?;
+    cache_embedded_picture(track_path, cache_root, picture)
+}
+
+fn cache_embedded_picture(track_path: &Path, cache_root: &Path, picture: &Picture) -> Option<PathBuf> {
     let image_bytes = picture.data();
     if image_bytes.is_empty() {
         return None;
@@ -1816,7 +1865,7 @@ fn cover_art_parse_options() -> ParseOptions {
 #[cfg(test)]
 mod tests {
     use super::{
-        compile_catalog_rules, extract_catalog_numbers, find_album_art, scan_library,
+        cache_first_mp4_picture, compile_catalog_rules, extract_catalog_numbers, find_album_art, scan_library,
         parse_mp4_freeform_ident, scan_single_track, write_values_to_id3v2_tag,
         write_values_to_vorbis_tag,
     };
@@ -1827,7 +1876,12 @@ mod tests {
     };
 
     use aria_domain::{default_catalog_rules, default_field_mappings, LibraryRoot};
-    use lofty::{id3::v2::{FrameId, Id3v2Tag}, mp4::AtomIdent, ogg::VorbisComments};
+    use lofty::{
+        id3::v2::{FrameId, Id3v2Tag},
+        mp4::{AtomIdent, Ilst},
+        ogg::VorbisComments,
+        picture::{MimeType, Picture, PictureType},
+    };
     use tokio::sync::broadcast;
 
     #[test]
@@ -1904,6 +1958,123 @@ mod tests {
     }
 
     #[test]
+    fn maps_m4a_sample_with_standard_mp4_atoms_when_user_sample_is_present() {
+        let sample_root = PathBuf::from(
+            r"G:\Bach Sacred Cantatas - Masaaki Suzuki\Masaaki Suzuki - Bach Cantatas, Vol. 30",
+        );
+
+        if !sample_root.exists() {
+            return;
+        }
+
+        let sample_tracks = std::fs::read_dir(&sample_root)
+            .expect("sample directory should be readable")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("m4a"))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            !sample_tracks.is_empty(),
+            "expected at least one m4a file in sample directory"
+        );
+
+        for sample_track in sample_tracks {
+            let track = scan_single_track(
+                &sample_track,
+                &default_field_mappings(),
+                &compile_catalog_rules(&default_catalog_rules()),
+                &PathBuf::from(r"C:\dev\aria\.cache\album-art"),
+            )
+            .unwrap_or_else(|_| panic!("sample track should scan: {}", sample_track.display()));
+
+            assert!(
+                !track.mapped_fields.get("album").cloned().unwrap_or_default().is_empty(),
+                "expected album mapping for {}",
+                sample_track.display()
+            );
+            assert!(
+                !track.mapped_fields.get("title").cloned().unwrap_or_default().is_empty(),
+                "expected title mapping for {}",
+                sample_track.display()
+            );
+            assert!(
+                !track.mapped_fields.get("composer").cloned().unwrap_or_default().is_empty(),
+                "expected composer mapping for {}",
+                sample_track.display()
+            );
+            assert!(
+                !track.mapped_fields.get("year").cloned().unwrap_or_default().is_empty(),
+                "expected year mapping for {}",
+                sample_track.display()
+            );
+            assert!(
+                !track.mapped_fields.get("track_number").cloned().unwrap_or_default().is_empty(),
+                "expected track number mapping for {}",
+                sample_track.display()
+            );
+            assert!(
+                !track.mapped_fields.get("disk_number").cloned().unwrap_or_default().is_empty(),
+                "expected disk number mapping for {}",
+                sample_track.display()
+            );
+            assert!(
+                !track.mapped_fields.get("ensemble").cloned().unwrap_or_default().is_empty(),
+                "expected album artist atom to populate ensemble for {}",
+                sample_track.display()
+            );
+            assert!(
+                !track.mapped_fields.get("soloist").cloned().unwrap_or_default().is_empty(),
+                "expected artist atom to populate soloist for {}",
+                sample_track.display()
+            );
+            assert!(
+                track.album_art_path.is_some(),
+                "expected some album art for {}",
+                sample_track.display()
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_mp4_picture_is_cached_when_present() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("aria-mp4-art-test-{unique}"));
+        let cache_root = temp_root.join("cache");
+        let track_path = temp_root.join("track.m4a");
+        std::fs::create_dir_all(&temp_root).expect("temp directory should be created");
+        std::fs::write(&track_path, b"placeholder").expect("placeholder track should be written");
+
+        let mut ilst = Ilst::new();
+        ilst.insert_picture(
+            Picture::unchecked(vec![0xFF, 0xD8, 0xFF, 0xD9])
+                .pic_type(PictureType::Other)
+                .mime_type(MimeType::Jpeg)
+                .build(),
+        );
+
+        let album_art = cache_first_mp4_picture(&track_path, &cache_root, &ilst)
+            .expect("expected embedded mp4 art to be cached");
+
+        assert!(album_art.starts_with(&cache_root));
+        assert_eq!(album_art.extension().and_then(|extension| extension.to_str()), Some("jpg"));
+        assert!(
+            std::fs::metadata(&album_art)
+                .map(|metadata| metadata.len() > 0)
+                .unwrap_or(false),
+            "expected cached embedded art to be non-empty"
+        );
+
+        std::fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
     fn embedded_flac_art_wins_over_empty_sidecar_when_sample_track_is_present() {
         let sample_track = PathBuf::from(
             r"C:\Users\hongswan\Music\Bach 50\music\Murray Perahia - Bach Keyboard Concertos, Vol. 1 (2001) [16B-44.1kHz]\01. I. Allegro.flac",
@@ -1954,6 +2125,30 @@ mod tests {
             .expect("expected non-empty fallback sidecar to be selected");
 
         assert_eq!(album_art, temp_root.join("front.png"));
+
+        std::fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn mp4_sidecar_is_used_when_embedded_art_is_missing() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("aria-mp4-sidecar-test-{unique}"));
+        let cache_root = temp_root.join("cache");
+        std::fs::create_dir_all(&temp_root).expect("temp directory should be created");
+
+        let track_path = temp_root.join("track.m4a");
+        std::fs::write(&track_path, b"not a real mp4 but enough to force sidecar fallback")
+            .expect("track placeholder should be written");
+        std::fs::write(temp_root.join("cover.jpg"), [0xFF, 0xD8, 0xFF, 0xD9])
+            .expect("sidecar art should be written");
+
+        let album_art = find_album_art(&track_path, &cache_root)
+            .expect("expected sidecar art fallback for mp4 track without embedded art");
+
+        assert_eq!(album_art, temp_root.join("cover.jpg"));
 
         std::fs::remove_dir_all(&temp_root).ok();
     }

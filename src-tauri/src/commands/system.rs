@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use aria_domain::AppBootstrap;
 use tauri::State;
 
@@ -77,9 +79,10 @@ pub fn open_directory(path: String) -> Result<(), CommandError> {
 pub fn show_in_explorer(path: String) -> Result<(), CommandError> {
     #[cfg(target_os = "windows")]
     {
+        let explorer_args = explorer_select_arguments(&path);
+
         std::process::Command::new("explorer.exe")
-            .arg("/select,")
-            .arg(path)
+            .args(explorer_args)
             .spawn()
             .map_err(|error| CommandError::Message(error.to_string()))?;
         Ok(())
@@ -102,4 +105,29 @@ pub fn debug_log(message: String) {
 
     #[cfg(not(debug_assertions))]
     let _ = message;
+}
+
+#[cfg(target_os = "windows")]
+fn explorer_select_arguments(path: &str) -> [String; 2] {
+    let normalized = normalize_explorer_path(path);
+    ["/select,".to_string(), normalized.display().to_string()]
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_explorer_path(path: &str) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| Path::new(path).to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "windows")]
+    use super::explorer_select_arguments;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn explorer_select_argument_splits_switch_and_path() {
+        let arguments = explorer_select_arguments(r"D:\Music Library\Disc 1\track 01.m4a");
+
+        assert_eq!(arguments, ["/select,".to_string(), r"D:\Music Library\Disc 1\track 01.m4a".to_string()]);
+    }
 }

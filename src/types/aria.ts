@@ -55,6 +55,7 @@ export type ScanProgress = {
 };
 
 export type LibraryFieldMapping = {
+  format: string;
   key: string;
   label: string;
   tagPriorities: string[];

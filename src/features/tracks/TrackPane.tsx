@@ -2,7 +2,7 @@ import type {
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
 } from 'react';
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { ClearableInput } from '../../components/ClearableInput';
 import { EditTrackTagsDialog } from '../../components/EditTrackTagsDialog';
 import { ExportFieldDialog } from '../../components/ExportFieldDialog';
@@ -29,6 +29,7 @@ import {
 import { HoverScrollText } from '../albums/HoverScrollText';
 
 type TrackPaneProps = {
+  isActive: boolean;
   tracks: ScannedTrack[];
   mappings: LibraryFieldMapping[];
   settings: TrackTableSettings;
@@ -72,6 +73,11 @@ const defaultSortKeys = [
   'title',
 ];
 
+const trackTableAlbumRowHeight = 44;
+const trackTableTrackRowHeight = 48;
+const trackTableOverscanPx = 480;
+const trackTableFallbackViewportHeight = 720;
+
 type DropPosition = 'before' | 'after';
 
 type DropIndicator = {
@@ -106,7 +112,27 @@ type AlbumTrackGroup = {
   tracks: ScannedTrack[];
 };
 
+type TrackTableRow =
+  | {
+      key: string;
+      kind: 'album';
+      group: AlbumTrackGroup;
+    }
+  | {
+      key: string;
+      kind: 'track';
+      albumId: string;
+      track: ScannedTrack;
+    };
+
+type VirtualizedTrackTable = {
+  rows: TrackTableRow[];
+  rowOffsets: number[];
+  totalHeight: number;
+};
+
 export function TrackPane({
+  isActive,
   tracks,
   mappings,
   onAddAlbumToPlaylist,
@@ -127,8 +153,10 @@ export function TrackPane({
   onTrackTableChange,
 }: TrackPaneProps) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const trackTableScrollRef = useRef<HTMLDivElement>(null);
   const [isLayoutDialogOpen, setIsLayoutDialogOpen] = useState(false);
   const [filter, setFilter] = useState('');
+  const deferredFilter = useDeferredValue(filter);
   const columns = useMemo(
     () => buildTrackColumns(mappings).filter((column) => column.key !== 'album'),
     [mappings],
@@ -140,6 +168,7 @@ export function TrackPane({
   const [visibleColumns, setVisibleColumns] = useState<string[]>([]);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   const [sortCriteria, setSortCriteria] = useState<TrackSortCriterion[]>([]);
+  const [expandedAlbumIds, setExpandedAlbumIds] = useState<string[]>([]);
   const [selectedTrackIds, setSelectedTrackIds] = useState<string[]>([]);
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
   const [draggedVisibleColumn, setDraggedVisibleColumn] = useState<string | null>(
@@ -166,11 +195,17 @@ export function TrackPane({
   const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
   const [isExportingField, setIsExportingField] = useState(false);
   const [hasHydrated, setHasHydrated] = useState(false);
+  const [trackTableScrollTop, setTrackTableScrollTop] = useState(0);
+  const [trackTableViewportHeight, setTrackTableViewportHeight] = useState(0);
   const resizeStateRef = useRef<ResizeState | null>(null);
   const visibleDropIndicatorRef = useRef<DropIndicator | null>(null);
   const persistedTrackTable = useMemo(
     () => normalizeTrackTableSettings(settings, columns),
     [columns, settings],
+  );
+  const expandedAlbumIdSet = useMemo(
+    () => new Set(expandedAlbumIds),
+    [expandedAlbumIds],
   );
   const selectedTrackSet = useMemo(
     () => new Set(selectedTrackIds),
@@ -351,10 +386,7 @@ export function TrackPane({
     }
 
     const closeMenu = (event?: Event) => {
-      if (
-        event instanceof MouseEvent &&
-        menuRef.current?.contains(event.target as Node)
-      ) {
+      if (event?.target instanceof Node && menuRef.current?.contains(event.target)) {
         return;
       }
 
@@ -369,13 +401,11 @@ export function TrackPane({
     window.addEventListener('pointerdown', closeMenu);
     window.addEventListener('resize', closeMenu);
     window.addEventListener('keydown', closeMenu);
-    window.addEventListener('scroll', closeMenu, true);
 
     return () => {
       window.removeEventListener('pointerdown', closeMenu);
       window.removeEventListener('resize', closeMenu);
       window.removeEventListener('keydown', closeMenu);
-      window.removeEventListener('scroll', closeMenu, true);
     };
   }, [albumContextMenu, trackContextMenu]);
 
@@ -384,28 +414,30 @@ export function TrackPane({
     [columnLookup, sortCriteria],
   );
 
+  const trackSearchTextLookup = useMemo(
+    () => new Map(tracks.map((track) => [track.id, buildTrackSearchText(track)])),
+    [tracks],
+  );
+
+  const sortedTracks = useMemo(
+    () => [...tracks].sort((left, right) => compareTracks(left, right, sortCriteria)),
+    [sortCriteria, tracks],
+  );
+
   const filteredTracks = useMemo(() => {
-    const query = filter.trim().toLowerCase();
-    const nextTracks = tracks.filter((track) => {
-      if (!query) {
-        return true;
-      }
+    const query = deferredFilter.trim().toLowerCase();
+    if (!query) {
+      return sortedTracks;
+    }
 
-      const searchable = [
-        track.fileName,
-        track.path,
-        ...Object.values(track.mappedFields).flat(),
-      ]
-        .join(' ')
-        .toLowerCase();
-
-      return searchable.includes(query);
-    });
-
-    return [...nextTracks].sort((left, right) =>
-      compareTracks(left, right, sortCriteria),
+    return sortedTracks.filter((track) =>
+      (trackSearchTextLookup.get(track.id) ?? '').includes(query),
     );
-  }, [filter, sortCriteria, tracks]);
+  }, [deferredFilter, sortedTracks, trackSearchTextLookup]);
+  const filteredTrackLookup = useMemo(
+    () => new Map(filteredTracks.map((track) => [track.id, track])),
+    [filteredTracks],
+  );
   const albumCards = useMemo(
     () => new Map(buildAlbumCards(filteredTracks).map((album) => [album.id, album])),
     [filteredTracks],
@@ -414,13 +446,79 @@ export function TrackPane({
     () => buildAlbumGroups(filteredTracks, albumCards),
     [albumCards, filteredTracks],
   );
-  const visibleTracksInOrder = useMemo(
-    () => albumGroups.flatMap((group) => group.tracks),
+  const albumGroupLookup = useMemo(
+    () => new Map(albumGroups.map((group) => [group.albumId, group])),
     [albumGroups],
   );
+  const albumGroupIds = useMemo(
+    () => albumGroups.map((group) => group.albumId),
+    [albumGroups],
+  );
+  const visibleTracksInOrder = useMemo(
+    () =>
+      albumGroups.flatMap((group) =>
+        expandedAlbumIdSet.has(group.albumId) ? group.tracks : [],
+      ),
+    [albumGroups, expandedAlbumIdSet],
+  );
+  const visibleTrackIdsInOrder = useMemo(
+    () => visibleTracksInOrder.map((track) => track.id),
+    [visibleTracksInOrder],
+  );
+  const virtualizedTrackTable = useMemo(
+    () => buildVirtualizedTrackTable(albumGroups, expandedAlbumIdSet),
+    [albumGroups, expandedAlbumIdSet],
+  );
+  const { bottomSpacerHeight, topSpacerHeight, visibleRows } = useMemo(() => {
+    if (virtualizedTrackTable.rows.length === 0) {
+      return {
+        bottomSpacerHeight: 0,
+        topSpacerHeight: 0,
+        visibleRows: [] as TrackTableRow[],
+      };
+    }
+
+    const viewportHeight =
+      trackTableViewportHeight > 0
+        ? trackTableViewportHeight
+        : trackTableFallbackViewportHeight;
+    const startOffset = Math.max(trackTableScrollTop - trackTableOverscanPx, 0);
+    const endOffset = Math.min(
+      virtualizedTrackTable.totalHeight,
+      trackTableScrollTop + viewportHeight + trackTableOverscanPx,
+    );
+    const startIndex = findTrackTableRowIndex(
+      virtualizedTrackTable.rowOffsets,
+      startOffset,
+    );
+    const endIndex = Math.min(
+      virtualizedTrackTable.rows.length,
+      findTrackTableRowIndex(
+        virtualizedTrackTable.rowOffsets,
+        Math.max(endOffset - 1, 0),
+      ) + 1,
+    );
+
+    return {
+      bottomSpacerHeight:
+        virtualizedTrackTable.totalHeight -
+        (virtualizedTrackTable.rowOffsets[endIndex] ?? virtualizedTrackTable.totalHeight),
+      topSpacerHeight: virtualizedTrackTable.rowOffsets[startIndex] ?? 0,
+      visibleRows: virtualizedTrackTable.rows.slice(startIndex, endIndex),
+    };
+  }, [trackTableScrollTop, trackTableViewportHeight, virtualizedTrackTable]);
 
   useEffect(() => {
-    const availableIds = new Set(visibleTracksInOrder.map((track) => track.id));
+    const availableAlbumIds = new Set(albumGroupIds);
+
+    setExpandedAlbumIds((current) => {
+      const next = current.filter((albumId) => availableAlbumIds.has(albumId));
+      return stringListsEqual(current, next) ? current : next;
+    });
+  }, [albumGroupIds]);
+
+  useEffect(() => {
+    const availableIds = new Set(visibleTrackIdsInOrder);
 
     setSelectedTrackIds((current) => {
       const next = current.filter((trackId) => availableIds.has(trackId));
@@ -430,7 +528,69 @@ export function TrackPane({
     setSelectionAnchorId((current) =>
       current && availableIds.has(current) ? current : null,
     );
-  }, [visibleTracksInOrder]);
+  }, [visibleTrackIdsInOrder]);
+
+  useEffect(() => {
+    if (!isActive || filteredTracks.length === 0) {
+      return;
+    }
+
+    const element = trackTableScrollRef.current;
+    if (!element) {
+      return;
+    }
+
+    const measure = () => {
+      setTrackTableViewportHeight(element.clientHeight);
+      setTrackTableScrollTop(element.scrollTop);
+    };
+
+    measure();
+
+    const resizeObserver =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => measure())
+        : null;
+
+    resizeObserver?.observe(element);
+    window.addEventListener('resize', measure);
+
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, [filteredTracks.length, isActive]);
+
+  useEffect(() => {
+    if (!isActive) {
+      return;
+    }
+
+    const element = trackTableScrollRef.current;
+    if (!element) {
+      return;
+    }
+
+    const maxScrollTop = Math.max(
+      virtualizedTrackTable.totalHeight - trackTableViewportHeight,
+      0,
+    );
+
+    if (element.scrollTop > maxScrollTop) {
+      element.scrollTop = maxScrollTop;
+      setTrackTableScrollTop(maxScrollTop);
+    }
+  }, [isActive, trackTableViewportHeight, virtualizedTrackTable.totalHeight]);
+
+  useEffect(() => {
+    const element = trackTableScrollRef.current;
+    if (!element) {
+      return;
+    }
+
+    element.scrollTop = 0;
+    setTrackTableScrollTop(0);
+  }, [deferredFilter]);
 
   function toggleColumn(key: string) {
     setVisibleColumns((current) => {
@@ -482,7 +642,7 @@ export function TrackPane({
     event: ReactMouseEvent<HTMLTableRowElement>,
     trackId: string,
   ) {
-    const orderedIds = visibleTracksInOrder.map((track) => track.id);
+    const orderedIds = visibleTrackIdsInOrder;
 
     if (event.shiftKey && selectionAnchorId) {
       const anchorIndex = orderedIds.indexOf(selectionAnchorId);
@@ -514,6 +674,31 @@ export function TrackPane({
     setSelectionAnchorId(trackId);
   }
 
+  function toggleAlbumExpansion(albumId: string) {
+    setExpandedAlbumIds((current) =>
+      current.includes(albumId)
+        ? current.filter((currentAlbumId) => currentAlbumId !== albumId)
+        : [...current, albumId],
+    );
+  }
+
+  function expandVisibleAlbums() {
+    setExpandedAlbumIds(albumGroupIds);
+  }
+
+  function collapseAllAlbums() {
+    setExpandedAlbumIds([]);
+  }
+
+  function handleAlbumToggle(
+    event: ReactMouseEvent<HTMLButtonElement>,
+    albumId: string,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleAlbumExpansion(albumId);
+  }
+
   function handleTrackDoubleClick(track: ScannedTrack) {
     const selectedTracks = selectedTrackSet.has(track.id)
       ? selectTracksInOrder(visibleTracksInOrder, selectedTrackIds)
@@ -538,10 +723,17 @@ export function TrackPane({
       setSelectionAnchorId(track.id);
     }
 
+    const placement = resolveContextMenuPosition(
+      trackTableScrollRef.current,
+      event.clientX,
+      event.clientY,
+      240,
+    );
+
     setAlbumContextMenu(null);
     setTrackContextMenu({
-      x: Math.min(event.clientX, window.innerWidth - 240),
-      y: Math.min(event.clientY, window.innerHeight - 230),
+      x: placement.x,
+      y: placement.y,
       trackIds: nextSelectedTrackIds,
       primaryTrackId: track.id,
     });
@@ -553,11 +745,18 @@ export function TrackPane({
   ) {
     event.preventDefault();
     event.stopPropagation();
+    const placement = resolveContextMenuPosition(
+      trackTableScrollRef.current,
+      event.clientX,
+      event.clientY,
+      240,
+    );
+
     setTrackContextMenu(null);
     setAlbumContextMenu({
       albumId,
-      x: Math.min(event.clientX, window.innerWidth - 240),
-      y: Math.min(event.clientY, window.innerHeight - 250),
+      x: placement.x,
+      y: placement.y,
     });
   }
 
@@ -598,9 +797,7 @@ export function TrackPane({
       return;
     }
 
-    const track = filteredTracks.find(
-      (candidate) => candidate.id === trackContextMenu.primaryTrackId,
-    );
+    const track = filteredTrackLookup.get(trackContextMenu.primaryTrackId) ?? null;
 
     if (!track) {
       setTrackContextMenu(null);
@@ -616,9 +813,7 @@ export function TrackPane({
       return;
     }
 
-    const track = filteredTracks.find(
-      (candidate) => candidate.id === trackContextMenu.primaryTrackId,
-    );
+    const track = filteredTrackLookup.get(trackContextMenu.primaryTrackId) ?? null;
 
     if (!track) {
       setTrackContextMenu(null);
@@ -667,9 +862,7 @@ export function TrackPane({
       return;
     }
 
-    const group =
-      albumGroups.find((candidate) => candidate.albumId === albumContextMenu.albumId) ??
-      null;
+    const group = albumGroupLookup.get(albumContextMenu.albumId) ?? null;
     setAlbumContextMenu(null);
     openExportDialog(group?.tracks ?? []);
   }
@@ -679,9 +872,7 @@ export function TrackPane({
       return;
     }
 
-    const group =
-      albumGroups.find((candidate) => candidate.albumId === albumContextMenu.albumId) ??
-      null;
+    const group = albumGroupLookup.get(albumContextMenu.albumId) ?? null;
     setAlbumContextMenu(null);
     openEditTagsDialog(group?.tracks ?? []);
   }
@@ -801,100 +992,163 @@ export function TrackPane({
   }
 
   return (
-    <div className="pane-stack">
+    <div className="pane-stack track-pane" hidden={!isActive}>
       <SectionCard hideHeader>
-        <div className="track-controls">
-          <label className="field-label">
-            Filter
-            <ClearableInput
-              onClear={() => setFilter('')}
-              placeholder="Filter by title, album, composer, conductor, path"
-              value={filter}
-              onChange={(event) => setFilter(event.target.value)}
-            />
-          </label>
-          <div className="track-controls__meta">
-            <div className="track-controls__stats">
-              <span className="pane-chip">{filteredTracks.length} tracks</span>
-              <span className="pane-chip">{albumGroups.length} albums</span>
-              <span className="pane-chip">{selectedTrackIds.length} selected</span>
+        <div className="track-pane__layout">
+          <div className="track-controls">
+            <label className="field-label">
+              Filter
+              <ClearableInput
+                onClear={() => setFilter('')}
+                placeholder="Filter by title, album, composer, conductor, path"
+                value={filter}
+                onChange={(event) => setFilter(event.target.value)}
+              />
+            </label>
+            <div className="track-controls__meta">
+              <div className="track-controls__stats">
+                <span className="pane-chip">{filteredTracks.length} tracks</span>
+                <span className="pane-chip">{albumGroups.length} albums</span>
+                <span className="pane-chip">{selectedTrackIds.length} selected</span>
+                <span className="pane-chip">{expandedAlbumIds.length} expanded</span>
+              </div>
+              <div className="track-controls__actions">
+                <button
+                  className="ghost-button"
+                  disabled={albumGroups.length === 0 || expandedAlbumIds.length === albumGroups.length}
+                  onClick={expandVisibleAlbums}
+                  type="button"
+                >
+                  Expand visible
+                </button>
+                <button
+                  className="ghost-button"
+                  disabled={expandedAlbumIds.length === 0}
+                  onClick={collapseAllAlbums}
+                  type="button"
+                >
+                  Collapse all
+                </button>
+                <button
+                  className="ghost-button"
+                  onClick={() => setIsLayoutDialogOpen(true)}
+                  type="button"
+                >
+                  Layout & Sort
+                </button>
+              </div>
             </div>
-            <button
-              className="ghost-button"
-              onClick={() => setIsLayoutDialogOpen(true)}
-              type="button"
-            >
-              Layout & Sort
-            </button>
           </div>
-        </div>
 
-        {filteredTracks.length === 0 ? (
-          <div className="placeholder-pane">
-            <strong>No tracks match the current filters</strong>
-            <p>Adjust the filter text to bring albums back into view.</p>
-          </div>
-        ) : (
-          <div className="track-table-shell track-table-shell--clamped">
-            <table className="track-table track-table--grouped">
-              <colgroup>
-                {visibleColumns.map((key) => (
-                  <col
-                    key={key}
-                    style={{
-                      width: `${buildColumnWeight(key, columnWidths, visibleColumns)}%`,
-                    }}
-                  />
-                ))}
-              </colgroup>
-              <thead>
-                <tr>
-                  {visibleColumns.map((key, index) => {
-                    const column = columnLookup.get(key);
-                    const partnerKey = visibleColumns[index + 1] ?? null;
+          {filteredTracks.length === 0 ? (
+            <div className="placeholder-pane">
+              <strong>No tracks match the current filters</strong>
+              <p>Adjust the filter text to bring albums back into view.</p>
+            </div>
+          ) : (
+            <div
+              className="track-table-shell track-table-shell--clamped track-table-shell--virtualized"
+              onScroll={(event) => setTrackTableScrollTop(event.currentTarget.scrollTop)}
+              ref={trackTableScrollRef}
+            >
+              <table className="track-table track-table--grouped">
+                <colgroup>
+                  {visibleColumns.map((key) => (
+                    <col
+                      key={key}
+                      style={{
+                        width: `${buildColumnWeight(key, columnWidths, visibleColumns)}%`,
+                      }}
+                    />
+                  ))}
+                </colgroup>
+                <thead>
+                  <tr>
+                    {visibleColumns.map((key, index) => {
+                      const column = columnLookup.get(key);
+                      const partnerKey = visibleColumns[index + 1] ?? null;
+
+                      return (
+                        <th className="track-table__header" key={key}>
+                          <div className="track-table__header-inner">
+                            <span title={column?.label ?? key}>{column?.label ?? key}</span>
+                            {partnerKey ? (
+                              <div
+                                className="track-table__resize-handle"
+                                onPointerDown={(event) =>
+                                  handleResizeStart(event, key, partnerKey)
+                                }
+                                role="presentation"
+                              />
+                            ) : null}
+                          </div>
+                        </th>
+                      );
+                    })}
+                  </tr>
+                </thead>
+                <tbody>
+                  {topSpacerHeight > 0 ? (
+                    <tr aria-hidden className="track-table__spacer-row">
+                      <td
+                        colSpan={Math.max(visibleColumns.length, 1)}
+                        style={{ height: `${topSpacerHeight}px` }}
+                      />
+                    </tr>
+                  ) : null}
+
+                  {visibleRows.map((row) => {
+                    if (row.kind === 'album') {
+                      const albumTitle =
+                        row.group.album?.title ||
+                        row.group.tracks[0]?.mappedFields.album?.[0] ||
+                        'Unknown album';
+                      const isExpanded = expandedAlbumIdSet.has(row.group.albumId);
+
+                      return (
+                        <tr
+                          className={[
+                            'track-table__album-row',
+                            isExpanded ? 'track-table__album-row--expanded' : '',
+                          ]
+                            .filter(Boolean)
+                            .join(' ')}
+                          key={row.key}
+                          onClick={() => onOpenAlbum(row.group.albumId)}
+                          onContextMenu={(event) =>
+                            handleAlbumContextMenu(event, row.group.albumId)
+                          }
+                          title="Click to open the album pane. Use the arrow to expand tracks."
+                        >
+                          <td colSpan={Math.max(visibleColumns.length, 1)}>
+                            <div className="track-table__album-meta">
+                              <button
+                                aria-expanded={isExpanded}
+                                aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${albumTitle}`}
+                                className="track-table__album-toggle"
+                                onClick={(event) => handleAlbumToggle(event, row.group.albumId)}
+                                type="button"
+                              >
+                                {isExpanded ? '▾' : '▸'}
+                              </button>
+                              <HoverScrollText
+                                className="track-table__album-title"
+                                speed={44}
+                                text={albumTitle}
+                              />
+                              <span className="track-table__album-count">
+                                {row.group.tracks.length}{' '}
+                                {row.group.tracks.length === 1 ? 'track' : 'tracks'}
+                              </span>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    const { track } = row;
 
                     return (
-                      <th className="track-table__header" key={key}>
-                        <div className="track-table__header-inner">
-                          <span title={column?.label ?? key}>{column?.label ?? key}</span>
-                          {partnerKey ? (
-                            <div
-                              className="track-table__resize-handle"
-                              onPointerDown={(event) =>
-                                handleResizeStart(event, key, partnerKey)
-                              }
-                              role="presentation"
-                            />
-                          ) : null}
-                        </div>
-                      </th>
-                    );
-                  })}
-                </tr>
-              </thead>
-              <tbody>
-                {albumGroups.map((group) => (
-                  <Fragment key={group.albumId}>
-                    <tr
-                      className="track-table__album-row"
-                      onClick={() => onOpenAlbum(group.albumId)}
-                      onContextMenu={(event) => handleAlbumContextMenu(event, group.albumId)}
-                    >
-                      <td colSpan={Math.max(visibleColumns.length, 1)}>
-                        <div className="track-table__album-meta">
-                          <HoverScrollText
-                            className="track-table__album-title"
-                            speed={44}
-                            text={
-                              group.album?.title ||
-                              group.tracks[0]?.mappedFields.album?.[0] ||
-                              'Unknown album'
-                            }
-                          />
-                        </div>
-                      </td>
-                    </tr>
-                    {group.tracks.map((track) => (
                       <tr
                         aria-selected={selectedTrackSet.has(track.id)}
                         className={[
@@ -903,7 +1157,7 @@ export function TrackPane({
                         ]
                           .filter(Boolean)
                           .join(' ')}
-                        key={track.id}
+                        key={row.key}
                         onClick={(event) => handleTrackClick(event, track.id)}
                         onContextMenu={(event) => handleTrackContextMenu(event, track)}
                         onDoubleClick={() => handleTrackDoubleClick(track)}
@@ -921,83 +1175,92 @@ export function TrackPane({
                           </td>
                         ))}
                       </tr>
-                    ))}
-                  </Fragment>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+                    );
+                  })}
 
-        {albumContextMenu ? (
-          <div
-            className="album-context-menu"
-            ref={menuRef}
-            style={{ left: `${albumContextMenu.x}px`, top: `${albumContextMenu.y}px` }}
-          >
-            <button
-              onClick={() => void runAlbumContextAction(onAddAlbumToPlaylist)}
-              type="button"
-            >
-              Add to playlist
-            </button>
-            <button onClick={() => void runAlbumContextAction(onAddAlbumToQueue)} type="button">
-              Add to queue
-            </button>
-            <button onClick={() => void runAlbumContextAction(onReplaceQueue)} type="button">
-              Put in queue
-            </button>
-            <button onClick={() => void runAlbumContextAction(onPlayAlbum)} type="button">
-              Play album
-            </button>
-            <button onClick={() => runAlbumEditTags()} type="button">
-              Edit tags
-            </button>
-            <button onClick={() => runAlbumExportField()} type="button">
-              Export field
-            </button>
-            <button onClick={() => void runAlbumContextAction(onGoToDirectory)} type="button">
-              Go to directory
-            </button>
-          </div>
-        ) : null}
+                  {bottomSpacerHeight > 0 ? (
+                    <tr aria-hidden className="track-table__spacer-row">
+                      <td
+                        colSpan={Math.max(visibleColumns.length, 1)}
+                        style={{ height: `${bottomSpacerHeight}px` }}
+                      />
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
 
-        {trackContextMenu ? (
-          <div
-            className="album-context-menu"
-            ref={menuRef}
-            style={{ left: `${trackContextMenu.x}px`, top: `${trackContextMenu.y}px` }}
-          >
-            <button
-              onClick={() => void runTrackContextAction(onAddToPlaylist)}
-              type="button"
-            >
-              Add to playlist
-            </button>
-            <button onClick={() => void runTrackContextAction(onAddToQueue)} type="button">
-              Add to queue
-            </button>
-            <button onClick={() => void runTrackContextAction(onPlayTracks)} type="button">
-              Play
-            </button>
-            <button onClick={() => runTrackEditTags()} type="button">
-              Edit tags
-            </button>
-            <button onClick={() => runTrackExportField()} type="button">
-              Export field
-            </button>
-            {trackContextMenu.trackIds.length === 1 ? (
-              <button onClick={() => void runShowAllTags()} type="button">
-                Show all tags
-              </button>
-            ) : null}
-            {trackContextMenu.trackIds.length === 1 ? (
-              <button onClick={() => void runShowInExplorer()} type="button">
-                Show in Explorer
-              </button>
-            ) : null}
-          </div>
-        ) : null}
+              {albumContextMenu ? (
+                <div
+                  className="album-context-menu album-context-menu--pane-bound"
+                  ref={menuRef}
+                  style={{ left: `${albumContextMenu.x}px`, top: `${albumContextMenu.y}px` }}
+                >
+                  <button
+                    onClick={() => void runAlbumContextAction(onAddAlbumToPlaylist)}
+                    type="button"
+                  >
+                    Add to playlist
+                  </button>
+                  <button onClick={() => void runAlbumContextAction(onAddAlbumToQueue)} type="button">
+                    Add to queue
+                  </button>
+                  <button onClick={() => void runAlbumContextAction(onReplaceQueue)} type="button">
+                    Put in queue
+                  </button>
+                  <button onClick={() => void runAlbumContextAction(onPlayAlbum)} type="button">
+                    Play album
+                  </button>
+                  <button onClick={() => runAlbumEditTags()} type="button">
+                    Edit tags
+                  </button>
+                  <button onClick={() => runAlbumExportField()} type="button">
+                    Export field
+                  </button>
+                  <button onClick={() => void runAlbumContextAction(onGoToDirectory)} type="button">
+                    Go to directory
+                  </button>
+                </div>
+              ) : null}
+
+              {trackContextMenu ? (
+                <div
+                  className="album-context-menu album-context-menu--pane-bound"
+                  ref={menuRef}
+                  style={{ left: `${trackContextMenu.x}px`, top: `${trackContextMenu.y}px` }}
+                >
+                  <button
+                    onClick={() => void runTrackContextAction(onAddToPlaylist)}
+                    type="button"
+                  >
+                    Add to playlist
+                  </button>
+                  <button onClick={() => void runTrackContextAction(onAddToQueue)} type="button">
+                    Add to queue
+                  </button>
+                  <button onClick={() => void runTrackContextAction(onPlayTracks)} type="button">
+                    Play
+                  </button>
+                  <button onClick={() => runTrackEditTags()} type="button">
+                    Edit tags
+                  </button>
+                  <button onClick={() => runTrackExportField()} type="button">
+                    Export field
+                  </button>
+                  {trackContextMenu.trackIds.length === 1 ? (
+                    <button onClick={() => void runShowAllTags()} type="button">
+                      Show all tags
+                    </button>
+                  ) : null}
+                  {trackContextMenu.trackIds.length === 1 ? (
+                    <button onClick={() => void runShowInExplorer()} type="button">
+                      Show in Explorer
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          )}
+        </div>
       </SectionCard>
 
       {isLayoutDialogOpen ? (
@@ -1298,6 +1561,12 @@ function parseSortableNumber(value: string): number | null {
   return Number.isNaN(parsed) ? null : parsed;
 }
 
+function buildTrackSearchText(track: ScannedTrack): string {
+  return [track.fileName, track.path, ...Object.values(track.mappedFields).flat()]
+    .join(' ')
+    .toLowerCase();
+}
+
 function buildAlbumGroups(
   orderedTracks: ScannedTrack[],
   albumCards: Map<string, AlbumCardModel>,
@@ -1321,6 +1590,74 @@ function buildAlbumGroups(
     album: albumCards.get(albumId) ?? null,
     tracks: [...albumTracks].sort(compareTracksWithinAlbum),
   }));
+}
+
+function buildVirtualizedTrackTable(
+  albumGroups: AlbumTrackGroup[],
+  expandedAlbumIds: Set<string>,
+): VirtualizedTrackTable {
+  const rows: TrackTableRow[] = [];
+  const rowOffsets = [0];
+
+  for (const group of albumGroups) {
+    rows.push({
+      group,
+      key: `album:${group.albumId}`,
+      kind: 'album',
+    });
+    rowOffsets.push(rowOffsets[rowOffsets.length - 1] + trackTableAlbumRowHeight);
+
+    if (!expandedAlbumIds.has(group.albumId)) {
+      continue;
+    }
+
+    for (const track of group.tracks) {
+      rows.push({
+        albumId: group.albumId,
+        key: `track:${track.id}`,
+        kind: 'track',
+        track,
+      });
+      rowOffsets.push(
+        rowOffsets[rowOffsets.length - 1] + trackTableTrackRowHeight,
+      );
+    }
+  }
+
+  return {
+    rowOffsets,
+    rows,
+    totalHeight: rowOffsets[rowOffsets.length - 1] ?? 0,
+  };
+}
+
+function findTrackTableRowIndex(rowOffsets: number[], offset: number): number {
+  const rowCount = Math.max(rowOffsets.length - 1, 0);
+
+  if (rowCount === 0) {
+    return 0;
+  }
+
+  let low = 0;
+  let high = rowCount - 1;
+
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+
+    if (rowOffsets[mid] > offset) {
+      high = mid - 1;
+      continue;
+    }
+
+    if (rowOffsets[mid + 1] <= offset) {
+      low = mid + 1;
+      continue;
+    }
+
+    return mid;
+  }
+
+  return Math.max(0, Math.min(rowCount - 1, low));
 }
 
 function buildColumnWeight(
@@ -1654,4 +1991,30 @@ function stringListsEqual(left: string[], right: string[]): boolean {
   }
 
   return true;
+}
+
+function resolveContextMenuPosition(
+  container: HTMLElement | null,
+  clientX: number,
+  clientY: number,
+  menuWidth: number,
+) {
+  if (!container) {
+    return { x: clientX, y: clientY };
+  }
+
+  const bounds = container.getBoundingClientRect();
+  const padding = 12;
+  const localX = clientX - bounds.left + container.scrollLeft;
+  const localY = clientY - bounds.top + container.scrollTop;
+  const minLeft = container.scrollLeft + padding;
+  const maxLeft = Math.max(
+    minLeft,
+    container.scrollLeft + container.clientWidth - menuWidth - padding,
+  );
+
+  return {
+    x: Math.max(minLeft, Math.min(localX, maxLeft)),
+    y: Math.max(container.scrollTop + padding, localY),
+  };
 }

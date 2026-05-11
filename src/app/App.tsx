@@ -9,6 +9,12 @@ import {
   buildPlayTrackRequest,
   directoryForAlbum,
 } from '../features/library/view-models';
+import {
+  DEFAULT_FIELD_MAPPING_FORMAT,
+  type FieldMappingFormat,
+  normalizeFieldMappingFormat,
+  selectInitialFieldMappingFormat,
+} from '../lib/field-mapping-presets';
 import { PlayerBar } from '../features/playback/PlayerBar';
 import { PlaylistPickerDialog } from '../features/playlists/PlaylistPickerDialog';
 import { PlaylistPane } from '../features/playlists/PlaylistPane';
@@ -127,6 +133,9 @@ export function App() {
     suggestedName: string;
   } | null>(null);
 
+  const [selectedMappingFormat, setSelectedMappingFormat] = useState<FieldMappingFormat>(
+    DEFAULT_FIELD_MAPPING_FORMAT,
+  );
   useEffect(() => {
     // Native webview context menus should never appear unless we add a custom handler.
     const suppressNativeContextMenu = (event: MouseEvent) => {
@@ -146,6 +155,9 @@ export function App() {
           setBootstrap(snapshot);
           setDraftMappings(snapshot.library.fieldMappings);
           setDraftCatalogRules(snapshot.library.catalogRules);
+          setSelectedMappingFormat(
+            selectInitialFieldMappingFormat(snapshot.library.fieldMappings),
+          );
         }
       })
       .catch((reason) => {
@@ -834,10 +846,11 @@ export function App() {
     }
   }
 
-  function handleAddField() {
+  function handleAddField(format: FieldMappingFormat) {
     setDraftMappings((current) => [
       ...current,
       {
+        format: normalizeFieldMappingFormat(format),
         key: '',
         label: 'New Field',
         tagPriorities: [],
@@ -845,16 +858,38 @@ export function App() {
     ]);
   }
 
-  function handleRemoveField(index: number) {
-    setDraftMappings((current) => current.filter((_, currentIndex) => currentIndex !== index));
+  function handleRemoveField(format: FieldMappingFormat, index: number) {
+    setDraftMappings((current) => {
+      const targetIndex = findFieldMappingIndex(current, format, index);
+      if (targetIndex < 0) {
+        return current;
+      }
+
+      return current.filter((_, currentIndex) => currentIndex !== targetIndex);
+    });
   }
 
-  function handleUpdateField(index: number, patch: Partial<LibraryFieldMapping>) {
-    setDraftMappings((current) =>
-      current.map((mapping, currentIndex) =>
-        currentIndex === index ? { ...mapping, ...patch } : mapping,
-      ),
-    );
+  function handleUpdateField(
+    format: FieldMappingFormat,
+    index: number,
+    patch: Partial<LibraryFieldMapping>,
+  ) {
+    setDraftMappings((current) => {
+      const targetIndex = findFieldMappingIndex(current, format, index);
+      if (targetIndex < 0) {
+        return current;
+      }
+
+      return current.map((mapping, currentIndex) =>
+        currentIndex === targetIndex
+          ? {
+              ...mapping,
+              ...patch,
+              format: patch.format ? normalizeFieldMappingFormat(patch.format) : mapping.format,
+            }
+          : mapping,
+      );
+    });
   }
 
   function handleAddCatalogRule() {
@@ -1190,28 +1225,27 @@ export function App() {
             />
           ) : null}
 
-          {activePane === 'tracks' ? (
-            <TrackPane
-              onAddAlbumToPlaylist={handleAddAlbumToPlaylist}
-              onAddToPlaylist={handleAddTracksToPlaylist}
-              onAddAlbumToQueue={handleAddAlbumToQueue}
-              onEditTrackTags={handleEditTrackTags}
-              onExportField={handleExportField}
-              onRememberExportTag={rememberSessionExportTag}
-              mappings={bootstrap.library.fieldMappings}
-              onAddToQueue={handleAddTracksToQueue}
-              onGoToDirectory={handleGoToAlbumDirectory}
-              onOpenAlbum={handleOpenAlbum}
-              onPlayAlbum={(albumId) => handleReplaceQueue(albumId, true)}
-              onPlayTracks={handlePlayTracks}
-              onReplaceQueue={(albumId) => handleReplaceQueue(albumId, false)}
-              sessionExportTags={sessionExportTags}
-              onShowInExplorer={handleShowTrackInExplorer}
-              onTrackTableChange={handleTrackTableChange}
-              settings={bootstrap.settings.trackTable}
-              tracks={bootstrap.library.tracks}
-            />
-          ) : null}
+          <TrackPane
+            isActive={activePane === 'tracks'}
+            onAddAlbumToPlaylist={handleAddAlbumToPlaylist}
+            onAddToPlaylist={handleAddTracksToPlaylist}
+            onAddAlbumToQueue={handleAddAlbumToQueue}
+            onEditTrackTags={handleEditTrackTags}
+            onExportField={handleExportField}
+            onRememberExportTag={rememberSessionExportTag}
+            mappings={bootstrap.library.fieldMappings}
+            onAddToQueue={handleAddTracksToQueue}
+            onGoToDirectory={handleGoToAlbumDirectory}
+            onOpenAlbum={handleOpenAlbum}
+            onPlayAlbum={(albumId) => handleReplaceQueue(albumId, true)}
+            onPlayTracks={handlePlayTracks}
+            onReplaceQueue={(albumId) => handleReplaceQueue(albumId, false)}
+            sessionExportTags={sessionExportTags}
+            onShowInExplorer={handleShowTrackInExplorer}
+            onTrackTableChange={handleTrackTableChange}
+            settings={bootstrap.settings.trackTable}
+            tracks={bootstrap.library.tracks}
+          />
 
           {activePane === 'playlist' ? (
             <PlaylistPane
@@ -1262,9 +1296,11 @@ export function App() {
               onSaveCatalogRules={handleSaveCatalogRules}
               onSaveMappings={handleSaveMappings}
               onRescanAll={handleRescanAll}
+              onSelectMappingFormat={setSelectedMappingFormat}
               onThemeChange={handleThemeChange}
               onUpdateCatalogRule={handleUpdateCatalogRule}
               onUpdateField={handleUpdateField}
+              selectedMappingFormat={selectedMappingFormat}
               settings={bootstrap.settings}
             />
           ) : null}
@@ -1299,6 +1335,29 @@ export function App() {
 
 function normalizeSessionExportTag(tagName: string): string {
   return tagName.trim().toUpperCase();
+}
+
+function findFieldMappingIndex(
+  mappings: LibraryFieldMapping[],
+  format: FieldMappingFormat,
+  index: number,
+): number {
+  const normalizedFormat = normalizeFieldMappingFormat(format);
+  let seen = 0;
+
+  for (let currentIndex = 0; currentIndex < mappings.length; currentIndex += 1) {
+    if (normalizeFieldMappingFormat(mappings[currentIndex].format) !== normalizedFormat) {
+      continue;
+    }
+
+    if (seen === index) {
+      return currentIndex;
+    }
+
+    seen += 1;
+  }
+
+  return -1;
 }
 
 function shuffleTrackRequests<T>(items: T[]): T[] {

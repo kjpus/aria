@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { defaultFieldMappings } from './field-mapping-presets';
 import { isTauriRuntime } from './runtime';
 import type {
   AppBootstrap,
@@ -33,19 +34,7 @@ let previewBootstrap: AppBootstrap = {
     isScanning: false,
     indexedFiles: 603,
     lastScanAt: 'Preview mode',
-    fieldMappings: [
-      { key: 'album', label: 'Album', tagPriorities: ['ALBUM'] },
-      { key: 'title', label: 'Title', tagPriorities: ['TITLE'] },
-      { key: 'catalog', label: 'Catalog', tagPriorities: ['CATALOGNUMBER', 'CATALOG'] },
-      { key: 'composer', label: 'Composer', tagPriorities: ['COMPOSER'] },
-      { key: 'genre', label: 'Genre', tagPriorities: ['GENRE'] },
-      { key: 'conductor', label: 'Conductor', tagPriorities: ['CONDUCTOR'] },
-      { key: 'ensemble', label: 'Ensemble', tagPriorities: ['ENSEMBLE', 'ORCHESTRA', 'ALBUMARTIST'] },
-      { key: 'soloist', label: 'Soloist', tagPriorities: ['PERFORMER', 'ARTIST', 'ALBUMARTIST'] },
-      { key: 'year', label: 'Year', tagPriorities: ['DATE', 'YEAR'] },
-      { key: 'disk_number', label: 'Disk Number', tagPriorities: ['DISCNUMBER'] },
-      { key: 'track_number', label: 'Track Number', tagPriorities: ['TRACKNUMBER'] },
-    ],
+    fieldMappings: defaultFieldMappings(),
     catalogRules: [
       {
         label: 'BWV',

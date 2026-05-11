@@ -1,9 +1,9 @@
-use std::{fs, path::PathBuf};
+use std::{collections::HashMap, fs, path::PathBuf};
 
 use aria_domain::{
-    default_catalog_rules, default_field_mappings, CatalogRule, LibraryFieldMapping, LibraryRoot,
-    LibrarySnapshot, PlaybackSessionSnapshot, PlaylistSnapshot, ScannedTrack, SettingsSnapshot,
-    TagInventoryEntry,
+    canonical_field_mapping_format, default_catalog_rules, default_field_mappings, CatalogRule,
+    LibraryFieldMapping, LibraryRoot, LibrarySnapshot, PlaybackSessionSnapshot,
+    PlaylistSnapshot, ScannedTrack, SettingsSnapshot, TagInventoryEntry,
 };
 use rusqlite::{params, Connection};
 use serde::de::DeserializeOwned;
@@ -156,15 +156,16 @@ impl AppDatabase {
         tx.execute("delete from field_mappings", [])?;
         {
             let mut statement = tx.prepare(
-                "insert into field_mappings (position, field_key, label, tag_priorities_json)
-                 values (?1, ?2, ?3, ?4)",
+                "insert into field_mappings (position, format, field_key, label, tag_priorities_json)
+                 values (?1, ?2, ?3, ?4, ?5)",
             )?;
             for (index, mapping) in snapshot.field_mappings.iter().enumerate() {
                 statement.execute(params![
                     i64::try_from(index).unwrap_or(i64::MAX),
+                    mapping.format,
                     mapping.key,
                     mapping.label,
-                    serde_json::to_string(&mapping.tag_priorities)?
+                    serde_json::to_string(&mapping.tag_priorities)?,
                 ])?;
             }
         }
@@ -230,6 +231,27 @@ impl AppDatabase {
     fn migrate(&self) -> Result<(), StorageError> {
         let connection = self.connect()?;
         connection.execute_batch(include_str!("../migrations/0001_initial.sql"))?;
+        self.ensure_field_mapping_format_column(&connection)?;
+        Ok(())
+    }
+
+    fn ensure_field_mapping_format_column(
+        &self,
+        connection: &Connection,
+    ) -> Result<(), StorageError> {
+        let has_format_column: i64 = connection.query_row(
+            "select count(*) from pragma_table_info('field_mappings') where name = 'format'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        if has_format_column == 0 {
+            connection.execute(
+                "alter table field_mappings add column format text not null default 'DEFAULT'",
+                [],
+            )?;
+        }
+
         Ok(())
     }
 
@@ -273,7 +295,7 @@ impl AppDatabase {
         }
 
         snapshot.roots = self.load_library_roots(connection)?;
-        snapshot.field_mappings = self.load_field_mappings(connection)?;
+        snapshot.field_mappings = upgrade_loaded_field_mappings(self.load_field_mappings(connection)?);
         let catalog_rules = self.load_catalog_rules(connection)?;
         if !catalog_rules.is_empty() {
             snapshot.catalog_rules = catalog_rules;
@@ -315,23 +337,25 @@ impl AppDatabase {
         connection: &Connection,
     ) -> Result<Vec<LibraryFieldMapping>, StorageError> {
         let mut statement = connection.prepare(
-            "select field_key, label, tag_priorities_json
+            "select format, field_key, label, tag_priorities_json
              from field_mappings
              order by position asc",
         )?;
         let rows = statement.query_map([], |row| {
-            let tag_priorities_json: String = row.get(2)?;
+            let format: String = row.get(0)?;
+            let tag_priorities_json: String = row.get(3)?;
             let tag_priorities = serde_json::from_str(&tag_priorities_json).map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    2,
+                    3,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
             })?;
 
             Ok(LibraryFieldMapping {
-                key: row.get(0)?,
-                label: row.get(1)?,
+                format: canonical_field_mapping_format(&format),
+                key: row.get(1)?,
+                label: row.get(2)?,
                 tag_priorities,
             })
         })?;
@@ -488,6 +512,198 @@ fn legacy_regex_escape(value: &str) -> String {
     escaped
 }
 
+fn upgrade_loaded_field_mappings(mappings: Vec<LibraryFieldMapping>) -> Vec<LibraryFieldMapping> {
+    if mappings.is_empty() {
+        return default_field_mappings();
+    }
+
+    if is_legacy_default_only_mapping_set(&mappings) {
+        return default_field_mappings();
+    }
+
+    let current_defaults = default_mapping_lookup(default_field_mappings());
+    let legacy_defaults = default_mapping_lookup(legacy_per_format_field_mappings());
+
+    mappings
+        .into_iter()
+        .map(|mapping| {
+            let format = canonical_field_mapping_format(&mapping.format);
+            let key = (format.clone(), mapping.key.clone());
+
+            match current_defaults.get(&key) {
+                Some(current_default)
+                    if legacy_defaults
+                        .get(&key)
+                        .is_some_and(|legacy| mapping.label == legacy.label
+                            && mapping.tag_priorities == legacy.tag_priorities)
+                        || is_historical_mp4_composer_default(&format, &mapping) =>
+                {
+                    current_default.clone()
+                }
+                _ => LibraryFieldMapping { format, ..mapping },
+            }
+        })
+        .collect()
+}
+
+fn is_historical_mp4_composer_default(format: &str, mapping: &LibraryFieldMapping) -> bool {
+    const PRE_WRT_MP4_COMPOSER_TAGS: &[&str] = &["COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"];
+    const PRE_WRT_WITH_FREEFORM_MP4_COMPOSER_TAGS: &[&str] = &[
+        "COMPOSER",
+        "----:com.apple.iTunes:COMPOSER",
+        "WORKCOMPOSER",
+        "COMPOSERSORT",
+    ];
+
+    format == "MP4"
+        && mapping.key == "composer"
+        && mapping.label == "Composer"
+        && matches_historical_tag_priorities(&mapping.tag_priorities, PRE_WRT_MP4_COMPOSER_TAGS)
+            || format == "MP4"
+                && mapping.key == "composer"
+                && mapping.label == "Composer"
+                && matches_historical_tag_priorities(
+                    &mapping.tag_priorities,
+                    PRE_WRT_WITH_FREEFORM_MP4_COMPOSER_TAGS,
+                )
+}
+
+fn matches_historical_tag_priorities(
+    actual: &[String],
+    expected: &[&str],
+) -> bool {
+    actual.len() == expected.len()
+        && actual
+            .iter()
+            .zip(expected.iter())
+            .all(|(tag, expected_tag)| tag == expected_tag)
+}
+
+fn is_legacy_default_only_mapping_set(mappings: &[LibraryFieldMapping]) -> bool {
+    if mappings.is_empty() {
+        return false;
+    }
+
+    if mappings
+        .iter()
+        .any(|mapping| canonical_field_mapping_format(&mapping.format) != "DEFAULT")
+    {
+        return false;
+    }
+
+    let legacy_defaults = default_mapping_lookup(legacy_default_only_field_mappings());
+
+    mappings.len() == legacy_defaults.len()
+        && mappings.iter().all(|mapping| {
+            let key = (
+                canonical_field_mapping_format(&mapping.format),
+                mapping.key.clone(),
+            );
+
+            legacy_defaults.get(&key).is_some_and(|legacy| {
+                mapping.label == legacy.label && mapping.tag_priorities == legacy.tag_priorities
+            })
+        })
+}
+
+fn default_mapping_lookup(
+    mappings: Vec<LibraryFieldMapping>,
+) -> HashMap<(String, String), LibraryFieldMapping> {
+    mappings
+        .into_iter()
+        .map(|mapping| {
+            (
+                (
+                    canonical_field_mapping_format(&mapping.format),
+                    mapping.key.clone(),
+                ),
+                mapping,
+            )
+        })
+        .collect()
+}
+
+fn legacy_default_only_field_mappings() -> Vec<LibraryFieldMapping> {
+    legacy_field_mappings_for_format("DEFAULT")
+}
+
+fn legacy_per_format_field_mappings() -> Vec<LibraryFieldMapping> {
+    let mut mappings = Vec::new();
+
+    for format in ["DEFAULT", "FLAC", "MP3", "MP4", "AAC", "OGG", "OPUS", "WAV", "AIFF"] {
+        mappings.extend(legacy_field_mappings_for_format(format));
+    }
+
+    mappings
+}
+
+fn legacy_field_mappings_for_format(format: &str) -> Vec<LibraryFieldMapping> {
+    let normalized_format = canonical_field_mapping_format(format);
+    let catalog = if normalized_format == "MP4" {
+        vec![
+            "----:com.apple.iTunes:CATALOGNUMBER".into(),
+            "----:com.apple.iTunes:CATALOG".into(),
+            "CATALOGNUMBER".into(),
+            "CATALOG".into(),
+        ]
+    } else {
+        vec!["CATALOGNUMBER".into(), "CATALOG".into()]
+    };
+
+    vec![
+        legacy_field_mapping(&normalized_format, "album", "Album", &["ALBUM"]),
+        legacy_field_mapping(&normalized_format, "title", "Title", &["TITLE"]),
+        LibraryFieldMapping {
+            format: normalized_format.clone(),
+            key: "catalog".into(),
+            label: "Catalog".into(),
+            tag_priorities: catalog,
+        },
+        legacy_field_mapping(&normalized_format, "composer", "Composer", &["COMPOSER"]),
+        legacy_field_mapping(&normalized_format, "genre", "Genre", &["GENRE"]),
+        legacy_field_mapping(&normalized_format, "conductor", "Conductor", &["CONDUCTOR"]),
+        legacy_field_mapping(
+            &normalized_format,
+            "ensemble",
+            "Ensemble",
+            &["ENSEMBLE", "ORCHESTRA", "ALBUMARTIST"],
+        ),
+        legacy_field_mapping(
+            &normalized_format,
+            "soloist",
+            "Soloist",
+            &["PERFORMER", "ARTIST", "ALBUMARTIST"],
+        ),
+        legacy_field_mapping(&normalized_format, "year", "Year", &["DATE", "YEAR"]),
+        legacy_field_mapping(
+            &normalized_format,
+            "disk_number",
+            "Disk Number",
+            &["DISCNUMBER"],
+        ),
+        legacy_field_mapping(
+            &normalized_format,
+            "track_number",
+            "Track Number",
+            &["TRACKNUMBER"],
+        ),
+    ]
+}
+
+fn legacy_field_mapping(
+    format: &str,
+    key: &str,
+    label: &str,
+    tag_priorities: &[&str],
+) -> LibraryFieldMapping {
+    LibraryFieldMapping {
+        format: format.into(),
+        key: key.into(),
+        label: label.into(),
+        tag_priorities: tag_priorities.iter().map(|tag| (*tag).into()).collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -497,11 +713,14 @@ mod tests {
     };
 
     use aria_domain::{
-        CatalogRule, LibrarySnapshot, PlayTrackRequest, PlaybackPreferences,
+        default_field_mappings, CatalogRule, LibraryFieldMapping, LibrarySnapshot, PlayTrackRequest, PlaybackPreferences,
         PlaybackSessionSnapshot, QueueItem, SettingsSnapshot, ThemePreference, TrackTableSettings,
     };
 
-    use super::AppDatabase;
+    use super::{
+        legacy_default_only_field_mappings, legacy_field_mappings_for_format,
+        upgrade_loaded_field_mappings, AppDatabase,
+    };
 
     #[test]
     fn persists_library_and_settings_across_reloads() {
@@ -625,5 +844,125 @@ mod tests {
         assert_eq!(loaded.playback.queue[0].queue_item.id, "track-1");
 
         fs::remove_dir_all(&test_root).ok();
+    }
+
+    #[test]
+    fn upgrades_legacy_default_only_mappings_to_full_format_defaults() {
+        let upgraded = upgrade_loaded_field_mappings(legacy_default_only_field_mappings());
+
+        assert_eq!(upgraded.len(), default_field_mappings().len());
+        assert!(upgraded.iter().any(|mapping| mapping.format == "FLAC"));
+
+        let mp4_conductor = upgraded
+            .iter()
+            .find(|mapping| mapping.format == "MP4" && mapping.key == "conductor")
+            .expect("expected MP4 conductor mapping");
+
+        assert_eq!(
+            mp4_conductor.tag_priorities[0],
+            "----:com.apple.iTunes:CONDUCTOR"
+        );
+    }
+
+    #[test]
+    fn upgrades_legacy_per_format_defaults_without_overwriting_custom_tags() {
+        let mut legacy_mp4 = legacy_field_mappings_for_format("MP4");
+        let soloist = legacy_mp4
+            .iter_mut()
+            .find(|mapping| mapping.key == "soloist")
+            .expect("expected soloist mapping");
+        soloist.tag_priorities = vec!["CUSTOMSOLOIST".into(), "ARTIST".into()];
+
+        let upgraded = upgrade_loaded_field_mappings(legacy_mp4);
+
+        let conductor = upgraded
+            .iter()
+            .find(|mapping| mapping.key == "conductor")
+            .expect("expected conductor mapping");
+        let soloist = upgraded
+            .iter()
+            .find(|mapping| mapping.key == "soloist")
+            .expect("expected soloist mapping");
+
+        assert_eq!(
+            conductor.tag_priorities[0],
+            "----:com.apple.iTunes:CONDUCTOR"
+        );
+        assert_eq!(
+            soloist,
+            &LibraryFieldMapping {
+                format: "MP4".into(),
+                key: "soloist".into(),
+                label: "Soloist".into(),
+                tag_priorities: vec!["CUSTOMSOLOIST".into(), "ARTIST".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn upgrades_pre_wrt_mp4_composer_defaults() {
+        let mut stored_defaults = default_field_mappings();
+        let composer = stored_defaults
+            .iter_mut()
+            .find(|mapping| mapping.format == "MP4" && mapping.key == "composer")
+            .expect("expected MP4 composer mapping");
+        composer.tag_priorities = vec![
+            "COMPOSER".into(),
+            "WORKCOMPOSER".into(),
+            "COMPOSERSORT".into(),
+        ];
+
+        let upgraded = upgrade_loaded_field_mappings(stored_defaults);
+
+        let composer = upgraded
+            .iter()
+            .find(|mapping| mapping.format == "MP4" && mapping.key == "composer")
+            .expect("expected upgraded MP4 composer mapping");
+
+        assert_eq!(composer.tag_priorities[0], "©WRT");
+        assert_eq!(
+            composer.tag_priorities,
+            vec![
+                "©WRT".to_string(),
+                "COMPOSER".to_string(),
+                "----:com.apple.iTunes:COMPOSER".to_string(),
+                "WORKCOMPOSER".to_string(),
+                "COMPOSERSORT".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn upgrades_pre_wrt_mp4_composer_defaults_with_freeform_composer() {
+        let mut stored_defaults = default_field_mappings();
+        let composer = stored_defaults
+            .iter_mut()
+            .find(|mapping| mapping.format == "MP4" && mapping.key == "composer")
+            .expect("expected MP4 composer mapping");
+        composer.tag_priorities = vec![
+            "COMPOSER".into(),
+            "----:com.apple.iTunes:COMPOSER".into(),
+            "WORKCOMPOSER".into(),
+            "COMPOSERSORT".into(),
+        ];
+
+        let upgraded = upgrade_loaded_field_mappings(stored_defaults);
+
+        let composer = upgraded
+            .iter()
+            .find(|mapping| mapping.format == "MP4" && mapping.key == "composer")
+            .expect("expected upgraded MP4 composer mapping");
+
+        assert_eq!(composer.tag_priorities[0], "©WRT");
+        assert_eq!(
+            composer.tag_priorities,
+            vec![
+                "©WRT".to_string(),
+                "COMPOSER".to_string(),
+                "----:com.apple.iTunes:COMPOSER".to_string(),
+                "WORKCOMPOSER".to_string(),
+                "COMPOSERSORT".to_string(),
+            ]
+        );
     }
 }

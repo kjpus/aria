@@ -106,7 +106,9 @@ export function AlbumPane({
   onGoToDirectory,
   sessionExportTags,
 }: AlbumPaneProps) {
+  const albumDetailRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const trackTableScrollRef = useRef<HTMLDivElement>(null);
   const resizeStateRef = useRef<ResizeState | null>(null);
   const visibleDropIndicatorRef = useRef<DropIndicator | null>(null);
   const [selectedTrackIds, setSelectedTrackIds] = useState<string[]>([]);
@@ -307,10 +309,7 @@ export function AlbumPane({
     }
 
     const closeMenu = (event?: Event) => {
-      if (
-        event instanceof MouseEvent &&
-        menuRef.current?.contains(event.target as Node)
-      ) {
+      if (event?.target instanceof Node && menuRef.current?.contains(event.target)) {
         return;
       }
 
@@ -325,13 +324,11 @@ export function AlbumPane({
     window.addEventListener('pointerdown', closeMenu);
     window.addEventListener('resize', closeMenu);
     window.addEventListener('keydown', closeMenu);
-    window.addEventListener('scroll', closeMenu, true);
 
     return () => {
       window.removeEventListener('pointerdown', closeMenu);
       window.removeEventListener('resize', closeMenu);
       window.removeEventListener('keydown', closeMenu);
-      window.removeEventListener('scroll', closeMenu, true);
     };
   }, [albumContextMenu, trackContextMenu]);
 
@@ -465,10 +462,17 @@ export function AlbumPane({
       setSelectionAnchorId(track.id);
     }
 
+    const placement = resolveContextMenuPosition(
+      trackTableScrollRef.current,
+      event.clientX,
+      event.clientY,
+      240,
+    );
+
     setAlbumContextMenu(null);
     setTrackContextMenu({
-      x: Math.min(event.clientX, window.innerWidth - 240),
-      y: Math.min(event.clientY, window.innerHeight - 180),
+      x: placement.x,
+      y: placement.y,
       trackIds: nextSelectedTrackIds,
       primaryTrackId: track.id,
     });
@@ -522,10 +526,17 @@ export function AlbumPane({
 
   function openContextMenu(event: ReactMouseEvent<HTMLDivElement>) {
     event.preventDefault();
+    const placement = resolveContextMenuPosition(
+      albumDetailRef.current,
+      event.clientX,
+      event.clientY,
+      240,
+    );
+
     setTrackContextMenu(null);
     setAlbumContextMenu({
-      x: Math.min(event.clientX, window.innerWidth - 240),
-      y: Math.min(event.clientY, window.innerHeight - 220),
+      x: placement.x,
+      y: placement.y,
     });
   }
 
@@ -644,7 +655,7 @@ export function AlbumPane({
   return (
     <div className="pane-stack">
       <SectionCard hideHeader>
-        <div className="album-detail" onContextMenu={openContextMenu}>
+        <div className="album-detail" onContextMenu={openContextMenu} ref={albumDetailRef}>
           <div className="album-detail__toolbar">
             <p className="section-card__eyebrow">Album</p>
           </div>
@@ -700,9 +711,36 @@ export function AlbumPane({
               </button>
             </div>
           </div>
+
+          {albumContextMenu ? (
+            <div
+              className="album-context-menu album-context-menu--pane-bound"
+              ref={menuRef}
+              style={{ left: `${albumContextMenu.x}px`, top: `${albumContextMenu.y}px` }}
+            >
+              <button onClick={() => void runContextAction(onAddAlbumToPlaylist)} type="button">
+                Add to playlist
+              </button>
+              <button onClick={() => void runContextAction(onAddToQueue)} type="button">
+                Add to queue
+              </button>
+              <button onClick={() => void runContextAction(onReplaceQueue)} type="button">
+                Put in queue
+              </button>
+              <button onClick={() => void runContextAction(onPlayAlbum)} type="button">
+                Play album
+              </button>
+              <button onClick={() => runAlbumExportField()} type="button">
+                Export field
+              </button>
+              <button onClick={() => void runContextAction(onGoToDirectory)} type="button">
+                Go to directory
+              </button>
+            </div>
+          ) : null}
         </div>
 
-        <div className="track-table-shell track-table-shell--clamped">
+        <div className="track-table-shell track-table-shell--clamped" ref={trackTableScrollRef}>
           <table className="track-table album-track-table track-table--fluid">
             <colgroup>
               {visibleColumns.map((key) => (
@@ -785,71 +823,44 @@ export function AlbumPane({
               )}
             </tbody>
           </table>
+
+          {trackContextMenu ? (
+            <div
+              className="album-context-menu album-context-menu--pane-bound"
+              ref={menuRef}
+              style={{ left: `${trackContextMenu.x}px`, top: `${trackContextMenu.y}px` }}
+            >
+              <button
+                onClick={() => void runTrackContextAction(onAddTracksToPlaylist)}
+                type="button"
+              >
+                Add to playlist
+              </button>
+              <button
+                onClick={() => void runTrackContextAction(onAddTracksToQueue)}
+                type="button"
+              >
+                Add to queue
+              </button>
+              <button onClick={() => void runTrackContextAction(onPlayTracks)} type="button">
+                Play
+              </button>
+              <button onClick={() => runTrackExportField()} type="button">
+                Export field
+              </button>
+              {trackContextMenu.trackIds.length === 1 ? (
+                <button onClick={() => void runShowAllTags()} type="button">
+                  Show all tags
+                </button>
+              ) : null}
+              {trackContextMenu.trackIds.length === 1 ? (
+                <button onClick={() => void runShowInExplorer()} type="button">
+                  Show in Explorer
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
-
-        {albumContextMenu ? (
-          <div
-            className="album-context-menu"
-            ref={menuRef}
-            style={{ left: `${albumContextMenu.x}px`, top: `${albumContextMenu.y}px` }}
-          >
-            <button onClick={() => void runContextAction(onAddAlbumToPlaylist)} type="button">
-              Add to playlist
-            </button>
-            <button onClick={() => void runContextAction(onAddToQueue)} type="button">
-              Add to queue
-            </button>
-            <button onClick={() => void runContextAction(onReplaceQueue)} type="button">
-              Put in queue
-            </button>
-            <button onClick={() => void runContextAction(onPlayAlbum)} type="button">
-              Play album
-            </button>
-            <button onClick={() => runAlbumExportField()} type="button">
-              Export field
-            </button>
-            <button onClick={() => void runContextAction(onGoToDirectory)} type="button">
-              Go to directory
-            </button>
-          </div>
-        ) : null}
-
-        {trackContextMenu ? (
-          <div
-            className="album-context-menu"
-            ref={menuRef}
-            style={{ left: `${trackContextMenu.x}px`, top: `${trackContextMenu.y}px` }}
-          >
-            <button
-              onClick={() => void runTrackContextAction(onAddTracksToPlaylist)}
-              type="button"
-            >
-              Add to playlist
-            </button>
-            <button
-              onClick={() => void runTrackContextAction(onAddTracksToQueue)}
-              type="button"
-            >
-              Add to queue
-            </button>
-            <button onClick={() => void runTrackContextAction(onPlayTracks)} type="button">
-              Play
-            </button>
-            <button onClick={() => runTrackExportField()} type="button">
-              Export field
-            </button>
-            {trackContextMenu.trackIds.length === 1 ? (
-              <button onClick={() => void runShowAllTags()} type="button">
-                Show all tags
-              </button>
-            ) : null}
-            {trackContextMenu.trackIds.length === 1 ? (
-              <button onClick={() => void runShowInExplorer()} type="button">
-                Show in Explorer
-              </button>
-            ) : null}
-          </div>
-        ) : null}
       </SectionCard>
 
       {isLayoutDialogOpen ? (
@@ -1161,6 +1172,32 @@ function stringListsEqual(left: string[], right: string[]): boolean {
   }
 
   return true;
+}
+
+function resolveContextMenuPosition(
+  container: HTMLElement | null,
+  clientX: number,
+  clientY: number,
+  menuWidth: number,
+) {
+  if (!container) {
+    return { x: clientX, y: clientY };
+  }
+
+  const bounds = container.getBoundingClientRect();
+  const padding = 12;
+  const localX = clientX - bounds.left + container.scrollLeft;
+  const localY = clientY - bounds.top + container.scrollTop;
+  const minLeft = container.scrollLeft + padding;
+  const maxLeft = Math.max(
+    minLeft,
+    container.scrollLeft + container.clientWidth - menuWidth - padding,
+  );
+
+  return {
+    x: Math.max(minLeft, Math.min(localX, maxLeft)),
+    y: Math.max(container.scrollTop + padding, localY),
+  };
 }
 
 function clampColumnWidth(key: string, width: number): number {

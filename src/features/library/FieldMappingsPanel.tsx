@@ -1,12 +1,21 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { SectionCard } from '../../components/SectionCard';
 import type { LibraryFieldMapping } from '../../types/aria';
+import {
+  FIELD_MAPPING_FORMAT_OPTIONS,
+  type FieldMappingFormat,
+  fieldMappingFormatLabel,
+  normalizeFieldMappingFormat,
+} from '../../lib/field-mapping-presets';
 
 type FieldMappingsPanelProps = {
   mappings: LibraryFieldMapping[];
-  onAddField: () => void;
-  onRemoveField: (index: number) => void;
+  selectedFormat: FieldMappingFormat;
+  onAddField: (format: FieldMappingFormat) => void;
+  onRemoveField: (format: FieldMappingFormat, index: number) => void;
+  onSelectFormat: (format: FieldMappingFormat) => void;
   onUpdateField: (
+    format: FieldMappingFormat,
     index: number,
     patch: Partial<LibraryFieldMapping>,
   ) => void;
@@ -16,23 +25,53 @@ type FieldMappingsPanelProps = {
 
 export function FieldMappingsPanel({
   mappings,
+  selectedFormat,
   onAddField,
   onRemoveField,
+  onSelectFormat,
   onUpdateField,
   onSave,
   variant = 'card',
 }: FieldMappingsPanelProps) {
+  const visibleMappings = useMemo(
+    () =>
+      mappings.filter(
+        (mapping) => normalizeFieldMappingFormat(mapping.format) === selectedFormat,
+      ),
+    [mappings, selectedFormat],
+  );
+
   const [tagPriorityDrafts, setTagPriorityDrafts] = useState(() =>
-    mappings.map((mapping) => mapping.tagPriorities.join(', ')),
+    visibleMappings.map((mapping) => mapping.tagPriorities.join(', ')),
   );
 
   useEffect(() => {
-    setTagPriorityDrafts(mappings.map((mapping) => mapping.tagPriorities.join(', ')));
-  }, [mappings.length]);
+    setTagPriorityDrafts(visibleMappings.map((mapping) => mapping.tagPriorities.join(', ')));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFormat, visibleMappings.length]);
 
   const actions = (
     <div className="inline-actions">
-      <button className="ghost-button" onClick={onAddField} type="button">
+      <label className="field-label">
+        File format
+        <select
+          value={selectedFormat}
+          onChange={(event) =>
+            onSelectFormat(normalizeFieldMappingFormat(event.target.value))
+          }
+        >
+          {FIELD_MAPPING_FORMAT_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <button
+        className="ghost-button"
+        onClick={() => onAddField(selectedFormat)}
+        type="button"
+      >
         Add field
       </button>
       <button onClick={onSave} type="button">
@@ -43,13 +82,18 @@ export function FieldMappingsPanel({
 
   const content = (
     <div className="mapping-list">
-      {mappings.map((mapping, index) => (
+      {visibleMappings.length === 0 ? (
+        <p className="panel-copy">
+          No fields configured for {fieldMappingFormatLabel(selectedFormat)} yet.
+        </p>
+      ) : null}
+      {visibleMappings.map((mapping, index) => (
         <article className="mapping-card" key={`${mapping.key}-${index}`}>
           <div className="mapping-card__header">
             <strong>{mapping.label || 'New field'}</strong>
             <button
               className="ghost-button"
-              onClick={() => onRemoveField(index)}
+              onClick={() => onRemoveField(selectedFormat, index)}
               type="button"
             >
               Remove
@@ -61,7 +105,7 @@ export function FieldMappingsPanel({
             <input
               value={mapping.key}
               onChange={(event) =>
-                onUpdateField(index, { key: event.target.value })
+                onUpdateField(selectedFormat, index, { key: event.target.value })
               }
               placeholder="catalog"
             />
@@ -72,7 +116,7 @@ export function FieldMappingsPanel({
             <input
               value={mapping.label}
               onChange={(event) =>
-                onUpdateField(index, { label: event.target.value })
+                onUpdateField(selectedFormat, index, { label: event.target.value })
               }
               placeholder="Catalog"
             />
@@ -92,7 +136,7 @@ export function FieldMappingsPanel({
                 setTagPriorityDrafts((current) =>
                   updateDraftAtIndex(current, index, nextValue),
                 );
-                onUpdateField(index, {
+                onUpdateField(selectedFormat, index, {
                   tagPriorities: parseCommaSeparatedValues(nextValue),
                 });
               }}

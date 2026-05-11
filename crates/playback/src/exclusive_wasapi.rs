@@ -69,6 +69,10 @@ struct ExclusiveInit {
     output_format: WasapiPcmFormat,
 }
 
+struct MmcssRegistration {
+    handle: Foundation::HANDLE,
+}
+
 struct ExclusiveDecoder {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn SymphoniaDecoder>,
@@ -413,6 +417,7 @@ fn run_exclusive_thread(
     init_tx: Sender<Result<(), PlaybackError>>,
 ) {
     let com_initialized = unsafe { Com::CoInitializeEx(None, Com::COINIT_MULTITHREADED).is_ok() };
+    let _mmcss = register_current_thread_for_audio();
 
     let init = initialize_exclusive_output(&endpoint_id, &path, start_position);
     let mut init = match init {
@@ -909,6 +914,34 @@ fn cleanup_and_uninitialize(
             Com::CoUninitialize();
         }
     }
+}
+
+impl Drop for MmcssRegistration {
+    fn drop(&mut self) {
+        let _ = unsafe { Threading::AvRevertMmThreadCharacteristics(self.handle) };
+    }
+}
+
+fn register_current_thread_for_audio() -> Option<MmcssRegistration> {
+    let mut task_index = 0u32;
+    let task_name = wide_null("Pro Audio");
+    let handle = match unsafe {
+        Threading::AvSetMmThreadCharacteristicsW(PCWSTR(task_name.as_ptr()), &mut task_index)
+    } {
+        Ok(handle) => handle,
+        Err(error) => {
+            eprintln!("failed to register exclusive playback thread with MMCSS: {error}");
+            return None;
+        }
+    };
+
+    if let Err(error) = unsafe { Threading::AvSetMmThreadPriority(handle, Threading::AVRT_PRIORITY_HIGH) } {
+        eprintln!("failed to raise exclusive playback MMCSS priority: {error}");
+        let _ = unsafe { Threading::AvRevertMmThreadCharacteristics(handle) };
+        return None;
+    }
+
+    Some(MmcssRegistration { handle })
 }
 
 fn wasapi_endpoint_id(device_id: &str) -> Option<&str> {
