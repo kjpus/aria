@@ -52,6 +52,6 @@ jobs:
           tagName: aria-v__VERSION__ # The action automatically replaces __VERSION__ with the version from package.json
           releaseName: 'Aria v__VERSION__'
           releaseBody: 'See the assets below to download and install this version.'
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
