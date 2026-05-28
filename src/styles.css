@@ -1902,6 +1902,43 @@ button:disabled {
 
 .player-bar__art-image {
   object-fit: cover;
+  cursor: pointer;
+}
+
+.player-bar__art-popup {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 0.72rem;
+  z-index: 100;
+  background: var(--panel-strong);
+  border: 1px solid var(--context-menu-border);
+  border-radius: 16px;
+  padding: 6px;
+  box-shadow: var(--context-menu-shadow);
+  backdrop-filter: blur(20px);
+  display: flex;
+  flex-direction: column;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(10px) scale(0.95);
+  transition:
+    opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.player-bar__art-popup--visible {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.player-bar__art-popup-image {
+  display: block;
+  border-radius: 12px;
+  width: auto;
+  height: auto;
+  max-width: min(80vw, 500px);
+  max-height: min(80vh, 500px);
+  object-fit: contain;
 }
 
 .player-bar__meta {

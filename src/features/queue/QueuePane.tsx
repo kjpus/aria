@@ -1,3 +1,5 @@
+import { useEffect, useRef } from 'react';
+import type { RefObject } from 'react';
 import { SectionCard } from '../../components/SectionCard';
 import { HoverScrollText } from '../albums/HoverScrollText';
 import type { PlaybackSnapshot, ScannedTrack } from '../../types/aria';
@@ -19,6 +21,18 @@ export function QueuePane({
   onShuffle,
 }: QueuePaneProps) {
   const trackLookup = new Map(tracks.map((track) => [track.id, track]));
+  const currentTrackRef = useRef<HTMLLIElement | null>(null);
+
+  useEffect(() => {
+    if (!playback.currentTrack) {
+      return;
+    }
+
+    currentTrackRef.current?.scrollIntoView({
+      block: 'center',
+      inline: 'nearest',
+    });
+  }, [playback.currentQueueIndex, playback.currentTrack?.id]);
 
   return (
     <div className="pane-stack queue-pane">
@@ -61,6 +75,9 @@ export function QueuePane({
               <QueueRow
                 index={index}
                 key={track.id}
+                currentTrackRef={
+                  playback.currentTrack?.id === track.id ? currentTrackRef : null
+                }
                 playback={playback}
                 queuedTrack={track}
                 scannedTrack={trackLookup.get(track.id) ?? null}
@@ -78,9 +95,16 @@ type QueueRowProps = {
   scannedTrack: ScannedTrack | null;
   playback: PlaybackSnapshot;
   index: number;
+  currentTrackRef: RefObject<HTMLLIElement> | null;
 };
 
-function QueueRow({ queuedTrack, scannedTrack, playback, index }: QueueRowProps) {
+function QueueRow({
+  queuedTrack,
+  scannedTrack,
+  playback,
+  index,
+  currentTrackRef,
+}: QueueRowProps) {
   const summary = buildQueueSummary(queuedTrack, scannedTrack);
   const fullSummary = summary.detail
     ? `${summary.title} / ${summary.detail}`
@@ -88,6 +112,7 @@ function QueueRow({ queuedTrack, scannedTrack, playback, index }: QueueRowProps)
 
   return (
     <li
+      ref={currentTrackRef}
       className={[
         'queue-list__item',
         playback.currentTrack?.id === queuedTrack.id ? 'queue-list__item--current' : '',

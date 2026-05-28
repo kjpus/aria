@@ -497,6 +497,25 @@ export function App() {
     }
   }
 
+  async function handleReplaceQueueAndPlayTracks(tracksToPlay: ScannedTrack[]) {
+    if (tracksToPlay.length === 0) {
+      return;
+    }
+
+    try {
+      const playback = await replaceQueue(
+        tracksToPlay.map(buildPlayTrackRequest),
+        true,
+      );
+      setBootstrap((current) =>
+        current ? { ...current, playback } : current,
+      );
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   async function handleAddTracksToQueue(tracksToAdd: ScannedTrack[]) {
     if (tracksToAdd.length === 0) {
       return;
@@ -1239,6 +1258,7 @@ export function App() {
             onOpenAlbum={handleOpenAlbum}
             onPlayAlbum={(albumId) => handleReplaceQueue(albumId, true)}
             onPlayTracks={handlePlayTracks}
+            onReplaceQueueAndPlayTracks={handleReplaceQueueAndPlayTracks}
             onReplaceQueue={(albumId) => handleReplaceQueue(albumId, false)}
             sessionExportTags={sessionExportTags}
             onShowInExplorer={handleShowTrackInExplorer}

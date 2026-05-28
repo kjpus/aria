@@ -48,6 +48,7 @@ type TrackPaneProps = {
   ) => void | Promise<void>;
   onRememberExportTag: (tagName: string) => void;
   onPlayTracks: (tracks: ScannedTrack[]) => void | Promise<void>;
+  onReplaceQueueAndPlayTracks: (tracks: ScannedTrack[]) => void | Promise<void>;
   onAddToQueue: (tracks: ScannedTrack[]) => void | Promise<void>;
   onAddToPlaylist: (tracks: ScannedTrack[]) => void | Promise<void>;
   onOpenAlbum: (albumId: string) => void;
@@ -143,6 +144,7 @@ export function TrackPane({
   onEditTrackTags,
   onRememberExportTag,
   onPlayTracks,
+  onReplaceQueueAndPlayTracks,
   onAddToQueue,
   onAddToPlaylist,
   onOpenAlbum,
@@ -194,6 +196,7 @@ export function TrackPane({
   const [exportError, setExportError] = useState<string | null>(null);
   const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
   const [isExportingField, setIsExportingField] = useState(false);
+  const [isRandomPlayPending, setIsRandomPlayPending] = useState(false);
   const [hasHydrated, setHasHydrated] = useState(false);
   const [trackTableScrollTop, setTrackTableScrollTop] = useState(0);
   const [trackTableViewportHeight, setTrackTableViewportHeight] = useState(0);
@@ -991,6 +994,19 @@ export function TrackPane({
     setSortCriteria(buildDefaultSortCriteria(columns.map((column) => column.key)));
   }
 
+  async function handleRandomPlay() {
+    if (filteredTracks.length === 0 || isRandomPlayPending) {
+      return;
+    }
+
+    setIsRandomPlayPending(true);
+    try {
+      await onReplaceQueueAndPlayTracks(pickRandomTracks(filteredTracks, 100));
+    } finally {
+      setIsRandomPlayPending(false);
+    }
+  }
+
   return (
     <div className="pane-stack track-pane" hidden={!isActive}>
       <SectionCard hideHeader>
@@ -1013,6 +1029,14 @@ export function TrackPane({
                 <span className="pane-chip">{expandedAlbumIds.length} expanded</span>
               </div>
               <div className="track-controls__actions">
+                <button
+                  className="ghost-button"
+                  disabled={filteredTracks.length === 0 || isRandomPlayPending}
+                  onClick={() => void handleRandomPlay()}
+                  type="button"
+                >
+                  {isRandomPlayPending ? 'Starting…' : 'Random play'}
+                </button>
                 <button
                   className="ghost-button"
                   disabled={albumGroups.length === 0 || expandedAlbumIds.length === albumGroups.length}
@@ -2017,4 +2041,13 @@ function resolveContextMenuPosition(
     x: Math.max(minLeft, Math.min(localX, maxLeft)),
     y: Math.max(container.scrollTop + padding, localY),
   };
+}
+
+function pickRandomTracks(tracks: ScannedTrack[], limit: number) {
+  const shuffled = [...tracks];
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+  }
+  return shuffled.slice(0, limit);
 }

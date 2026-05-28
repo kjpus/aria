@@ -40,6 +40,7 @@ export function PlayerBar({
   const [sleepTimerEndsAt, setSleepTimerEndsAt] = useState<number | null>(null);
   const [sleepMenuOpen, setSleepMenuOpen] = useState(false);
   const [sleepRemainingMs, setSleepRemainingMs] = useState<number | null>(null);
+  const [showArtPopup, setShowArtPopup] = useState(false);
   const normalizedVolume = clampUnitVolume(volume);
   const [draftVolumePercent, setDraftVolumePercent] = useState(() =>
     Math.round(normalizedVolume * 100),
@@ -68,6 +69,7 @@ export function PlayerBar({
     setScrubPositionMs(null);
     setIsScrubbing(false);
     setPreviewPositionMs(null);
+    setShowArtPopup(false);
   }, [playback.currentTrack?.id]);
 
   useEffect(() => {
@@ -169,7 +171,13 @@ export function PlayerBar({
     <section className="player-bar">
       <div className="player-bar__identity">
         {art ? (
-          <img alt="" className="player-bar__art player-bar__art-image" src={art} />
+          <img
+            alt=""
+            className="player-bar__art player-bar__art-image"
+            onMouseEnter={() => setShowArtPopup(true)}
+            onMouseLeave={() => setShowArtPopup(false)}
+            src={art}
+          />
         ) : (
           <div className="player-bar__art">
             <span>Aria</span>
@@ -355,6 +363,20 @@ export function PlayerBar({
           )}
         </div>
       </div>
+
+      {art && (
+        <div
+          className={`player-bar__art-popup${
+            showArtPopup ? ' player-bar__art-popup--visible' : ''
+          }`}
+        >
+          <img
+            alt="Album art original size"
+            className="player-bar__art-popup-image"
+            src={art}
+          />
+        </div>
+      )}
     </section>
   );
 }
