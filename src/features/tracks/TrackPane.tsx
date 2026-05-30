@@ -56,6 +56,8 @@ type TrackPaneProps = {
   sessionExportTags: string[];
   onShowInExplorer: (track: ScannedTrack) => void | Promise<void>;
   onTrackTableChange: (settings: TrackTableSettings) => void;
+  highlightTrackId?: string | null;
+  onClearHighlightTrack?: () => void;
 };
 
 const defaultTrackColumns = [
@@ -151,8 +153,10 @@ export function TrackPane({
   onReplaceQueue,
   sessionExportTags,
   onShowInExplorer,
-  settings,
   onTrackTableChange,
+  highlightTrackId,
+  onClearHighlightTrack,
+  settings,
 }: TrackPaneProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const trackTableScrollRef = useRef<HTMLDivElement>(null);
@@ -221,6 +225,23 @@ export function TrackPane({
     setSortCriteria(trackTableToCriteria(persistedTrackTable));
     setHasHydrated(true);
   }, [persistedTrackTable]);
+
+  useEffect(() => {
+    if (highlightTrackId && isActive) {
+      const track = tracks.find((t) => t.id === highlightTrackId);
+      if (track) {
+        setSelectedTrackIds([highlightTrackId]);
+        setSelectionAnchorId(highlightTrackId);
+        const albumId = albumIdForTrack(track);
+        setExpandedAlbumIds((prev) =>
+          prev.includes(albumId) ? prev : [...prev, albumId],
+        );
+        const title = track.mappedFields.title?.[0] || track.fileName;
+        setFilter(title);
+      }
+      onClearHighlightTrack?.();
+    }
+  }, [highlightTrackId, isActive, tracks, onClearHighlightTrack]);
 
   useEffect(() => {
     if (!resizingColumn) {

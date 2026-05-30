@@ -1,9 +1,9 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { SectionCard } from '../../components/SectionCard';
 import { HoverScrollText } from '../albums/HoverScrollText';
 import type { PlaybackSnapshot, ScannedTrack } from '../../types/aria';
-import { firstField, formatDuration, joinField } from '../library/view-models';
+import { albumIdForTrack, firstField, formatDuration, joinField } from '../library/view-models';
 
 type QueuePaneProps = {
   playback: PlaybackSnapshot;
@@ -11,6 +11,15 @@ type QueuePaneProps = {
   onClearQueue: () => void | Promise<void>;
   onRestoreOrder: () => void | Promise<void>;
   onShuffle: () => void | Promise<void>;
+  onOpenAlbum: (albumId: string) => void;
+  onOpenTrack: (trackId: string) => void;
+};
+
+type QueueContextMenuState = {
+  trackId: string;
+  albumId: string | null;
+  x: number;
+  y: number;
 };
 
 export function QueuePane({
@@ -19,9 +28,13 @@ export function QueuePane({
   onClearQueue,
   onRestoreOrder,
   onShuffle,
+  onOpenAlbum,
+  onOpenTrack,
 }: QueuePaneProps) {
   const trackLookup = new Map(tracks.map((track) => [track.id, track]));
   const currentTrackRef = useRef<HTMLLIElement | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [contextMenu, setContextMenu] = useState<QueueContextMenuState | null>(null);
 
   useEffect(() => {
     if (!playback.currentTrack) {
@@ -33,6 +46,39 @@ export function QueuePane({
       inline: 'nearest',
     });
   }, [playback.currentQueueIndex, playback.currentTrack?.id]);
+
+  useEffect(() => {
+    if (!contextMenu) {
+      return undefined;
+    }
+
+    const closeMenu = (event?: Event) => {
+      if (
+        event instanceof MouseEvent &&
+        menuRef.current?.contains(event.target as Node)
+      ) {
+        return;
+      }
+
+      if (event instanceof KeyboardEvent && event.key !== 'Escape') {
+        return;
+      }
+
+      setContextMenu(null);
+    };
+
+    window.addEventListener('pointerdown', closeMenu);
+    window.addEventListener('resize', closeMenu);
+    window.addEventListener('keydown', closeMenu);
+    window.addEventListener('scroll', closeMenu, true);
+
+    return () => {
+      window.removeEventListener('pointerdown', closeMenu);
+      window.removeEventListener('resize', closeMenu);
+      window.removeEventListener('keydown', closeMenu);
+      window.removeEventListener('scroll', closeMenu, true);
+    };
+  }, [contextMenu]);
 
   return (
     <div className="pane-stack queue-pane">
@@ -81,10 +127,49 @@ export function QueuePane({
                 playback={playback}
                 queuedTrack={track}
                 scannedTrack={trackLookup.get(track.id) ?? null}
+                onContextMenu={(event, trackId, albumId) => {
+                  event.preventDefault();
+                  setContextMenu({
+                    trackId,
+                    albumId,
+                    x: Math.min(event.clientX, window.innerWidth - 240),
+                    y: Math.min(event.clientY, window.innerHeight - 140),
+                  });
+                }}
               />
             ))
           )}
         </ol>
+
+        {contextMenu ? (
+          <div
+            className="album-context-menu"
+            ref={menuRef}
+            style={{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }}
+          >
+            <button
+              onClick={() => {
+                onOpenTrack(contextMenu.trackId);
+                setContextMenu(null);
+              }}
+              type="button"
+            >
+              Go to track
+            </button>
+            <button
+              disabled={!contextMenu.albumId}
+              onClick={() => {
+                if (contextMenu.albumId) {
+                  onOpenAlbum(contextMenu.albumId);
+                }
+                setContextMenu(null);
+              }}
+              type="button"
+            >
+              Go to album
+            </button>
+          </div>
+        ) : null}
       </SectionCard>
     </div>
   );
@@ -96,6 +181,7 @@ type QueueRowProps = {
   playback: PlaybackSnapshot;
   index: number;
   currentTrackRef: RefObject<HTMLLIElement> | null;
+  onContextMenu: (event: React.MouseEvent, trackId: string, albumId: string | null) => void;
 };
 
 function QueueRow({
@@ -104,15 +190,18 @@ function QueueRow({
   playback,
   index,
   currentTrackRef,
+  onContextMenu,
 }: QueueRowProps) {
   const summary = buildQueueSummary(queuedTrack, scannedTrack);
   const fullSummary = summary.detail
     ? `${summary.title} / ${summary.detail}`
     : summary.title;
+  const albumId = scannedTrack ? albumIdForTrack(scannedTrack) : null;
 
   return (
     <li
       ref={currentTrackRef}
+      onContextMenu={(event) => onContextMenu(event, queuedTrack.id, albumId)}
       className={[
         'queue-list__item',
         playback.currentTrack?.id === queuedTrack.id ? 'queue-list__item--current' : '',

@@ -122,6 +122,7 @@ export function App() {
   const [activePane, setActivePane] = useState<PaneKey>('library');
   const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(null);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
+  const [highlightTrackId, setHighlightTrackId] = useState<string | null>(null);
   const [sessionExportTags, setSessionExportTags] = useState<string[]>([]);
   const [draftMappings, setDraftMappings] = useState<LibraryFieldMapping[]>([]);
   const [draftCatalogRules, setDraftCatalogRules] = useState<CatalogRule[]>([]);
@@ -305,6 +306,11 @@ export function App() {
   function handleOpenAlbum(albumId: string) {
     setSelectedAlbumId(albumId);
     setActivePane('album');
+  }
+
+  function handleOpenTrack(trackId: string) {
+    setHighlightTrackId(trackId);
+    setActivePane('tracks');
   }
 
   async function handleAddDirectory() {
@@ -1299,6 +1305,8 @@ export function App() {
             onTrackTableChange={handleTrackTableChange}
             settings={bootstrap.settings.trackTable}
             tracks={bootstrap.library.tracks}
+            highlightTrackId={highlightTrackId}
+            onClearHighlightTrack={() => setHighlightTrackId(null)}
           />
 
           {activePane === 'playlist' ? (
@@ -1329,6 +1337,8 @@ export function App() {
               onShuffle={handleShuffleQueue}
               playback={bootstrap.playback}
               tracks={bootstrap.library.tracks}
+              onOpenAlbum={handleOpenAlbum}
+              onOpenTrack={handleOpenTrack}
             />
           ) : null}
 
