@@ -464,15 +464,48 @@ fn album_art_cache_root() -> PathBuf {
         .join("album-art")
 }
 
+fn should_skip_entry(entry: &walkdir::DirEntry) -> bool {
+    let name = entry.file_name().to_string_lossy();
+    if name.starts_with('.') {
+        return true;
+    }
+
+    let name_lower = name.to_lowercase();
+    if name_lower == "$recycle.bin" || name_lower == "system volume information" {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if let Ok(metadata) = entry.metadata() {
+            let attrs = metadata.file_attributes();
+            // 0x2 = FILE_ATTRIBUTE_HIDDEN, 0x4 = FILE_ATTRIBUTE_SYSTEM
+            if (attrs & 0x2) != 0 || (attrs & 0x4) != 0 {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 fn discover_audio_files(roots: &[LibraryRoot]) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
     for root in roots {
-        for entry in WalkDir::new(&root.path)
+        let walker = WalkDir::new(&root.path)
             .follow_links(true)
             .into_iter()
-            .filter_map(Result::ok)
-        {
+            .filter_entry(|entry| {
+                if entry.depth() == 0 {
+                    return true;
+                }
+                !should_skip_entry(entry)
+            })
+            .filter_map(Result::ok);
+
+        for entry in walker {
             let path = entry.path();
             if entry.file_type().is_file() && is_supported_audio_file(path) {
                 files.push(path.to_path_buf());
@@ -1955,6 +1988,54 @@ mod tests {
                 .is_empty(),
             "expected ensemble field mapping to resolve"
         );
+    }
+
+    #[test]
+    fn discover_audio_files_skips_hidden_and_system_dirs() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "discover-audio-files-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create standard folder
+        let normal_dir = temp_dir.join("music");
+        std::fs::create_dir_all(&normal_dir).unwrap();
+        std::fs::write(normal_dir.join("song.mp3"), b"").unwrap();
+
+        // Create skipped folders (by name)
+        let recycle_dir = temp_dir.join("$RECYCLE.BIN");
+        std::fs::create_dir_all(&recycle_dir).unwrap();
+        std::fs::write(recycle_dir.join("trash.mp3"), b"").unwrap();
+
+        let sys_vol_dir = temp_dir.join("System Volume Information");
+        std::fs::create_dir_all(&sys_vol_dir).unwrap();
+        std::fs::write(sys_vol_dir.join("sys.mp3"), b"").unwrap();
+
+        // Create dot folder
+        let dot_dir = temp_dir.join(".hidden");
+        std::fs::create_dir_all(&dot_dir).unwrap();
+        std::fs::write(dot_dir.join("hidden_song.mp3"), b"").unwrap();
+
+        let roots = vec![LibraryRoot {
+            path: temp_dir.to_string_lossy().into_owned(),
+            label: "Temp".into(),
+        }];
+
+        let discovered = super::discover_audio_files(&roots);
+
+        // Verify only the normal song.mp3 is discovered
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(
+            discovered[0].file_name().unwrap().to_string_lossy(),
+            "song.mp3"
+        );
+
+        // Cleanup
+        std::fs::remove_dir_all(&temp_dir).unwrap();
     }
 
     #[test]

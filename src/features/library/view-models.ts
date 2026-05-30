@@ -83,12 +83,18 @@ export function buildAlbumCards(tracks: ScannedTrack[]): AlbumCardModel[] {
 }
 
 export function buildTrackColumns(mappings: LibraryFieldMapping[]): TrackColumn[] {
-  const mappingColumns = mappings
-    .filter((mapping) => mapping.key && mapping.label)
-    .map((mapping) => ({
-      key: mapping.key,
-      label: mapping.label,
-    }));
+  const seenKeys = new Set<string>();
+  const mappingColumns: TrackColumn[] = [];
+
+  for (const mapping of mappings) {
+    if (mapping.key && mapping.label && !seenKeys.has(mapping.key)) {
+      seenKeys.add(mapping.key);
+      mappingColumns.push({
+        key: mapping.key,
+        label: mapping.label,
+      });
+    }
+  }
 
   return [
     ...mappingColumns,

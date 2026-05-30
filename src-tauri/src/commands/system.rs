@@ -26,8 +26,10 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 }
 "#;
 
+            use std::os::windows::process::CommandExt;
             let output = std::process::Command::new("powershell.exe")
                 .args(["-NoProfile", "-STA", "-Command", script])
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW
                 .output()
                 .map_err(|error| CommandError::Message(error.to_string()))?;
 

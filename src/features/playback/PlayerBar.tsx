@@ -10,24 +10,30 @@ type PlayerBarProps = {
   playback: PlaybackSnapshot;
   currentTrack: ScannedTrack | null;
   volume: number;
+  isFavorited: boolean;
   onPrevious: () => void;
   onPlay: () => void;
   onPause: () => void;
   onNext: () => void;
   onSeek: (positionMs: number) => void | Promise<void>;
   onVolumeChange: (volume: number) => void | Promise<void>;
+  onFavorite: () => void;
+  onUnfavorite: () => void;
 };
 
 export function PlayerBar({
   playback,
   currentTrack,
   volume,
+  isFavorited,
   onPrevious,
   onPlay,
   onPause,
   onNext,
   onSeek,
   onVolumeChange,
+  onFavorite,
+  onUnfavorite,
 }: PlayerBarProps) {
   const progressRef = useRef<HTMLDivElement>(null);
   const sleepMenuRef = useRef<HTMLDivElement>(null);
@@ -187,6 +193,29 @@ export function PlayerBar({
           <HoverScrollText className="player-bar__title" speed={42} text={title} />
           <HoverScrollText className="player-bar__subtitle" speed={34} text={subtitle} />
         </div>
+        {currentTrack && (
+          <div className="player-bar__rating">
+            <button
+              aria-label="Favorite track"
+              className={`ghost-button player-bar__rating-button player-bar__rating-button--up${
+                isFavorited ? ' player-bar__rating-button--active' : ''
+              }`}
+              onClick={onFavorite}
+              type="button"
+            >
+              <ThumbUpIcon active={isFavorited} />
+            </button>
+            <button
+              aria-label="Remove favorite"
+              className="ghost-button player-bar__rating-button player-bar__rating-button--down"
+              disabled={!isFavorited}
+              onClick={onUnfavorite}
+              type="button"
+            >
+              <ThumbDownIcon />
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="player-bar__transport">
@@ -584,6 +613,40 @@ function MoonIcon() {
       viewBox="0 0 24 24"
     >
       <path d="M12.1 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9Z" />
+    </svg>
+  );
+}
+
+function ThumbUpIcon({ active }: { active: boolean }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className="player-bar__rating-icon"
+      viewBox="0 0 24 24"
+      fill={active ? 'currentColor' : 'none'}
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" />
+    </svg>
+  );
+}
+
+function ThumbDownIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="player-bar__rating-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3" />
     </svg>
   );
 }

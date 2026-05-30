@@ -803,6 +803,40 @@ export function App() {
     });
   }
 
+  const favoritesPlaylist = bootstrap?.playlists.playlists.find((p) => p.id === 'favorites');
+  const isCurrentTrackFavorited = useMemo(() => {
+    if (!currentTrackDetails || !favoritesPlaylist) {
+      return false;
+    }
+    return favoritesPlaylist.trackIds.includes(currentTrackDetails.id);
+  }, [currentTrackDetails, favoritesPlaylist]);
+
+  async function handleFavoriteCurrentTrack() {
+    if (!currentTrackDetails || !favoritesPlaylist) {
+      return;
+    }
+    try {
+      const playlists = await addTracksToPlaylist(favoritesPlaylist.id, [currentTrackDetails.id]);
+      setBootstrap((current) => (current ? { ...current, playlists } : current));
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function handleUnfavoriteCurrentTrack() {
+    if (!currentTrackDetails || !favoritesPlaylist) {
+      return;
+    }
+    try {
+      const playlists = await removeTracksFromPlaylist(favoritesPlaylist.id, [currentTrackDetails.id]);
+      setBootstrap((current) => (current ? { ...current, playlists } : current));
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   async function handleShuffleQueue() {
     try {
       const playback = await shuffleQueue();
@@ -1337,6 +1371,9 @@ export function App() {
         onVolumeChange={handleVolumeChange}
         playback={bootstrap.playback}
         volume={bootstrap.settings.playback.volume}
+        isFavorited={isCurrentTrackFavorited}
+        onFavorite={handleFavoriteCurrentTrack}
+        onUnfavorite={handleUnfavoriteCurrentTrack}
       />
 
       {playlistPickerState ? (

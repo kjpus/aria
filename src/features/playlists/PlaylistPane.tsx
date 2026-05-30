@@ -648,12 +648,16 @@ export function PlaylistPane({
                 ref={menuRef}
                 style={{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }}
               >
-                <button onClick={openRenameDialog} type="button">
-                  Rename
-                </button>
-                <button onClick={() => void handleDeletePlaylist()} type="button">
-                  Delete
-                </button>
+                {contextMenu.playlistId !== 'favorites' && (
+                  <>
+                    <button onClick={openRenameDialog} type="button">
+                      Rename
+                    </button>
+                    <button onClick={() => void handleDeletePlaylist()} type="button">
+                      Delete
+                    </button>
+                  </>
+                )}
                 <button onClick={() => void runPlaylistAction(onRegeneratePlaylistIcon)} type="button">
                   Re-generate icon
                 </button>
