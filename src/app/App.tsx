@@ -18,6 +18,7 @@ import {
 import { PlayerBar } from '../features/playback/PlayerBar';
 import { PlaylistPickerDialog } from '../features/playlists/PlaylistPickerDialog';
 import { PlaylistPane } from '../features/playlists/PlaylistPane';
+import { PlaylistImportDialog } from '../features/playlists/PlaylistImportDialog';
 import { QueuePane } from '../features/queue/QueuePane';
 import { SettingsPane } from '../features/settings/SettingsPane';
 import { TrackPane } from '../features/tracks/TrackPane';
@@ -59,6 +60,7 @@ import {
   updateTheme,
   updatePlaybackPreferences,
   updateTrackTableSettings,
+  pickPlaylistFile,
 } from '../lib/aria';
 import type {
   AppBootstrap,
@@ -67,6 +69,7 @@ import type {
   LibraryFieldMapping,
   OutputDeviceSnapshot,
   PlaybackPreferences,
+  PlaylistSnapshot,
   ScannedTrack,
   ThemePreference,
   TrackTagEditUpdate,
@@ -133,6 +136,7 @@ export function App() {
     trackIds: string[];
     suggestedName: string;
   } | null>(null);
+  const [playlistImportPath, setPlaylistImportPath] = useState<string | null>(null);
 
   const [selectedMappingFormat, setSelectedMappingFormat] = useState<FieldMappingFormat>(
     DEFAULT_FIELD_MAPPING_FORMAT,
@@ -1198,6 +1202,28 @@ export function App() {
     }
   }
 
+  async function handleImportPlaylist() {
+    try {
+      const selectedPath = await pickPlaylistFile();
+      if (selectedPath) {
+        setPlaylistImportPath(selectedPath);
+      }
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  function handleImportSuccess(playlistsSnapshot: PlaylistSnapshot) {
+    setBootstrap((current) => (current ? { ...current, playlists: playlistsSnapshot } : current));
+    const imported = playlistsSnapshot.playlists[playlistsSnapshot.playlists.length - 1];
+    if (imported) {
+      setSelectedPlaylistId(imported.id);
+      setActivePane('playlist');
+    }
+    setError(null);
+  }
+
   async function handleRemoveTracksFromPlaylist(
     playlistId: string,
     trackIds: string[],
@@ -1327,6 +1353,7 @@ export function App() {
               selectedPlaylistId={selectedPlaylistId}
               settings={bootstrap.settings.playlistTrackTable}
               tracks={bootstrap.library.tracks}
+              onImportPlaylist={handleImportPlaylist}
             />
           ) : null}
 
@@ -1394,6 +1421,15 @@ export function App() {
           playlists={bootstrap.playlists.playlists}
           suggestedName={playlistPickerState.suggestedName}
           trackCount={playlistPickerState.trackIds.length}
+        />
+      ) : null}
+
+      {playlistImportPath ? (
+        <PlaylistImportDialog
+          filePath={playlistImportPath}
+          isOpen={true}
+          onClose={() => setPlaylistImportPath(null)}
+          onImportSuccess={handleImportSuccess}
         />
       ) : null}
     </main>

@@ -19,3 +19,21 @@ pub struct PlaylistSnapshot {
     #[serde(default)]
     pub playlists: Vec<Playlist>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewTrack {
+    pub title: String,
+    pub path: String,
+    pub track_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistImportPreview {
+    pub file_path: String,
+    pub name: String,
+    pub codepage: u32,
+    pub system_default_codepage: u32,
+    pub tracks: Vec<PreviewTrack>,
+}

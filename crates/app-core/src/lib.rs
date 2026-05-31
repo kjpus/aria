@@ -2,7 +2,7 @@ use aria_domain::{
     AppBootstrap, AppEvent, CatalogRule, FieldExportRequest, LibraryEvent, LibraryFieldMapping,
     LibrarySnapshot, OutputDeviceSnapshot, PlayTrackRequest, PlaybackEvent, PlaybackPreferences,
     PlaylistEvent, PlaylistSnapshot, PlaybackSessionSnapshot, PlaybackSnapshot, SettingsSnapshot,
-    ThemePreference, TrackTableSettings, TrackTagEditRequest,
+    ThemePreference, TrackTableSettings, TrackTagEditRequest, PlaylistImportPreview, PreviewTrack,
 };
 use aria_library::{LibraryError, LibraryService};
 use aria_playback::{PlaybackError, PlaybackService};
@@ -22,6 +22,8 @@ pub enum AppCoreError {
     Playback(#[from] PlaybackError),
     #[error(transparent)]
     Playlist(#[from] PlaylistError),
+    #[error("failed to import playlist: {0}")]
+    Import(String),
 }
 
 #[derive(Clone)]
@@ -196,6 +198,106 @@ impl AppCore {
             format!("{}.m3u", sanitize_playlist_filename(&playlist.name)),
             lines.join("\r\n"),
         ))
+    }
+
+    pub fn get_system_default_codepage(&self) -> u32 {
+        get_system_default_codepage()
+    }
+
+    pub async fn get_playlist_import_preview(
+        &self,
+        file_path: String,
+        codepage: Option<u32>,
+    ) -> Result<PlaylistImportPreview, AppCoreError> {
+        let path_obj = std::path::Path::new(&file_path);
+        let extension = path_obj
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .unwrap_or_default();
+
+        let bytes = std::fs::read(&file_path)
+            .map_err(|err| AppCoreError::Import(format!("failed to read playlist file: {err}")))?;
+
+        let system_cp = get_system_default_codepage();
+        let selected_cp = codepage.unwrap_or(system_cp);
+
+        let content = decode_with_codepage(&bytes, selected_cp)
+            .map_err(|err| AppCoreError::Import(format!("failed to decode playlist: {err}")))?;
+
+        let raw_tracks = parse_playlist_content(&content, &extension);
+        let parent_dir = path_obj.parent().unwrap_or_else(|| std::path::Path::new(""));
+
+        let library = self.library.snapshot().await;
+        let track_lookup: std::collections::HashMap<String, String> = library
+            .tracks
+            .iter()
+            .map(|track| {
+                let norm_path = normalize_for_comparison(std::path::Path::new(&track.path));
+                (norm_path, track.id.clone())
+            })
+            .collect();
+
+        let mut preview_tracks = Vec::new();
+        for (raw_path, raw_title) in raw_tracks {
+            let p = std::path::Path::new(&raw_path);
+            let resolved = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                parent_dir.join(p)
+            };
+            let norm = normalize_for_comparison(&resolved);
+            let track_id = track_lookup.get(&norm).cloned();
+
+            let title = raw_title.unwrap_or_else(|| {
+                p.file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or(&raw_path)
+                    .to_string()
+            });
+
+            preview_tracks.push(PreviewTrack {
+                title,
+                path: resolved.to_string_lossy().into_owned(),
+                track_id,
+            });
+        }
+
+        let name = path_obj
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Imported Playlist")
+            .to_string();
+
+        Ok(PlaylistImportPreview {
+            file_path,
+            name,
+            codepage: selected_cp,
+            system_default_codepage: system_cp,
+            tracks: preview_tracks,
+        })
+    }
+
+    pub async fn commit_playlist_import(
+        &self,
+        file_path: String,
+        name: String,
+        codepage: u32,
+    ) -> Result<PlaylistSnapshot, AppCoreError> {
+        let preview = self.get_playlist_import_preview(file_path, Some(codepage)).await?;
+        let matched_track_ids: Vec<String> = preview
+            .tracks
+            .into_iter()
+            .filter_map(|t| t.track_id)
+            .collect();
+
+        if matched_track_ids.is_empty() {
+            return Err(AppCoreError::Import(
+                "No matching tracks from the playlist were found in your library.".into(),
+            ));
+        }
+
+        self.create_playlist(name, matched_track_ids).await
     }
 
     pub async fn remove_tracks_from_playlist(
@@ -562,5 +664,223 @@ fn sanitize_playlist_filename(name: &str) -> String {
         "playlist".into()
     } else {
         cleaned
+    }
+}
+
+fn clean_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut result = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                result.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => {
+                result.push(other.as_os_str());
+            }
+        }
+    }
+    result
+}
+
+fn normalize_for_comparison(path: &std::path::Path) -> String {
+    let cleaned = clean_path(path);
+    cleaned.to_string_lossy().replace('\\', "/").to_lowercase()
+}
+
+#[cfg(target_os = "windows")]
+extern "system" {
+    fn GetACP() -> u32;
+    fn MultiByteToWideChar(
+        CodePage: u32,
+        dwFlags: u32,
+        lpMultiByteStr: *const u8,
+        cbMultiByte: i32,
+        lpWideCharStr: *mut u16,
+        cchWideChar: i32,
+    ) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+pub fn get_system_default_codepage() -> u32 {
+    unsafe { GetACP() }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn get_system_default_codepage() -> u32 {
+    65001 // UTF-8 fallback
+}
+
+#[cfg(target_os = "windows")]
+fn decode_with_codepage(bytes: &[u8], codepage: u32) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Ok(String::new());
+    }
+
+    let input_len = bytes.len() as i32;
+    unsafe {
+        let required_len = MultiByteToWideChar(
+            codepage,
+            0,
+            bytes.as_ptr(),
+            input_len,
+            std::ptr::null_mut(),
+            0,
+        );
+
+        if required_len <= 0 {
+            return Err("Failed to convert string (length calculation)".to_string());
+        }
+
+        let mut buf = vec![0u16; required_len as usize];
+        let result = MultiByteToWideChar(
+            codepage,
+            0,
+            bytes.as_ptr(),
+            input_len,
+            buf.as_mut_ptr(),
+            required_len,
+        );
+
+        if result <= 0 {
+            return Err("Failed to convert string".to_string());
+        }
+
+        Ok(String::from_utf16_lossy(&buf))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn decode_with_codepage(bytes: &[u8], _codepage: u32) -> Result<String, String> {
+    String::from_utf8(bytes.to_vec()).map_err(|err| err.to_string())
+}
+
+fn parse_playlist_content(content: &str, extension: &str) -> Vec<(String, Option<String>)> {
+    let mut raw_paths = Vec::new();
+    if extension == "pls" {
+        let mut files = std::collections::BTreeMap::new();
+        let mut titles = std::collections::BTreeMap::new();
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Some(eq_idx) = trimmed.find('=') {
+                let key = trimmed[..eq_idx].trim().to_ascii_lowercase();
+                let val = trimmed[eq_idx + 1..].trim().to_string();
+                if !val.is_empty() {
+                    if key.starts_with("file") {
+                        if let Ok(num) = key[4..].parse::<u32>() {
+                            files.insert(num, val);
+                        }
+                    } else if key.starts_with("title") {
+                        if let Ok(num) = key[5..].parse::<u32>() {
+                            titles.insert(num, val);
+                        }
+                    }
+                }
+            }
+        }
+        for (num, file_path) in files {
+            let title = titles.get(&num).cloned();
+            raw_paths.push((file_path, title));
+        }
+    } else {
+        // Default to M3U / M3U8 parsing
+        let mut last_extinf = None;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with("#EXTINF:") {
+                if let Some(comma_idx) = trimmed.find(',') {
+                    last_extinf = Some(trimmed[comma_idx + 1..].trim().to_string());
+                }
+            } else if trimmed.starts_with('#') {
+                continue;
+            } else {
+                raw_paths.push((trimmed.to_string(), last_extinf.take()));
+            }
+        }
+    }
+    raw_paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_m3u_playlist() {
+        let content = r#"
+#EXTM3U
+#EXTINF:123,Bach - Toccata and Fugue
+C:\Music\Bach\toccata.flac
+#EXTINF:456,Mozart - Symphony 40
+../Mozart/symphony40.mp3
+
+# Comment line
+Beethoven/symphony9.ogg
+"#;
+
+        let tracks = parse_playlist_content(content, "m3u");
+        assert_eq!(tracks, vec![
+            ("C:\\Music\\Bach\\toccata.flac".to_string(), Some("Bach - Toccata and Fugue".to_string())),
+            ("../Mozart/symphony40.mp3".to_string(), Some("Mozart - Symphony 40".to_string())),
+            ("Beethoven/symphony9.ogg".to_string(), None),
+        ]);
+    }
+
+    #[test]
+    fn test_parse_pls_playlist() {
+        let content = r#"
+[playlist]
+File1=C:\Music\Bach\toccata.flac
+Title1=Bach - Toccata and Fugue
+Length1=123
+file2=../Mozart/symphony40.mp3
+title2=Mozart - Symphony 40
+length2=456
+FILE3=Beethoven/symphony9.ogg
+NumberOfEntries=3
+Version=2
+"#;
+
+        let tracks = parse_playlist_content(content, "pls");
+        assert_eq!(tracks, vec![
+            ("C:\\Music\\Bach\\toccata.flac".to_string(), Some("Bach - Toccata and Fugue".to_string())),
+            ("../Mozart/symphony40.mp3".to_string(), Some("Mozart - Symphony 40".to_string())),
+            ("Beethoven/symphony9.ogg".to_string(), None),
+        ]);
+    }
+
+    #[test]
+    fn test_clean_and_normalize_path() {
+        let base_path = std::path::Path::new("C:\\Music\\Playlists");
+        let rel_path = std::path::Path::new("..\\Bach\\toccata.flac");
+        let resolved = base_path.join(rel_path);
+
+        assert_eq!(resolved.to_string_lossy(), "C:\\Music\\Playlists\\..\\Bach\\toccata.flac");
+
+        let normalized = normalize_for_comparison(&resolved);
+        assert_eq!(normalized, "c:/music/bach/toccata.flac");
+
+        let dot_path = std::path::Path::new("D:\\Music\\.\\song.mp3");
+        assert_eq!(normalize_for_comparison(dot_path), "d:/music/song.mp3");
+    }
+
+    #[test]
+    fn test_decode_windows1252() {
+        let cp1252_bytes = b"V\xedkingur \xd3lafsson";
+        #[cfg(target_os = "windows")]
+        {
+            let decoded = decode_with_codepage(cp1252_bytes, 1252).unwrap();
+            assert_eq!(decoded, "Víkingur Ólafsson");
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(decode_with_codepage(cp1252_bytes, 1252).is_err());
+        }
     }
 }

@@ -13,6 +13,8 @@ import type {
   PlaybackPreferences,
   PlayTrackRequest,
   PlaylistSnapshot,
+  PreviewTrack,
+  PlaylistImportPreview,
   PlaybackSnapshot,
   SettingsSnapshot,
   ThemePreference,
@@ -456,6 +458,67 @@ export async function exportPlaylistM3u(
     return playlist ? `${playlist.name}.m3u` : null;
   }
   return invoke<string | null>('export_playlist_m3u', { playlistId });
+}
+
+export async function pickPlaylistFile(): Promise<string | null> {
+  if (!isTauriRuntime) {
+    return 'G:\\test.m3u';
+  }
+  return invoke<string | null>('pick_playlist_file');
+}
+
+export async function getPlaylistImportPreview(
+  filePath: string,
+  codepage?: number,
+): Promise<PlaylistImportPreview> {
+  if (!isTauriRuntime) {
+    return {
+      filePath,
+      name: filePath.split(/[/\\]/).pop()?.replace(/\.[^/.]+$/, '') ?? 'Imported Playlist',
+      codepage: codepage ?? 1252,
+      systemDefaultCodepage: 1252,
+      tracks: [
+        {
+          title: 'Symphony No. 2 in G major "A London Symphony": I. Lento - Allegro risoluto',
+          path: 'C:\\Users\\hongswan\\Music\\Great 50\\Great 50\\Bernard Haitink - Vaughan Williams Symphony No. 2\\01 - Symphony No. 2.flac',
+          trackId: 'preview-1',
+        },
+        {
+          title: 'Víkingur Ólafsson - Non-existent track example',
+          path: 'C:\\Users\\hongswan\\Music\\Great 50\\Great 50\\Vikingur Olafsson\\02 - Nonexistent.flac',
+          trackId: null,
+        },
+      ],
+    };
+  }
+  return invoke<PlaylistImportPreview>('get_playlist_import_preview', { filePath, codepage });
+}
+
+export async function commitPlaylistImport(
+  filePath: string,
+  name: string,
+  codepage: number,
+): Promise<PlaylistSnapshot> {
+  if (!isTauriRuntime) {
+    const mockId = `preview-playlist-${Date.now()}`;
+    previewBootstrap = {
+      ...previewBootstrap,
+      playlists: {
+        playlists: [
+          ...previewBootstrap.playlists.playlists,
+          {
+            id: mockId,
+            name: name,
+            collageSeed: 0,
+            trackIds: ['preview-1'],
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      },
+    };
+    return previewBootstrap.playlists;
+  }
+  return invoke<PlaylistSnapshot>('commit_playlist_import', { filePath, name, codepage });
 }
 
 export async function removeTracksFromPlaylist(

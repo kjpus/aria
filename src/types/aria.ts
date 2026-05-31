@@ -47,6 +47,20 @@ export type PlaylistSnapshot = {
   playlists: Playlist[];
 };
 
+export type PreviewTrack = {
+  title: string;
+  path: string;
+  trackId: string | null;
+};
+
+export type PlaylistImportPreview = {
+  filePath: string;
+  name: string;
+  codepage: number;
+  systemDefaultCodepage: number;
+  tracks: PreviewTrack[];
+};
+
 export type ScanProgress = {
   phase: string;
   processedFiles: number;

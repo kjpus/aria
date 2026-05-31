@@ -53,6 +53,7 @@ type PlaylistPaneProps = {
   onPlayTracks: (tracks: ScannedTrack[]) => void | Promise<void>;
   onRemoveTracks: (playlistId: string, trackIds: string[]) => void | Promise<void>;
   onOpenAlbum: (albumId: string) => void;
+  onImportPlaylist: () => void | Promise<void>;
 };
 
 type PlaylistContextMenuState = {
@@ -92,6 +93,7 @@ export function PlaylistPane({
   onShufflePlayPlaylist,
   onPlayTracks,
   onRemoveTracks,
+  onImportPlaylist,
 }: PlaylistPaneProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const resizeStateRef = useRef<ResizeState | null>(null);
@@ -460,9 +462,28 @@ export function PlaylistPane({
           <div className="placeholder-pane">
             <strong>No playlists yet</strong>
             <p>Add albums or tracks to a playlist from Library, Album, or Tracks.</p>
+            <button
+              className="ghost-button"
+              onClick={() => void onImportPlaylist()}
+              type="button"
+              style={{ marginTop: '1.25rem' }}
+            >
+              Import Playlist
+            </button>
           </div>
         ) : (
           <>
+            <div className="library-toolbar" style={{ marginBottom: '1rem' }}>
+              <button
+                className="ghost-button"
+                onClick={() => void onImportPlaylist()}
+                type="button"
+              >
+                Import Playlist
+              </button>
+              <span className="pane-chip">{playlists.length} playlists</span>
+            </div>
+
             <div className="playlist-carousel">
               {playlists.map((playlist) => {
                 const playlistTracks = tracksForPlaylist(tracks, playlist);
