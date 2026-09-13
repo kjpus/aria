@@ -662,6 +662,21 @@ export async function pause(): Promise<PlaybackSnapshot> {
   return invoke<PlaybackSnapshot>('pause');
 }
 
+export async function stop(): Promise<PlaybackSnapshot> {
+  if (!isTauriRuntime) {
+    previewBootstrap = {
+      ...previewBootstrap,
+      playback: {
+        ...previewBootstrap.playback,
+        status: 'stopped',
+        positionMs: 0,
+      },
+    };
+    return previewBootstrap.playback;
+  }
+  return invoke<PlaybackSnapshot>('stop');
+}
+
 export async function previousTrack(): Promise<PlaybackSnapshot> {
   if (!isTauriRuntime) {
     const currentIndex = previewBootstrap.playback.currentQueueIndex ?? 0;

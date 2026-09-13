@@ -444,6 +444,14 @@ impl AppCore {
         snapshot
     }
 
+    pub async fn stop(&self) -> PlaybackSnapshot {
+        let snapshot = self.playback.stop().await;
+        self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
+            snapshot.clone(),
+        )));
+        snapshot
+    }
+
     pub async fn seek(&self, position_ms: u64) -> Result<PlaybackSnapshot, AppCoreError> {
         let snapshot = self.playback.seek(position_ms).await?;
         self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(

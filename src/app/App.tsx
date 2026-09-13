@@ -37,7 +37,6 @@ import {
   listenToAppEvents,
   nextTrack,
   openDirectory,
-  pause,
   pickDirectory,
   play,
   playTrack,
@@ -54,6 +53,7 @@ import {
   setFieldMappings,
   showInExplorer,
   startLibraryScan,
+  stop,
   shuffleQueue,
   updateAlbumTrackTableSettings,
   updatePlaylistTrackTableSettings,
@@ -410,9 +410,9 @@ export function App() {
     }
   }
 
-  async function handlePause() {
+  async function handleStop() {
     try {
-      const playback = await pause();
+      const playback = await stop();
       setBootstrap((current) =>
         current ? { ...current, playback } : current,
       );
@@ -1401,8 +1401,8 @@ export function App() {
       <PlayerBar
         currentTrack={currentTrackDetails}
         onNext={handleNextTrack}
-        onPause={handlePause}
         onPlay={handlePlay}
+        onStop={handleStop}
         onPrevious={handlePreviousTrack}
         onSeek={handleSeek}
         onVolumeChange={handleVolumeChange}

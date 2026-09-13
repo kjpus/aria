@@ -13,7 +13,7 @@ type PlayerBarProps = {
   isFavorited: boolean;
   onPrevious: () => void;
   onPlay: () => void;
-  onPause: () => void;
+  onStop: () => void;
   onNext: () => void;
   onSeek: (positionMs: number) => void | Promise<void>;
   onVolumeChange: (volume: number) => void | Promise<void>;
@@ -28,7 +28,7 @@ export function PlayerBar({
   isFavorited,
   onPrevious,
   onPlay,
-  onPause,
+  onStop,
   onNext,
   onSeek,
   onVolumeChange,
@@ -37,8 +37,8 @@ export function PlayerBar({
 }: PlayerBarProps) {
   const progressRef = useRef<HTMLDivElement>(null);
   const sleepMenuRef = useRef<HTMLDivElement>(null);
-  const onPauseRef = useRef(onPause);
-  onPauseRef.current = onPause;
+  const onStopRef = useRef(onStop);
+  onStopRef.current = onStop;
 
   const [scrubPositionMs, setScrubPositionMs] = useState<number | null>(null);
   const [isScrubbing, setIsScrubbing] = useState(false);
@@ -99,7 +99,7 @@ export function PlayerBar({
       if (remaining <= 0) {
         setSleepTimerEndsAt(null);
         setSleepRemainingMs(null);
-        onPauseRef.current();
+        onStopRef.current();
       } else {
         setSleepRemainingMs(remaining);
       }
@@ -231,12 +231,12 @@ export function PlayerBar({
           </button>
           {isPlaying ? (
             <button
-              aria-label="Pause"
+              aria-label="Stop"
               className="player-bar__control-button player-bar__control-button--primary"
-              onClick={onPause}
+              onClick={onStop}
               type="button"
             >
-              <PauseIcon />
+              <StopIcon />
             </button>
           ) : (
             <button
@@ -549,15 +549,14 @@ function PlayIcon() {
   );
 }
 
-function PauseIcon() {
+function StopIcon() {
   return (
     <svg
       aria-hidden="true"
-      className="player-bar__control-icon player-bar__control-icon--pause"
+      className="player-bar__control-icon player-bar__control-icon--stop"
       viewBox="0 0 24 24"
     >
-      <rect height="13.5" rx="1.35" width="4.2" x="5.6" y="5.25" />
-      <rect height="13.5" rx="1.35" width="4.2" x="14.2" y="5.25" />
+      <rect height="11" rx="1.2" width="11" x="6.5" y="6.5" />
     </svg>
   );
 }

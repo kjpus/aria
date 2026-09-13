@@ -4,7 +4,7 @@ import type { PlaybackSnapshot } from '../../types/aria';
 type NowPlayingPanelProps = {
   playback: PlaybackSnapshot;
   onPlay: () => void;
-  onPause: () => void;
+  onStop: () => void;
 };
 
 function formatDuration(durationMs: number) {
@@ -17,7 +17,7 @@ function formatDuration(durationMs: number) {
 export function NowPlayingPanel({
   playback,
   onPlay,
-  onPause,
+  onStop,
 }: NowPlayingPanelProps) {
   const track = playback.currentTrack;
 
@@ -27,12 +27,15 @@ export function NowPlayingPanel({
       title="Now playing"
       actions={
         <div className="inline-actions">
-          <button onClick={onPlay} type="button">
-            Play
-          </button>
-          <button className="ghost-button" onClick={onPause} type="button">
-            Pause
-          </button>
+          {playback.status === 'playing' ? (
+            <button onClick={onStop} type="button">
+              Stop
+            </button>
+          ) : (
+            <button onClick={onPlay} type="button">
+              Play
+            </button>
+          )}
         </div>
       }
     >

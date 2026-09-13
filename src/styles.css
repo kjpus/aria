@@ -2121,6 +2121,15 @@ button:disabled {
   background: rgba(255, 255, 255, 0.12);
 }
 
+.player-bar__control-button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.player-bar__control-button:disabled:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
 .player-bar__control-button--primary {
   width: 2.56rem;
   height: 2.56rem;
@@ -2146,6 +2155,10 @@ button:disabled {
 }
 
 .player-bar__control-icon--pause {
+  transform: translateX(0);
+}
+
+.player-bar__control-icon--stop {
   transform: translateX(0);
 }
 

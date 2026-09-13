@@ -62,6 +62,7 @@ struct PlaybackBackend {
     output_device: OutputDeviceSnapshot,
     active: Option<ActivePlayback>,
     last_request: Option<PlayTrackRequest>,
+    saved_position: Option<Duration>,
     queue: Vec<PlayTrackRequest>,
     ordered_queue: Vec<PlayTrackRequest>,
     current_queue_index: Option<usize>,
@@ -100,6 +101,7 @@ impl ActivePlayback {
         }
     }
 
+    #[allow(dead_code)]
     fn pause(&self) {
         match self {
             Self::Shared { player, .. } => player.pause(),
@@ -152,6 +154,7 @@ impl Default for PlaybackBackend {
             output_device,
             active: None,
             last_request: None,
+            saved_position: None,
             queue: Vec::new(),
             ordered_queue: Vec::new(),
             current_queue_index: None,
@@ -215,6 +218,7 @@ impl PlaybackService {
                     .and_then(|index| normalized_session.queue.get(index))
                     .cloned()
                     .or_else(|| normalized_session.queue.first().cloned()),
+                saved_position: None,
                 queue: normalized_session.queue,
                 ordered_queue: normalized_session.ordered_queue,
                 current_queue_index: normalized_session.current_queue_index,
@@ -332,7 +336,8 @@ impl PlaybackService {
                 .cloned()
                 .or_else(|| backend.last_request.clone())
             {
-                start_request(&mut backend, request, Duration::ZERO, false)?;
+                let start_position = backend.saved_position.take().unwrap_or(Duration::ZERO);
+                start_request(&mut backend, request, start_position, false)?;
             }
         }
 
@@ -347,6 +352,7 @@ impl PlaybackService {
     ) -> Result<PlaybackSnapshot, PlaybackError> {
         {
             let mut backend = self.backend.lock().expect("playback backend poisoned");
+            backend.saved_position = None;
             backend.queue = vec![request.clone()];
             backend.ordered_queue = backend.queue.clone();
             backend.current_queue_index = Some(0);
@@ -385,6 +391,7 @@ impl PlaybackService {
         {
             let mut backend = self.backend.lock().expect("playback backend poisoned");
             backend.active = None;
+            backend.saved_position = None;
             backend.queue = requests;
             backend.ordered_queue = backend.queue.clone();
             backend.current_queue_index = (!backend.queue.is_empty()).then_some(0);
@@ -476,29 +483,47 @@ impl PlaybackService {
     }
 
     pub async fn pause(&self) -> PlaybackSnapshot {
+        self.stop().await
+    }
+
+    pub async fn stop(&self) -> PlaybackSnapshot {
         {
-            let backend = self.backend.lock().expect("playback backend poisoned");
+            let mut backend = self.backend.lock().expect("playback backend poisoned");
             if let Some(active) = backend.active.as_ref() {
-                active.pause();
+                backend.saved_position = Some(active.get_pos());
             }
+            backend.active = None;
         }
 
         let mut state = self.state.write().await;
         self.refresh_state(&mut state);
+        state.status = PlaybackStatus::Stopped;
         state.clone()
     }
 
     pub async fn seek(&self, position_ms: u64) -> Result<PlaybackSnapshot, PlaybackError> {
         {
             let mut backend = self.backend.lock().expect("playback backend poisoned");
-            if let Some((request, paused)) = seek_target(&backend) {
+            let seek_active = backend.active.as_ref().map(|active| {
+                let request = active.request().clone();
                 let clamped_position = position_ms.min(request.queue_item.duration_ms);
+                let paused = active.is_paused();
+                (request, clamped_position, paused)
+            });
+
+            if let Some((request, clamped_position, paused)) = seek_active {
                 start_request(
                     &mut backend,
                     request,
                     Duration::from_millis(clamped_position),
                     paused,
                 )?;
+            } else if let Some(request) = current_queue_request(&backend)
+                .cloned()
+                .or_else(|| backend.last_request.clone())
+            {
+                let clamped_position = position_ms.min(request.queue_item.duration_ms);
+                backend.saved_position = Some(Duration::from_millis(clamped_position));
             }
         }
 
@@ -511,6 +536,7 @@ impl PlaybackService {
         {
             let mut backend = self.backend.lock().expect("playback backend poisoned");
             backend.active = None;
+            backend.saved_position = None;
             backend.shared_output = None;
         }
 
@@ -569,6 +595,7 @@ impl PlaybackService {
                 }
 
                 backend.active = None;
+                backend.saved_position = None;
                 sync_snapshot_queue_state(state, &backend);
                 state.status = PlaybackStatus::Stopped;
                 state.position_ms = request.queue_item.duration_ms;
@@ -576,28 +603,36 @@ impl PlaybackService {
             return;
         }
 
-        if let Some(request) = current_queue_request(&backend) {
+        let current_request = current_queue_request(&backend).cloned();
+        if let Some(request) = current_request {
             state.status = PlaybackStatus::Stopped;
-            if state
+            let different_track = state
                 .current_track
                 .as_ref()
-                .is_none_or(|item| item.id != request.queue_item.id)
-            {
+                .is_none_or(|item| item.id != request.queue_item.id);
+            if different_track {
+                backend.saved_position = None;
                 state.current_track = Some(request.queue_item.clone());
                 state.position_ms = 0;
+            } else if let Some(saved) = backend.saved_position {
+                state.position_ms = (saved.as_millis() as u64).min(request.queue_item.duration_ms);
             }
             return;
         }
 
-        if let Some(request) = backend.last_request.as_ref() {
+        let last_request = backend.last_request.clone();
+        if let Some(request) = last_request {
             state.status = PlaybackStatus::Stopped;
-            if state
+            let different_track = state
                 .current_track
                 .as_ref()
-                .is_none_or(|item| item.id != request.queue_item.id)
-            {
+                .is_none_or(|item| item.id != request.queue_item.id);
+            if different_track {
+                backend.saved_position = None;
                 state.current_track = Some(request.queue_item.clone());
                 state.position_ms = 0;
+            } else if let Some(saved) = backend.saved_position {
+                state.position_ms = (saved.as_millis() as u64).min(request.queue_item.duration_ms);
             }
             return;
         }
@@ -615,6 +650,7 @@ fn start_request(
     start_paused: bool,
 ) -> Result<(), PlaybackError> {
     backend.active = None;
+    backend.saved_position = None;
 
     if backend.preferences.exclusive_mode {
         #[cfg(target_os = "windows")]
@@ -708,18 +744,6 @@ fn jump_to_queue_index(
 
     backend.current_queue_index = Some(index);
     start_request(backend, request, Duration::ZERO, start_paused)
-}
-
-fn seek_target(backend: &PlaybackBackend) -> Option<(PlayTrackRequest, bool)> {
-    if let Some(active) = backend.active.as_ref() {
-        return Some((active.request().clone(), active.is_paused()));
-    }
-
-    if let Some(request) = current_queue_request(backend) {
-        return Some((request.clone(), true));
-    }
-
-    backend.last_request.clone().map(|request| (request, true))
 }
 
 fn current_queue_request(backend: &PlaybackBackend) -> Option<&PlayTrackRequest> {
@@ -1032,4 +1056,45 @@ fn normalize_volume(volume: f32) -> f32 {
 
 fn device_exists(devices: &[OutputDeviceSnapshot], device_id: &str) -> bool {
     devices.iter().any(|device| device.id == device_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aria_domain::QueueItem;
+
+    #[tokio::test]
+    async fn test_stop_resets_playback_to_stopped_and_preserves_position() {
+        let queue_item = QueueItem {
+            id: "track-1".into(),
+            title: "Test Track".into(),
+            subtitle: "Test Artist".into(),
+            duration_ms: 180_000,
+        };
+        let request = PlayTrackRequest {
+            path: "nonexistent.flac".into(),
+            queue_item: queue_item.clone(),
+        };
+
+        let session = PlaybackSessionSnapshot {
+            queue: vec![request.clone()],
+            ordered_queue: vec![request.clone()],
+            current_queue_index: Some(0),
+        };
+
+        let service = PlaybackService::with_session(PlaybackPreferences::default(), session);
+        let snapshot = service.snapshot().await;
+        assert_eq!(snapshot.status, PlaybackStatus::Stopped);
+        assert_eq!(snapshot.current_track, Some(queue_item));
+
+        // Simulate seek / saved position when stopped
+        service.seek(45_000).await.expect("seek should succeed");
+        let after_seek = service.snapshot().await;
+        assert_eq!(after_seek.status, PlaybackStatus::Stopped);
+        assert_eq!(after_seek.position_ms, 45_000);
+
+        let stopped_snapshot = service.stop().await;
+        assert_eq!(stopped_snapshot.status, PlaybackStatus::Stopped);
+        assert_eq!(stopped_snapshot.position_ms, 45_000);
+    }
 }

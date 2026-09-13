@@ -54,6 +54,7 @@ pub fn run() {
             commands::playback::shuffle_queue,
             commands::playback::restore_queue_order,
             commands::playback::pause,
+            commands::playback::stop,
             commands::playback::seek,
             commands::playlists::create_playlist,
             commands::playlists::add_tracks_to_playlist,

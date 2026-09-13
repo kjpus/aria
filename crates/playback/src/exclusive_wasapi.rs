@@ -56,6 +56,7 @@ struct ExclusiveState {
 
 enum ExclusiveCommand {
     Play,
+    #[allow(dead_code)]
     Pause,
     Terminate,
 }
@@ -177,6 +178,7 @@ impl ExclusivePlayer {
         let _ = self.commands.send(ExclusiveCommand::Play);
     }
 
+    #[allow(dead_code)]
     pub fn pause(&self) {
         let _ = self.commands.send(ExclusiveCommand::Pause);
     }
@@ -417,7 +419,7 @@ fn run_exclusive_thread(
     init_tx: Sender<Result<(), PlaybackError>>,
 ) {
     let com_initialized = unsafe { Com::CoInitializeEx(None, Com::COINIT_MULTITHREADED).is_ok() };
-    let _mmcss = register_current_thread_for_audio();
+    let mmcss = register_current_thread_for_audio();
 
     let init = initialize_exclusive_output(&endpoint_id, &path, start_position);
     let mut init = match init {
@@ -427,6 +429,7 @@ fn run_exclusive_thread(
         }
         Err(error) => {
             let _ = init_tx.send(Err(error));
+            drop(mmcss);
             if com_initialized {
                 unsafe {
                     Com::CoUninitialize();
@@ -453,7 +456,7 @@ fn run_exclusive_thread(
             Err(error) => {
                 eprintln!("exclusive playback prefill failed: {error}");
                 state.finished.store(true, Ordering::Relaxed);
-                cleanup_and_uninitialize(com_initialized, init.audio_client, init.render_event);
+                cleanup_exclusive_output(init, mmcss, com_initialized);
                 return;
             }
         }
@@ -463,7 +466,7 @@ fn run_exclusive_thread(
         if let Err(error) = unsafe { init.audio_client.Start() } {
             eprintln!("exclusive playback start failed: {error}");
             state.finished.store(true, Ordering::Relaxed);
-            cleanup_and_uninitialize(com_initialized, init.audio_client, init.render_event);
+            cleanup_exclusive_output(init, mmcss, com_initialized);
             return;
         }
     }
@@ -476,11 +479,7 @@ fn run_exclusive_thread(
                         if let Err(error) = unsafe { init.audio_client.Start() } {
                             eprintln!("exclusive playback resume failed: {error}");
                             state.finished.store(true, Ordering::Relaxed);
-                            cleanup_and_uninitialize(
-                                com_initialized,
-                                init.audio_client,
-                                init.render_event,
-                            );
+                            cleanup_exclusive_output(init, mmcss, com_initialized);
                             return;
                         }
                         playing = true;
@@ -498,7 +497,7 @@ fn run_exclusive_thread(
                 }
                 ExclusiveCommand::Terminate => {
                     state.finished.store(true, Ordering::Relaxed);
-                    cleanup_and_uninitialize(com_initialized, init.audio_client, init.render_event);
+                    cleanup_exclusive_output(init, mmcss, com_initialized);
                     return;
                 }
             }
@@ -508,14 +507,14 @@ fn run_exclusive_thread(
             match current_padding(&init.audio_client) {
                 Ok(0) => {
                     state.finished.store(true, Ordering::Relaxed);
-                    cleanup_and_uninitialize(com_initialized, init.audio_client, init.render_event);
+                    cleanup_exclusive_output(init, mmcss, com_initialized);
                     return;
                 }
                 Ok(_) => {}
                 Err(error) => {
                     eprintln!("exclusive playback padding check failed: {error}");
                     state.finished.store(true, Ordering::Relaxed);
-                    cleanup_and_uninitialize(com_initialized, init.audio_client, init.render_event);
+                    cleanup_exclusive_output(init, mmcss, com_initialized);
                     return;
                 }
             }
@@ -538,11 +537,7 @@ fn run_exclusive_thread(
                     Err(error) => {
                         eprintln!("exclusive playback render failed: {error}");
                         state.finished.store(true, Ordering::Relaxed);
-                        cleanup_and_uninitialize(
-                            com_initialized,
-                            init.audio_client,
-                            init.render_event,
-                        );
+                        cleanup_exclusive_output(init, mmcss, com_initialized);
                         return;
                     }
                 }
@@ -552,7 +547,7 @@ fn run_exclusive_thread(
                 let error = unsafe { Foundation::GetLastError() };
                 eprintln!("exclusive playback wait failed: {error:?}");
                 state.finished.store(true, Ordering::Relaxed);
-                cleanup_and_uninitialize(com_initialized, init.audio_client, init.render_event);
+                cleanup_exclusive_output(init, mmcss, com_initialized);
                 return;
             }
             _ => {}
@@ -901,13 +896,19 @@ fn current_padding(audio_client: &Audio::IAudioClient) -> Result<u32, PlaybackEr
     }
 }
 
-fn cleanup_and_uninitialize(
+fn cleanup_exclusive_output(
+    init: ExclusiveInit,
+    mmcss: Option<MmcssRegistration>,
     com_initialized: bool,
-    audio_client: Audio::IAudioClient,
-    render_event: Foundation::HANDLE,
 ) {
-    let _ = unsafe { audio_client.Stop() };
+    let _ = unsafe { init.audio_client.Stop() };
+    let _ = unsafe { init.audio_client.Reset() };
+    let render_event = init.render_event;
+    drop(init.render_client);
+    drop(init.audio_client);
     let _ = unsafe { Foundation::CloseHandle(render_event) };
+    drop(init.decoder);
+    drop(mmcss);
 
     if com_initialized {
         unsafe {

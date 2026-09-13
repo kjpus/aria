@@ -61,6 +61,11 @@ pub async fn pause(state: State<'_, AppState>) -> Result<PlaybackSnapshot, Comma
 }
 
 #[tauri::command]
+pub async fn stop(state: State<'_, AppState>) -> Result<PlaybackSnapshot, CommandError> {
+    Ok(state.core.stop().await)
+}
+
+#[tauri::command]
 pub async fn seek(
     state: State<'_, AppState>,
     position_ms: u64,
