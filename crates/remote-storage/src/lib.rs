@@ -1,10 +1,15 @@
 pub mod backends;
+pub mod cache;
 pub mod error;
 pub mod factory;
 pub mod pipeline;
+pub mod prefetcher;
 pub mod quota;
 pub mod traits;
 pub mod types;
+
+pub use cache::{RemoteCacheManager, RemoteCacheStatus};
+pub use prefetcher::{PlaybackPrefetcher, PrefetchCandidate, PrefetchCommand, PathUpdater};
 
 pub use factory::{create_backend_for_target, FilesystemConfig, GoogleDriveStoredConfig};
 pub use pipeline::{upload_album, UploadOptions};

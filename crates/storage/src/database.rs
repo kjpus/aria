@@ -574,6 +574,33 @@ impl AppDatabase {
         rows.collect::<Result<Vec<_>, _>>().map_err(StorageError::from)
     }
 
+    pub fn find_remote_synced_item(&self, item_id: &str) -> Result<Option<RemoteSyncedItem>, StorageError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "select item_id, remote_target_id, item_type, remote_path, remote_file_id, size_bytes, checksum, sync_status, last_synced_at
+             from remote_synced_items
+             where item_id = ?1
+             limit 1",
+        )?;
+        let mut rows = statement.query(params![item_id])?;
+        if let Some(row) = rows.next()? {
+            let size_bytes: i64 = row.get(5)?;
+            Ok(Some(RemoteSyncedItem {
+                item_id: row.get(0)?,
+                remote_target_id: row.get(1)?,
+                item_type: row.get(2)?,
+                remote_path: row.get(3)?,
+                remote_file_id: row.get(4)?,
+                size_bytes: size_bytes as u64,
+                checksum: row.get(6)?,
+                sync_status: row.get(7)?,
+                last_synced_at: row.get(8)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn delete_remote_synced_item(&self, item_id: &str, target_id: &str) -> Result<(), StorageError> {
         let connection = self.connect()?;
         connection.execute(

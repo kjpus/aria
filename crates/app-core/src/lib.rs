@@ -1,9 +1,9 @@
 use aria_domain::{
     AppBootstrap, AppEvent, CatalogRule, FieldExportRequest, LibraryEvent, LibraryFieldMapping,
     LibrarySnapshot, OutputDeviceSnapshot, PlayTrackRequest, PlaybackEvent, PlaybackPreferences,
-    PlaylistEvent, PlaylistSnapshot, PlaybackSessionSnapshot, PlaybackSnapshot, SettingsSnapshot,
-    ThemePreference, TrackTableSettings, TrackTagEditRequest, PlaylistImportPreview, PreviewTrack,
-    RemoteBackendType, RemoteEvent, RemoteSyncedItem, RemoteTarget, ScannedTrack,
+    PlaybackSessionSnapshot, PlaybackSnapshot, PlaybackStatus, PlaylistEvent, PlaylistImportPreview,
+    PlaylistSnapshot, PreviewTrack, RemoteBackendType, RemoteEvent, RemoteSyncedItem, RemoteTarget,
+    ScannedTrack, SettingsSnapshot, ThemePreference, TrackTableSettings, TrackTagEditRequest,
     UploadCompletedEvent,
 };
 use aria_library::{LibraryError, LibraryService};
@@ -11,7 +11,8 @@ use aria_playback::{PlaybackError, PlaybackService};
 use aria_playlists::{PlaylistError, PlaylistService};
 use aria_remote_storage::{
     create_backend_for_target, upload_album, GoogleAuthConfig, GoogleDriveStoredConfig,
-    PendingAuthFlow, RemoteStorageError, StorageStatus, UploadOptions,
+    PathUpdater, PendingAuthFlow, PlaybackPrefetcher, PrefetchCandidate, RemoteCacheManager,
+    RemoteCacheStatus, RemoteStorageError, StorageStatus, UploadOptions,
 };
 use aria_storage::{AppDatabase, SettingsStore, StorageError};
 use std::collections::BTreeMap;
@@ -46,6 +47,8 @@ pub struct AppCore {
     settings: SettingsStore,
     database: AppDatabase,
     pending_gdrive_auth: Arc<Mutex<Option<PendingAuthFlow>>>,
+    cache_manager: Arc<RemoteCacheManager>,
+    prefetcher: Arc<PlaybackPrefetcher>,
 }
 
 impl AppCore {
@@ -53,17 +56,37 @@ impl AppCore {
         let database = AppDatabase::new_default()?;
         let persisted = database.load_state()?;
         let (events, _) = broadcast::channel(64);
+        let playback = PlaybackService::with_session(
+            persisted.settings.playback.clone(),
+            persisted.playback,
+        );
+
+        let cache_dir = RemoteCacheManager::default_cache_dir().unwrap_or_else(|_| {
+            std::env::temp_dir().join("aria_remote_cache")
+        });
+        let cache_manager = Arc::new(RemoteCacheManager::new(cache_dir, 3));
+
+        let playback_for_updater = playback.clone();
+        let path_updater: PathUpdater = Arc::new(move |track_id, path| {
+            playback_for_updater.update_queue_track_path(track_id, path.to_string());
+        });
+
+        let prefetcher = Arc::new(PlaybackPrefetcher::spawn(
+            cache_manager.clone(),
+            Some(events.clone()),
+            Some(path_updater),
+        ));
+
         let core = Self {
             events,
             library: LibraryService::with_snapshot(persisted.library),
-            playback: PlaybackService::with_session(
-                persisted.settings.playback.clone(),
-                persisted.playback,
-            ),
+            playback,
             playlists: PlaylistService::with_snapshot(persisted.playlists),
             settings: SettingsStore::with_snapshot(persisted.settings),
             database: database.clone(),
             pending_gdrive_auth: Arc::new(Mutex::new(None)),
+            cache_manager,
+            prefetcher,
         };
 
         core.spawn_persistence_worker(database);
@@ -382,21 +405,40 @@ impl AppCore {
     }
 
     pub async fn play(&self) -> Result<PlaybackSnapshot, AppCoreError> {
+        let session = self.playback.persisted_session();
+        if let Some(idx) = session.current_queue_index {
+            if let Some(mut req) = session.queue.get(idx).cloned() {
+                let window: Vec<String> = session
+                    .queue
+                    .iter()
+                    .skip(idx)
+                    .take(3)
+                    .map(|r| r.queue_item.id.clone())
+                    .collect();
+                let _ = self.resolve_remote_track_if_needed(&mut req, &window).await;
+            }
+        }
         let snapshot = self.playback.play().await?;
         self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
             snapshot.clone(),
         )));
+        self.trigger_sliding_window_prefetch().await;
         Ok(snapshot)
     }
 
     pub async fn play_track(
         &self,
-        request: PlayTrackRequest,
+        mut request: PlayTrackRequest,
     ) -> Result<PlaybackSnapshot, AppCoreError> {
+        let active_window = vec![request.queue_item.id.clone()];
+        let _ = self
+            .resolve_remote_track_if_needed(&mut request, &active_window)
+            .await;
         let snapshot = self.playback.play_track(request).await?;
         self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
             snapshot.clone(),
         )));
+        self.trigger_sliding_window_prefetch().await;
         Ok(snapshot)
     }
 
@@ -405,35 +447,223 @@ impl AppCore {
         self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
             snapshot.clone(),
         )));
+        self.trigger_sliding_window_prefetch().await;
         snapshot
     }
 
     pub async fn replace_queue(
         &self,
-        requests: Vec<PlayTrackRequest>,
+        mut requests: Vec<PlayTrackRequest>,
         start_playing: bool,
     ) -> Result<PlaybackSnapshot, AppCoreError> {
+        if start_playing && !requests.is_empty() {
+            let active_window: Vec<String> = requests
+                .iter()
+                .take(3)
+                .map(|r| r.queue_item.id.clone())
+                .collect();
+            let _ = self
+                .resolve_remote_track_if_needed(&mut requests[0], &active_window)
+                .await;
+        }
         let snapshot = self.playback.replace_queue(requests, start_playing).await?;
         self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
             snapshot.clone(),
         )));
+        if start_playing {
+            self.trigger_sliding_window_prefetch().await;
+        }
         Ok(snapshot)
     }
 
     pub async fn previous_track(&self) -> Result<PlaybackSnapshot, AppCoreError> {
+        let session = self.playback.persisted_session();
+        if let Some(idx) = session.current_queue_index {
+            if idx > 0 {
+                if let Some(mut prev_req) = session.queue.get(idx - 1).cloned() {
+                    let window: Vec<String> = session
+                        .queue
+                        .iter()
+                        .skip(idx - 1)
+                        .take(3)
+                        .map(|r| r.queue_item.id.clone())
+                        .collect();
+                    let _ = self
+                        .resolve_remote_track_if_needed(&mut prev_req, &window)
+                        .await;
+                }
+            }
+        }
         let snapshot = self.playback.previous_track().await?;
         self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
             snapshot.clone(),
         )));
+        self.trigger_sliding_window_prefetch().await;
         Ok(snapshot)
     }
 
     pub async fn next_track(&self) -> Result<PlaybackSnapshot, AppCoreError> {
+        let session = self.playback.persisted_session();
+        if let Some(idx) = session.current_queue_index {
+            if let Some(mut next_req) = session.queue.get(idx + 1).cloned() {
+                let window: Vec<String> = session
+                    .queue
+                    .iter()
+                    .skip(idx + 1)
+                    .take(3)
+                    .map(|r| r.queue_item.id.clone())
+                    .collect();
+                let _ = self
+                    .resolve_remote_track_if_needed(&mut next_req, &window)
+                    .await;
+            }
+        }
         let snapshot = self.playback.next_track().await?;
         self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
             snapshot.clone(),
         )));
+        self.trigger_sliding_window_prefetch().await;
         Ok(snapshot)
+    }
+
+    async fn resolve_remote_track_if_needed(
+        &self,
+        request: &mut PlayTrackRequest,
+        active_window_ids: &[String],
+    ) -> Result<bool, AppCoreError> {
+        let track_id = &request.queue_item.id;
+
+        // 1. If already cached locally, update path to local cached path
+        if let Some(cached_path) = self.cache_manager.get_cached_path(track_id).await {
+            request.path = cached_path.to_string_lossy().to_string();
+            return Ok(true);
+        }
+
+        // 2. Identify if this is a remote track
+        let (target_id, rel_path, checksum) = if request.path.starts_with("remote://") {
+            let stripped = &request.path["remote://".len()..];
+            if let Some((t_id, r_path)) = stripped.split_once('/') {
+                let chk = self
+                    .database
+                    .find_remote_synced_item(track_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.checksum);
+                (t_id.to_string(), r_path.to_string(), chk)
+            } else {
+                return Ok(false);
+            }
+        } else if !std::path::Path::new(&request.path).exists() {
+            if let Ok(Some(synced)) = self.database.find_remote_synced_item(track_id) {
+                (synced.remote_target_id, synced.remote_path, synced.checksum)
+            } else {
+                return Ok(false);
+            }
+        } else {
+            return Ok(false);
+        };
+
+        // 3. Emit Buffering snapshot so UI indicates loading
+        let mut buffering_snapshot = self.playback.snapshot().await;
+        buffering_snapshot.status = PlaybackStatus::Buffering;
+        buffering_snapshot.current_track = Some(request.queue_item.clone());
+        self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
+            buffering_snapshot,
+        )));
+
+        // 4. Download and cache track atomically
+        let targets = self.database.load_remote_targets()?;
+        let target = targets
+            .into_iter()
+            .find(|t| t.id == target_id)
+            .ok_or_else(|| AppCoreError::Remote(format!("Target '{target_id}' not found")))?;
+        let backend = create_backend_for_target(&target)?;
+
+        let local_path = self
+            .cache_manager
+            .get_or_download_track(
+                backend.as_ref(),
+                &rel_path,
+                track_id,
+                checksum.as_deref(),
+                active_window_ids,
+            )
+            .await?;
+
+        let local_path_str = local_path.to_string_lossy().to_string();
+        request.path = local_path_str.clone();
+        self.playback
+            .update_queue_track_path(track_id, local_path_str);
+
+        Ok(true)
+    }
+
+    async fn trigger_sliding_window_prefetch(&self) {
+        let session = self.playback.persisted_session();
+        let Some(current_idx) = session.current_queue_index else {
+            return;
+        };
+
+        let mut active_window_ids = Vec::new();
+        for i in 0..3 {
+            if let Some(item) = session.queue.get(current_idx + i) {
+                active_window_ids.push(item.queue_item.id.clone());
+            }
+        }
+
+        let targets = match self.database.load_remote_targets() {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+
+        let mut candidates = Vec::new();
+        for i in 1..=2 {
+            if let Some(req) = session.queue.get(current_idx + i) {
+                let track_id = &req.queue_item.id;
+                if self.cache_manager.is_track_cached(track_id).await {
+                    continue;
+                }
+
+                let (target_id, rel_path, checksum) = if req.path.starts_with("remote://") {
+                    let stripped = &req.path["remote://".len()..];
+                    if let Some((t_id, r_path)) = stripped.split_once('/') {
+                        let chk = self
+                            .database
+                            .find_remote_synced_item(track_id)
+                            .ok()
+                            .flatten()
+                            .and_then(|s| s.checksum);
+                        (t_id.to_string(), r_path.to_string(), chk)
+                    } else {
+                        continue;
+                    }
+                } else if !std::path::Path::new(&req.path).exists() {
+                    if let Ok(Some(synced)) = self.database.find_remote_synced_item(track_id) {
+                        (synced.remote_target_id, synced.remote_path, synced.checksum)
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                };
+
+                if let Some(target) = targets.iter().find(|t| t.id == target_id) {
+                    candidates.push(PrefetchCandidate {
+                        track_id: track_id.clone(),
+                        title: req.queue_item.title.clone(),
+                        remote_path: rel_path,
+                        expected_checksum: checksum,
+                        target: target.clone(),
+                    });
+                }
+            }
+        }
+
+        if !candidates.is_empty() {
+            self.prefetcher
+                .notify_prefetch(candidates, active_window_ids)
+                .await;
+        }
     }
 
     pub async fn shuffle_queue(&self) -> PlaybackSnapshot {
@@ -583,6 +813,7 @@ impl AppCore {
     fn spawn_playback_publisher(&self) {
         let playback = self.playback.clone();
         let events = self.events.clone();
+        let core = self.clone();
 
         std::thread::Builder::new()
             .name("aria-playback-publisher".into())
@@ -600,9 +831,13 @@ impl AppCore {
 
                         let snapshot = playback.snapshot().await;
                         if snapshot != last_snapshot {
+                            let track_changed = snapshot.current_track != last_snapshot.current_track;
                             last_snapshot = snapshot.clone();
                             let _ = events
                                 .send(AppEvent::Playback(PlaybackEvent::SnapshotChanged(snapshot)));
+                            if track_changed {
+                                core.trigger_sliding_window_prefetch().await;
+                            }
                         }
                     }
                 });
@@ -874,6 +1109,15 @@ impl AppCore {
 
     pub fn get_remote_synced_items(&self, target_id: &str) -> Result<Vec<RemoteSyncedItem>, AppCoreError> {
         Ok(self.database.load_remote_synced_items_for_target(target_id)?)
+    }
+
+    pub async fn get_remote_cache_status(&self) -> RemoteCacheStatus {
+        self.cache_manager.get_status().await
+    }
+
+    pub async fn clear_remote_cache(&self) -> Result<(), AppCoreError> {
+        self.cache_manager.clear().await?;
+        Ok(())
     }
 }
 

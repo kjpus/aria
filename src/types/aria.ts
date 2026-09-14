@@ -221,6 +221,22 @@ export type UploadCompletedEvent = {
   errorMessage: string | null;
 };
 
+export type RemoteCacheStatus = {
+  cacheDir: string;
+  totalCachedTracks: number;
+  totalCachedBytes: number;
+  windowSize: number;
+};
+
+export type CachePrefetchEvent = {
+  trackId: string;
+  title: string;
+  bytesDownloaded: number;
+  totalBytes: number;
+  isCompleted: boolean;
+  errorMessage: string | null;
+};
+
 export type RemoteEvent =
   | {
       kind: 'targets_changed';
@@ -233,6 +249,10 @@ export type RemoteEvent =
   | {
       kind: 'upload_completed';
       payload: UploadCompletedEvent;
+    }
+  | {
+      kind: 'cache_prefetch_progress';
+      payload: CachePrefetchEvent;
     };
 
 export type AppBootstrap = {

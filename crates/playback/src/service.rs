@@ -482,6 +482,20 @@ impl PlaybackService {
         state.clone()
     }
 
+    pub fn update_queue_track_path(&self, track_id: &str, new_path: String) {
+        let mut backend = self.backend.lock().expect("playback backend poisoned");
+        for req in backend.queue.iter_mut() {
+            if req.queue_item.id == track_id {
+                req.path = new_path.clone();
+            }
+        }
+        for req in backend.ordered_queue.iter_mut() {
+            if req.queue_item.id == track_id {
+                req.path = new_path.clone();
+            }
+        }
+    }
+
     pub async fn pause(&self) -> PlaybackSnapshot {
         self.stop().await
     }

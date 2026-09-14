@@ -16,6 +16,7 @@ import type {
   PreviewTrack,
   PlaylistImportPreview,
   PlaybackSnapshot,
+  RemoteCacheStatus,
   RemoteSyncedItem,
   RemoteTarget,
   SettingsSnapshot,
@@ -1117,6 +1118,25 @@ export async function getRemoteSyncedItems(
     return [];
   }
   return invoke<RemoteSyncedItem[]>('get_remote_synced_items', { targetId });
+}
+
+export async function getRemoteCacheStatus(): Promise<RemoteCacheStatus> {
+  if (!isTauriRuntime) {
+    return {
+      cacheDir: 'C:\\Users\\preview\\AppData\\Local\\Aria\\remote_cache',
+      totalCachedTracks: 0,
+      totalCachedBytes: 0,
+      windowSize: 3,
+    };
+  }
+  return invoke<RemoteCacheStatus>('get_remote_cache_status');
+}
+
+export async function clearRemoteCache(): Promise<void> {
+  if (!isTauriRuntime) {
+    return;
+  }
+  return invoke<void>('clear_remote_cache');
 }
 
 function stringifyDebugError(error: unknown): string {

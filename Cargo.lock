@@ -164,6 +164,7 @@ dependencies = [
  "aria-library",
  "async-trait",
  "chrono",
+ "dirs",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

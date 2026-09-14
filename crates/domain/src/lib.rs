@@ -6,8 +6,8 @@ pub mod remote;
 pub mod settings;
 
 pub use events::{
-    AppEvent, LibraryEvent, PlaybackEvent, PlaylistEvent, RemoteEvent, UploadCompletedEvent,
-    UploadProgressEvent,
+    AppEvent, CachePrefetchEvent, LibraryEvent, PlaybackEvent, PlaylistEvent, RemoteEvent,
+    UploadCompletedEvent, UploadProgressEvent,
 };
 pub use remote::{
     AlbumManifest, ManifestTrack, MasterAlbumSummary, MasterLibraryIndex, RemoteBackendType,

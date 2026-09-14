@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { SectionCard } from '../../components/SectionCard';
-import type { RemoteBackendType, RemoteTarget, StorageStatus } from '../../types/aria';
+import type { RemoteBackendType, RemoteCacheStatus, RemoteTarget, StorageStatus } from '../../types/aria';
 import {
+  clearRemoteCache,
   deleteRemoteTarget,
+  getRemoteCacheStatus,
   saveRemoteTarget,
   startGdriveAuthFlow,
   completeGdriveAuthFlow,
@@ -22,6 +24,29 @@ export function RemoteSettingsPanel({
   const [testingTargetId, setTestingTargetId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, StorageStatus>>({});
   const [actionError, setActionError] = useState<string | null>(null);
+  const [cacheStatus, setCacheStatus] = useState<RemoteCacheStatus | null>(null);
+  const [isClearing, setIsClearing] = useState(false);
+
+  useEffect(() => {
+    getRemoteCacheStatus().then(setCacheStatus).catch(console.error);
+  }, []);
+
+  async function handleClearCache() {
+    if (!confirm('Are you sure you want to clear all cached audio files from disk?')) {
+      return;
+    }
+    setIsClearing(true);
+    setActionError(null);
+    try {
+      await clearRemoteCache();
+      const updated = await getRemoteCacheStatus();
+      setCacheStatus(updated);
+    } catch (err) {
+      setActionError(`Failed to clear cache: ${String(err)}`);
+    } finally {
+      setIsClearing(false);
+    }
+  }
 
   async function handleTest(targetId: string) {
     setTestingTargetId(targetId);
@@ -62,140 +87,204 @@ export function RemoteSettingsPanel({
   }
 
   return (
-    <SectionCard
-      eyebrow="Cloud & Remote"
-      title="Remote storage targets"
-      actions={
-        <button
-          className="ghost-button"
-          onClick={() => setIsAddDialogOpen(true)}
-          type="button"
-        >
-          Add remote
-        </button>
-      }
-    >
-      <p className="panel-copy">
-        Configure remote storage targets (Google Drive, SMB network share, WebDAV, or local/mounted filesystem)
-        to upload albums with pre-extracted classical manifests and library master indexes.
-      </p>
+    <div style={{ display: 'grid', gap: '1.25rem' }}>
+      <SectionCard
+        eyebrow="Cloud & Remote"
+        title="Remote storage targets"
+        actions={
+          <button
+            className="ghost-button"
+            onClick={() => setIsAddDialogOpen(true)}
+            type="button"
+          >
+            Add remote
+          </button>
+        }
+      >
+        <p className="panel-copy">
+          Configure remote storage targets (Google Drive, SMB network share, WebDAV, or local/mounted filesystem)
+          to upload albums with pre-extracted classical manifests and library master indexes.
+        </p>
 
-      {actionError ? (
-        <div className="error-banner" style={{ marginBottom: '1rem' }}>
-          {actionError}
-        </div>
-      ) : null}
-
-      <div className="metrics-grid">
-        <div>
-          <span>Configured Remotes</span>
-          <strong>{targets.length}</strong>
-        </div>
-        <div>
-          <span>Enabled Remotes</span>
-          <strong>{targets.filter((t) => t.isEnabled).length}</strong>
-        </div>
-      </div>
-
-      <div style={{ display: 'grid', gap: '0.8rem', marginTop: '1rem' }}>
-        {targets.length === 0 ? (
-          <div className="device-chip">
-            <span>No remote targets configured. Click "Add remote" above to configure one.</span>
+        {actionError ? (
+          <div className="error-banner" style={{ marginBottom: '1rem' }}>
+            {actionError}
           </div>
-        ) : (
-          targets.map((target) => {
-            const status = testResults[target.id];
-            const isTesting = testingTargetId === target.id;
+        ) : null}
 
-            return (
-              <div
-                key={target.id}
-                style={{
-                  padding: '0.8rem 1rem',
-                  borderRadius: '14px',
-                  border: '1px solid var(--line)',
-                  background: 'var(--ghost-surface)',
-                  display: 'grid',
-                  gap: '0.5rem',
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                    <input
-                      type="checkbox"
-                      checked={target.isEnabled}
-                      onChange={() => void handleToggle(target)}
-                      title="Enable / Disable target"
-                    />
-                    <strong>{target.name}</strong>
-                    <span className="pane-chip" style={{ fontSize: '0.75rem', padding: '0.2rem 0.5rem' }}>
-                      {formatBackendLabel(target.backendType)}
-                    </span>
-                  </div>
+        <div className="metrics-grid">
+          <div>
+            <span>Configured Remotes</span>
+            <strong>{targets.length}</strong>
+          </div>
+          <div>
+            <span>Enabled Remotes</span>
+            <strong>{targets.filter((t) => t.isEnabled).length}</strong>
+          </div>
+        </div>
 
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <button
-                      className="ghost-button"
-                      disabled={isTesting}
-                      onClick={() => void handleTest(target.id)}
-                      type="button"
-                      style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem' }}
-                    >
-                      {isTesting ? 'Testing...' : 'Test'}
-                    </button>
-                    <button
-                      className="ghost-button ghost-button--danger"
-                      onClick={() => void handleDelete(target.id)}
-                      type="button"
-                      style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem' }}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
+        <div style={{ display: 'grid', gap: '0.8rem', marginTop: '1rem' }}>
+          {targets.length === 0 ? (
+            <p className="panel-copy" style={{ fontStyle: 'italic' }}>
+              No remote storage targets configured yet. Click &ldquo;Add remote&rdquo; to connect Google Drive, SMB share, WebDAV, or filesystem path.
+            </p>
+          ) : (
+            targets.map((target) => {
+              const status = testResults[target.id];
+              const isTesting = testingTargetId === target.id;
 
-                {target.storageLimitBytes ? (
-                  <div style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>
-                    Quota Limit: {formatBytes(target.storageLimitBytes)}
-                  </div>
-                ) : null}
-
-                {status ? (
+              return (
+                <div
+                  key={target.id}
+                  style={{
+                    padding: '0.8rem 1rem',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border-subtle)',
+                    background: 'var(--surface-sunken)',
+                  }}
+                >
                   <div
                     style={{
-                      fontSize: '0.85rem',
-                      padding: '0.4rem 0.6rem',
-                      borderRadius: '8px',
-                      background: status.isConnected ? 'rgba(76, 175, 80, 0.1)' : 'rgba(244, 67, 54, 0.1)',
-                      color: status.isConnected ? '#81c784' : '#e57373',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      marginBottom: '0.4rem',
                     }}
                   >
-                    {status.isConnected ? '✓ Connected' : '✗ Connection Failed'}: {status.message}
-                    {status.storageUsage ? (
-                      <div style={{ marginTop: '0.2rem', color: 'var(--muted)' }}>
-                        Used: {formatBytes(status.storageUsage.usedBytes)}
-                        {status.storageUsage.totalBytes ? ` / ${formatBytes(status.storageUsage.totalBytes)}` : ''}
-                        {status.storageUsage.freeBytes ? ` (${formatBytes(status.storageUsage.freeBytes)} free)` : ''}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-            );
-          })
-        )}
-      </div>
+                    <div>
+                      <strong style={{ fontSize: '0.95rem' }}>{target.name}</strong>
+                      <span
+                        style={{
+                          marginLeft: '0.6rem',
+                          fontSize: '0.75rem',
+                          padding: '2px 8px',
+                          borderRadius: '12px',
+                          background: 'var(--surface-elevated)',
+                          color: 'var(--muted)',
+                        }}
+                      >
+                        {formatBackendLabel(target.backendType)}
+                      </span>
+                    </div>
 
-      {isAddDialogOpen ? (
-        <AddRemoteDialog
-          onClose={() => setIsAddDialogOpen(false)}
-          onAdded={(newTargets) => {
-            onTargetsChange(newTargets);
-            setIsAddDialogOpen(false);
-          }}
-        />
-      ) : null}
-    </SectionCard>
+                    <div style={{ display: 'flex', gap: '0.4rem' }}>
+                      <button
+                        className="ghost-button"
+                        disabled={isTesting}
+                        onClick={() => handleTest(target.id)}
+                        style={{ fontSize: '0.8rem', padding: '2px 8px' }}
+                        type="button"
+                      >
+                        {isTesting ? 'Testing...' : 'Test'}
+                      </button>
+                      <button
+                        className="ghost-button"
+                        onClick={() => handleToggle(target)}
+                        style={{ fontSize: '0.8rem', padding: '2px 8px' }}
+                        type="button"
+                      >
+                        {target.isEnabled ? 'Disable' : 'Enable'}
+                      </button>
+                      <button
+                        className="ghost-button"
+                        onClick={() => handleDelete(target.id)}
+                        style={{ fontSize: '0.8rem', padding: '2px 8px', color: '#e57373' }}
+                        type="button"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+
+                  <div style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>
+                    Quota: {target.storageLimitBytes ? formatBytes(target.storageLimitBytes) : 'Unlimited'}
+                    {' • '}
+                    Status: {target.isEnabled ? 'Active' : 'Disabled'}
+                  </div>
+
+                  {status ? (
+                    <div
+                      style={{
+                        marginTop: '0.5rem',
+                        fontSize: '0.8rem',
+                        padding: '0.4rem 0.6rem',
+                        borderRadius: '4px',
+                        background: status.isConnected ? 'rgba(76, 175, 80, 0.1)' : 'rgba(244, 67, 54, 0.1)',
+                        color: status.isConnected ? '#81c784' : '#e57373',
+                      }}
+                    >
+                      {status.isConnected ? '✓ Connected' : '✗ Connection Failed'}: {status.message}
+                      {status.storageUsage ? (
+                        <div style={{ marginTop: '0.2rem', color: 'var(--muted)' }}>
+                          Used: {formatBytes(status.storageUsage.usedBytes)}
+                          {status.storageUsage.totalBytes ? ` / ${formatBytes(status.storageUsage.totalBytes)}` : ''}
+                          {status.storageUsage.freeBytes ? ` (${formatBytes(status.storageUsage.freeBytes)} free)` : ''}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        {isAddDialogOpen ? (
+          <AddRemoteDialog
+            onClose={() => setIsAddDialogOpen(false)}
+            onAdded={(newTargets) => {
+              onTargetsChange(newTargets);
+              setIsAddDialogOpen(false);
+            }}
+          />
+        ) : null}
+      </SectionCard>
+
+      <SectionCard
+        eyebrow="Streaming & Cache"
+        title="Client-side audio cache"
+        actions={
+          <button
+            className="ghost-button"
+            disabled={isClearing || !cacheStatus || cacheStatus.totalCachedTracks === 0}
+            onClick={handleClearCache}
+            type="button"
+          >
+            {isClearing ? 'Clearing...' : 'Clear cache'}
+          </button>
+        }
+      >
+        <p className="panel-copy">
+          Aria downloads remote tracks atomically to local disk before playback to ensure bit-perfect,
+          uninterrupted playback. A 3-track sliding window prefetches upcoming tracks in the background
+          and automatically evicts older played tracks in LRU order.
+        </p>
+
+        <div className="metrics-grid">
+          <div>
+            <span>Cached Tracks</span>
+            <strong>{cacheStatus ? cacheStatus.totalCachedTracks : '—'}</strong>
+          </div>
+          <div>
+            <span>Disk Space Used</span>
+            <strong>{cacheStatus ? formatBytes(cacheStatus.totalCachedBytes) : '—'}</strong>
+          </div>
+          <div>
+            <span>Sliding Window</span>
+            <strong>{cacheStatus ? `${cacheStatus.windowSize} tracks` : '3 tracks'}</strong>
+          </div>
+        </div>
+
+        {cacheStatus?.cacheDir ? (
+          <div style={{ marginTop: '0.8rem', fontSize: '0.75rem', color: 'var(--muted)' }}>
+            <span>Cache directory: </span>
+            <code style={{ background: 'var(--surface-sunken)', padding: '2px 6px', borderRadius: '4px' }}>
+              {cacheStatus.cacheDir}
+            </code>
+          </div>
+        ) : null}
+      </SectionCard>
+    </div>
   );
 }
 

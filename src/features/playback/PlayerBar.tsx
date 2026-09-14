@@ -190,7 +190,26 @@ export function PlayerBar({
           </div>
         )}
         <div className="player-bar__meta">
-          <HoverScrollText className="player-bar__title" speed={42} text={title} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+            <HoverScrollText className="player-bar__title" speed={42} text={title} />
+            {playback.status === 'buffering' ? (
+              <span
+                style={{
+                  fontSize: '0.68rem',
+                  padding: '1px 6px',
+                  borderRadius: '4px',
+                  background: 'rgba(230, 160, 40, 0.2)',
+                  color: '#e6a028',
+                  fontWeight: 600,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.04em',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                Buffering
+              </span>
+            ) : null}
+          </div>
           <HoverScrollText className="player-bar__subtitle" speed={34} text={subtitle} />
         </div>
         {currentTrack && (
@@ -229,7 +248,28 @@ export function PlayerBar({
           >
             <PreviousIcon />
           </button>
-          {isPlaying ? (
+          {playback.status === 'buffering' ? (
+            <button
+              aria-label="Buffering"
+              className="player-bar__control-button player-bar__control-button--primary"
+              disabled
+              style={{ opacity: 0.8 }}
+              title="Buffering remote track..."
+              type="button"
+            >
+              <span
+                style={{
+                  display: 'inline-block',
+                  width: '14px',
+                  height: '14px',
+                  border: '2px solid currentColor',
+                  borderRightColor: 'transparent',
+                  borderRadius: '50%',
+                  animation: 'spin 0.8s linear infinite',
+                }}
+              />
+            </button>
+          ) : isPlaying ? (
             <button
               aria-label="Stop"
               className="player-bar__control-button player-bar__control-button--primary"

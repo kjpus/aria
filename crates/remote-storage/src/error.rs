@@ -25,4 +25,11 @@ pub enum RemoteStorageError {
 
     #[error("Remote provider error: {0}")]
     ProviderError(String),
+
+    #[error("Checksum mismatch for {file}: expected {expected}, calculated {calculated}")]
+    ChecksumMismatch {
+        file: String,
+        expected: String,
+        calculated: String,
+    },
 }

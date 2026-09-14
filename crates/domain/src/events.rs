@@ -31,6 +31,18 @@ pub enum RemoteEvent {
     TargetsChanged(Vec<crate::RemoteTarget>),
     UploadProgress(UploadProgressEvent),
     UploadCompleted(UploadCompletedEvent),
+    CachePrefetchProgress(CachePrefetchEvent),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CachePrefetchEvent {
+    pub track_id: String,
+    pub title: String,
+    pub bytes_downloaded: u64,
+    pub total_bytes: u64,
+    pub is_completed: bool,
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

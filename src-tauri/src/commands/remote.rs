@@ -78,3 +78,17 @@ pub async fn get_remote_synced_items(
 ) -> Result<Vec<RemoteSyncedItem>, CommandError> {
     Ok(state.core.get_remote_synced_items(&target_id)?)
 }
+
+#[tauri::command]
+pub async fn get_remote_cache_status(
+    state: State<'_, AppState>,
+) -> Result<aria_remote_storage::RemoteCacheStatus, CommandError> {
+    Ok(state.core.get_remote_cache_status().await)
+}
+
+#[tauri::command]
+pub async fn clear_remote_cache(
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    Ok(state.core.clear_remote_cache().await?)
+}
