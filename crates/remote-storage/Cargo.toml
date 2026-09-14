@@ -8,9 +8,12 @@ license.workspace = true
 aria-domain = { path = "../domain" }
 aria-library = { path = "../library" }
 async-trait.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tracing.workspace = true
+url.workspace = true
 walkdir.workspace = true

@@ -10,6 +10,8 @@ pub const CURRENT_MANIFEST_VERSION: u32 = 1;
 pub enum RemoteBackendType {
     GoogleDrive,
     Filesystem,
+    WebDav,
+    Smb,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -20,6 +22,8 @@ pub struct RemoteTarget {
     pub backend_type: RemoteBackendType,
     pub storage_limit_bytes: Option<u64>,
     pub is_enabled: bool,
+    #[serde(default)]
+    pub config_json: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -30,6 +34,20 @@ pub struct RemoteSourceLocation {
     pub remote_path_or_id: String,
     pub priority: u32,
     pub file_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSyncedItem {
+    pub item_id: String,
+    pub remote_target_id: String,
+    pub item_type: String,
+    pub remote_path: String,
+    pub remote_file_id: Option<String>,
+    pub size_bytes: u64,
+    pub checksum: Option<String>,
+    pub sync_status: String,
+    pub last_synced_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

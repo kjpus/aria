@@ -3,7 +3,8 @@ use std::{collections::HashMap, fs, path::PathBuf};
 use aria_domain::{
     canonical_field_mapping_format, default_catalog_rules, default_field_mappings, CatalogRule,
     LibraryFieldMapping, LibraryRoot, LibrarySnapshot, PlaybackSessionSnapshot,
-    PlaylistSnapshot, ScannedTrack, SettingsSnapshot, TagInventoryEntry,
+    PlaylistSnapshot, RemoteBackendType, RemoteSyncedItem, RemoteTarget, ScannedTrack,
+    SettingsSnapshot, TagInventoryEntry,
 };
 use rusqlite::{params, Connection};
 use serde::de::DeserializeOwned;
@@ -231,6 +232,7 @@ impl AppDatabase {
     fn migrate(&self) -> Result<(), StorageError> {
         let connection = self.connect()?;
         connection.execute_batch(include_str!("../migrations/0001_initial.sql"))?;
+        connection.execute_batch(include_str!("../migrations/0002_remote_storage.sql"))?;
         self.ensure_field_mapping_format_column(&connection)?;
         Ok(())
     }
@@ -448,6 +450,147 @@ impl AppDatabase {
 
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::from)
+    }
+
+    pub fn save_remote_target(&self, target: &RemoteTarget) -> Result<(), StorageError> {
+        let connection = self.connect()?;
+        let backend_type_str = match target.backend_type {
+            RemoteBackendType::GoogleDrive => "google_drive",
+            RemoteBackendType::Filesystem => "filesystem",
+            RemoteBackendType::WebDav => "webdav",
+            RemoteBackendType::Smb => "smb",
+        };
+        connection.execute(
+            "insert into remote_targets (id, name, backend_type, storage_limit_bytes, is_enabled, config_json)
+             values (?1, ?2, ?3, ?4, ?5, ?6)
+             on conflict(id) do update set
+                name = excluded.name,
+                backend_type = excluded.backend_type,
+                storage_limit_bytes = excluded.storage_limit_bytes,
+                is_enabled = excluded.is_enabled,
+                config_json = excluded.config_json",
+            params![
+                target.id,
+                target.name,
+                backend_type_str,
+                target.storage_limit_bytes.map(|v| v as i64),
+                if target.is_enabled { 1 } else { 0 },
+                target.config_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_remote_targets(&self) -> Result<Vec<RemoteTarget>, StorageError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "select id, name, backend_type, storage_limit_bytes, is_enabled, config_json
+             from remote_targets
+             order by name asc",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let backend_type_str: String = row.get(2)?;
+            let backend_type = match backend_type_str.as_str() {
+                "google_drive" => RemoteBackendType::GoogleDrive,
+                "webdav" => RemoteBackendType::WebDav,
+                "smb" => RemoteBackendType::Smb,
+                _ => RemoteBackendType::Filesystem,
+            };
+            let storage_limit: Option<i64> = row.get(3)?;
+            let is_enabled: i64 = row.get(4)?;
+            let config_json: String = row.get(5)?;
+
+            Ok(RemoteTarget {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                backend_type,
+                storage_limit_bytes: storage_limit.map(|v| v as u64),
+                is_enabled: is_enabled != 0,
+                config_json,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(StorageError::from)
+    }
+
+    pub fn delete_remote_target(&self, id: &str) -> Result<(), StorageError> {
+        let connection = self.connect()?;
+        connection.execute("delete from remote_targets where id = ?1", params![id])?;
+        connection.execute("delete from remote_synced_items where remote_target_id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn save_remote_synced_item(&self, item: &RemoteSyncedItem) -> Result<(), StorageError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "insert into remote_synced_items (item_id, remote_target_id, item_type, remote_path, remote_file_id, size_bytes, checksum, sync_status, last_synced_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             on conflict(item_id, remote_target_id) do update set
+                item_type = excluded.item_type,
+                remote_path = excluded.remote_path,
+                remote_file_id = excluded.remote_file_id,
+                size_bytes = excluded.size_bytes,
+                checksum = excluded.checksum,
+                sync_status = excluded.sync_status,
+                last_synced_at = excluded.last_synced_at",
+            params![
+                item.item_id,
+                item.remote_target_id,
+                item.item_type,
+                item.remote_path,
+                item.remote_file_id,
+                item.size_bytes as i64,
+                item.checksum,
+                item.sync_status,
+                item.last_synced_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_remote_synced_items_for_target(&self, target_id: &str) -> Result<Vec<RemoteSyncedItem>, StorageError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "select item_id, remote_target_id, item_type, remote_path, remote_file_id, size_bytes, checksum, sync_status, last_synced_at
+             from remote_synced_items
+             where remote_target_id = ?1
+             order by last_synced_at desc",
+        )?;
+        let rows = statement.query_map(params![target_id], |row| {
+            let size_bytes: i64 = row.get(5)?;
+            Ok(RemoteSyncedItem {
+                item_id: row.get(0)?,
+                remote_target_id: row.get(1)?,
+                item_type: row.get(2)?,
+                remote_path: row.get(3)?,
+                remote_file_id: row.get(4)?,
+                size_bytes: size_bytes as u64,
+                checksum: row.get(6)?,
+                sync_status: row.get(7)?,
+                last_synced_at: row.get(8)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(StorageError::from)
+    }
+
+    pub fn delete_remote_synced_item(&self, item_id: &str, target_id: &str) -> Result<(), StorageError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "delete from remote_synced_items where item_id = ?1 and remote_target_id = ?2",
+            params![item_id, target_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_total_synced_bytes_for_target(&self, target_id: &str) -> Result<u64, StorageError> {
+        let connection = self.connect()?;
+        let total: Option<i64> = connection.query_row(
+            "select sum(size_bytes) from remote_synced_items where remote_target_id = ?1",
+            params![target_id],
+            |row| row.get(0),
+        )?;
+        Ok(total.unwrap_or(0) as u64)
     }
 }
 
@@ -964,5 +1107,62 @@ mod tests {
                 "COMPOSERSORT".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn persists_remote_targets_and_synced_items() {
+        let test_root = std::env::temp_dir().join(format!(
+            "aria-storage-remote-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+
+        let database = AppDatabase::at(test_root.join("aria.sqlite3")).expect("db create");
+
+        let target = aria_domain::RemoteTarget {
+            id: "target_gdrive_1".to_string(),
+            name: "My Google Drive".to_string(),
+            backend_type: aria_domain::RemoteBackendType::GoogleDrive,
+            storage_limit_bytes: Some(15_000_000_000),
+            is_enabled: true,
+            config_json: "{\"rootFolderId\":\"xyz123\"}".to_string(),
+        };
+
+        database.save_remote_target(&target).expect("save target");
+        let targets = database.load_remote_targets().expect("load targets");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, "target_gdrive_1");
+        assert_eq!(targets[0].backend_type, aria_domain::RemoteBackendType::GoogleDrive);
+        assert_eq!(targets[0].storage_limit_bytes, Some(15_000_000_000));
+
+        let synced_item = aria_domain::RemoteSyncedItem {
+            item_id: "alb_123".to_string(),
+            remote_target_id: "target_gdrive_1".to_string(),
+            item_type: "album".to_string(),
+            remote_path: "Beethoven/Sym9".to_string(),
+            remote_file_id: Some("folder_abc".to_string()),
+            size_bytes: 500_000_000,
+            checksum: None,
+            sync_status: "synced".to_string(),
+            last_synced_at: "2026-09-13T20:00:00Z".to_string(),
+        };
+
+        database.save_remote_synced_item(&synced_item).expect("save synced item");
+        let items = database.load_remote_synced_items_for_target("target_gdrive_1").expect("load items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].item_id, "alb_123");
+
+        let total_bytes = database.get_total_synced_bytes_for_target("target_gdrive_1").expect("total bytes");
+        assert_eq!(total_bytes, 500_000_000);
+
+        database.delete_remote_target("target_gdrive_1").expect("delete target");
+        let targets_after = database.load_remote_targets().expect("load targets after delete");
+        assert!(targets_after.is_empty());
+        let items_after = database.load_remote_synced_items_for_target("target_gdrive_1").expect("load items after delete");
+        assert!(items_after.is_empty());
+
+        let _ = fs::remove_dir_all(&test_root);
     }
 }
