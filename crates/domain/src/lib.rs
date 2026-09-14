@@ -2,9 +2,14 @@ pub mod events;
 pub mod library;
 pub mod playback;
 pub mod playlist;
+pub mod remote;
 pub mod settings;
 
 pub use events::{AppEvent, LibraryEvent, PlaybackEvent, PlaylistEvent};
+pub use remote::{
+    AlbumManifest, ManifestTrack, MasterAlbumSummary, MasterLibraryIndex, RemoteBackendType,
+    RemoteSourceLocation, RemoteTarget, CURRENT_MANIFEST_VERSION,
+};
 pub use library::{
     canonical_field_mapping_format, default_catalog_rules, default_field_mappings,
     AudioPropertiesSnapshot, CatalogRule, FieldExportRequest, LibraryFieldMapping, LibraryRoot,

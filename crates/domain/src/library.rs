@@ -97,7 +97,7 @@ pub struct TagInventoryEntry {
     pub example_values: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioPropertiesSnapshot {
     pub format: String,
@@ -107,7 +107,7 @@ pub struct AudioPropertiesSnapshot {
     pub channels: Option<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ScannedTrack {
     pub id: String,
