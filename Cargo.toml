@@ -8,6 +8,7 @@ members = [
   "crates/platform-audio",
   "crates/playback",
   "crates/playlists",
+  "crates/remote-storage",
   "crates/search",
   "crates/storage",
 ]
@@ -19,6 +20,7 @@ license = "Apache-2.0"
 version = "0.1.0"
 
 [workspace.dependencies]
+async-trait = "0.1"
 chrono = { version = "0.4", features = ["clock"] }
 dirs = "6"
 lofty = "0.23"
