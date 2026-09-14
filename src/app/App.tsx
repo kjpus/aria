@@ -20,6 +20,7 @@ import { PlaylistPickerDialog } from '../features/playlists/PlaylistPickerDialog
 import { PlaylistPane } from '../features/playlists/PlaylistPane';
 import { PlaylistImportDialog } from '../features/playlists/PlaylistImportDialog';
 import { QueuePane } from '../features/queue/QueuePane';
+import { RemoteUploadDialog } from '../features/remote/RemoteUploadDialog';
 import { SettingsPane } from '../features/settings/SettingsPane';
 import { TrackPane } from '../features/tracks/TrackPane';
 import {
@@ -74,6 +75,7 @@ import type {
   ThemePreference,
   TrackTagEditUpdate,
   TrackTableSettings,
+  UploadProgressEvent,
 } from '../types/aria';
 
 type PaneKey = 'library' | 'album' | 'tracks' | 'playlist' | 'queue' | 'settings';
@@ -105,6 +107,11 @@ function applyEvent(current: AppBootstrap | null, event: AppEvent): AppBootstrap
       return current;
     case 'playlists':
       return { ...current, playlists: event.payload.payload };
+    case 'remote':
+      if (event.payload.kind === 'targets_changed') {
+        return { ...current, remoteTargets: event.payload.payload };
+      }
+      return current;
     case 'settings':
       return { ...current, settings: event.payload };
     default:
@@ -137,6 +144,9 @@ export function App() {
     suggestedName: string;
   } | null>(null);
   const [playlistImportPath, setPlaylistImportPath] = useState<string | null>(null);
+  const [uploadAlbumTitle, setUploadAlbumTitle] = useState<string | null>(null);
+  const [activeUploadProgress, setActiveUploadProgress] = useState<UploadProgressEvent | null>(null);
+  const [uploadStatusMessage, setUploadStatusMessage] = useState<string | null>(null);
 
   const [selectedMappingFormat, setSelectedMappingFormat] = useState<FieldMappingFormat>(
     DEFAULT_FIELD_MAPPING_FORMAT,
@@ -190,6 +200,21 @@ export function App() {
       ) {
         setOutputDevices(event.payload.payload);
         return;
+      }
+
+      if (event.topic === 'remote') {
+        if (event.payload.kind === 'upload_progress') {
+          setActiveUploadProgress(event.payload.payload);
+        } else if (event.payload.kind === 'upload_completed') {
+          setActiveUploadProgress(null);
+          const completed = event.payload.payload;
+          if (completed.success) {
+            setUploadStatusMessage(`Uploaded "${completed.albumTitle}" successfully!`);
+            setTimeout(() => setUploadStatusMessage(null), 5000);
+          } else {
+            setError(`Upload error: ${completed.errorMessage ?? 'Unknown failure'}`);
+          }
+        }
       }
 
       setBootstrap((current) => applyEvent(current, event));
@@ -1269,6 +1294,42 @@ export function App() {
             ))}
           </nav>
           <div className="workspace__status">
+            {activeUploadProgress ? (
+              <div
+                className="device-chip"
+                style={{
+                  background: 'rgba(214, 177, 106, 0.15)',
+                  border: '1px solid var(--accent)',
+                  color: 'var(--accent)',
+                  padding: '0.4rem 0.8rem',
+                  fontSize: '0.85rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                }}
+              >
+                <span>
+                  Uploading: <strong>{activeUploadProgress.albumTitle}</strong> (
+                  {activeUploadProgress.completedFiles}/{activeUploadProgress.totalFiles} files)
+                </span>
+                <span style={{ fontSize: '0.75rem', opacity: 0.85 }}>
+                  {activeUploadProgress.currentFile}
+                </span>
+              </div>
+            ) : null}
+            {uploadStatusMessage ? (
+              <div
+                className="device-chip"
+                style={{
+                  background: 'rgba(76, 175, 80, 0.15)',
+                  color: '#81c784',
+                  padding: '0.4rem 0.8rem',
+                  fontSize: '0.85rem',
+                }}
+              >
+                {uploadStatusMessage}
+              </div>
+            ) : null}
             {error ? <div className="error-banner">{error}</div> : null}
           </div>
         </div>
@@ -1283,6 +1344,7 @@ export function App() {
               onPlayAlbum={(albumIds) => handleReplaceQueueForAlbums(albumIds, true)}
               onReplaceQueue={(albumIds) =>
                 handleReplaceQueueForAlbums(albumIds, false)}
+              onUploadAlbum={(albumTitle) => setUploadAlbumTitle(albumTitle)}
               selectedAlbumId={selectedAlbumId}
               tracks={bootstrap.library.tracks}
             />
@@ -1302,6 +1364,7 @@ export function App() {
               onPlayTracks={handlePlayTracks}
               onReplaceQueue={(albumId) => handleReplaceQueue(albumId, false)}
               onShowInExplorer={handleShowTrackInExplorer}
+              onUploadAlbum={(albumTitle) => setUploadAlbumTitle(albumTitle)}
               sessionExportTags={sessionExportTags}
               selectedAlbumId={selectedAlbumId}
               settings={bootstrap.settings.albumTrackTable}
@@ -1329,6 +1392,7 @@ export function App() {
             sessionExportTags={sessionExportTags}
             onShowInExplorer={handleShowTrackInExplorer}
             onTrackTableChange={handleTrackTableChange}
+            onUploadAlbum={(albumTitle) => setUploadAlbumTitle(albumTitle)}
             settings={bootstrap.settings.trackTable}
             tracks={bootstrap.library.tracks}
             highlightTrackId={highlightTrackId}
@@ -1391,6 +1455,9 @@ export function App() {
               onThemeChange={handleThemeChange}
               onUpdateCatalogRule={handleUpdateCatalogRule}
               onUpdateField={handleUpdateField}
+              remoteTargets={bootstrap.remoteTargets ?? []}
+              onRemoteTargetsChange={(targets) =>
+                setBootstrap((current) => (current ? { ...current, remoteTargets: targets } : current))}
               selectedMappingFormat={selectedMappingFormat}
               settings={bootstrap.settings}
             />
@@ -1430,6 +1497,18 @@ export function App() {
           isOpen={true}
           onClose={() => setPlaylistImportPath(null)}
           onImportSuccess={handleImportSuccess}
+        />
+      ) : null}
+
+      {uploadAlbumTitle ? (
+        <RemoteUploadDialog
+          albumTitle={uploadAlbumTitle}
+          targets={bootstrap.remoteTargets ?? []}
+          onClose={() => setUploadAlbumTitle(null)}
+          onUploadStarted={(targetName, title) => {
+            setUploadStatusMessage(`Starting upload of "${title}" to ${targetName}...`);
+            setTimeout(() => setUploadStatusMessage(null), 4000);
+          }}
         />
       ) : null}
     </main>

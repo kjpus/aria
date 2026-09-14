@@ -9,6 +9,9 @@ aria-domain = { path = "../domain" }
 aria-library = { path = "../library" }
 aria-playback = { path = "../playback" }
 aria-playlists = { path = "../playlists" }
+aria-remote-storage = { path = "../remote-storage" }
 aria-storage = { path = "../storage" }
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true

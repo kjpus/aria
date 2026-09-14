@@ -14,6 +14,7 @@ tauri-build.workspace = true
 [dependencies]
 aria-app-core = { path = "../crates/app-core" }
 aria-domain = { path = "../crates/domain" }
+aria-remote-storage = { path = "../crates/remote-storage" }
 serde.workspace = true
 tauri = { workspace = true, features = ["protocol-asset"] }
 thiserror.workspace = true

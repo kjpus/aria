@@ -1,8 +1,13 @@
 pub mod backends;
 pub mod error;
+pub mod factory;
+pub mod pipeline;
 pub mod quota;
 pub mod traits;
 pub mod types;
+
+pub use factory::{create_backend_for_target, FilesystemConfig, GoogleDriveStoredConfig};
+pub use pipeline::{upload_album, UploadOptions};
 
 pub use backends::{
     generate_pkce_challenge, generate_pkce_verifier, refresh_access_token, FilesystemBackend,

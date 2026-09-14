@@ -75,6 +75,7 @@ version = "0.1.0"
 dependencies = [
  "aria-app-core",
  "aria-domain",
+ "aria-remote-storage",
  "serde",
  "tauri",
  "tauri-build",
@@ -90,9 +91,12 @@ dependencies = [
  "aria-library",
  "aria-playback",
  "aria-playlists",
+ "aria-remote-storage",
  "aria-storage",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -159,6 +163,7 @@ dependencies = [
  "aria-domain",
  "aria-library",
  "async-trait",
+ "chrono",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

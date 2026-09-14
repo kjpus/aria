@@ -46,6 +46,7 @@ type AlbumPaneProps = {
   onReplaceQueue: (albumId: string) => void | Promise<void>;
   onPlayAlbum: (albumId: string) => void | Promise<void>;
   onGoToDirectory: (albumId: string) => void | Promise<void>;
+  onUploadAlbum?: (albumTitle: string) => void;
   sessionExportTags: string[];
 };
 
@@ -104,6 +105,7 @@ export function AlbumPane({
   onReplaceQueue,
   onPlayAlbum,
   onGoToDirectory,
+  onUploadAlbum,
   sessionExportTags,
 }: AlbumPaneProps) {
   const albumDetailRef = useRef<HTMLDivElement>(null);
@@ -733,6 +735,17 @@ export function AlbumPane({
               <button onClick={() => runAlbumExportField()} type="button">
                 Export field
               </button>
+              {onUploadAlbum ? (
+                <button
+                  onClick={() => {
+                    setAlbumContextMenu(null);
+                    onUploadAlbum(selectedAlbum.title);
+                  }}
+                  type="button"
+                >
+                  Upload to remote...
+                </button>
+              ) : null}
               <button onClick={() => void runContextAction(onGoToDirectory)} type="button">
                 Go to directory
               </button>

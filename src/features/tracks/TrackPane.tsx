@@ -37,6 +37,7 @@ type TrackPaneProps = {
   onAddAlbumToQueue: (albumId: string) => void | Promise<void>;
   onGoToDirectory: (albumId: string) => void | Promise<void>;
   onPlayAlbum: (albumId: string) => void | Promise<void>;
+  onUploadAlbum?: (albumTitle: string) => void;
   onExportField: (
     tracks: ScannedTrack[],
     fieldKey: string,
@@ -142,6 +143,7 @@ export function TrackPane({
   onAddAlbumToQueue,
   onGoToDirectory,
   onPlayAlbum,
+  onUploadAlbum,
   onExportField,
   onEditTrackTags,
   onRememberExportTag,
@@ -1261,6 +1263,23 @@ export function TrackPane({
                   <button onClick={() => runAlbumExportField()} type="button">
                     Export field
                   </button>
+                  {onUploadAlbum ? (
+                    <button
+                      onClick={() => {
+                        const albumGroup = albumGroups.find((g) => g.albumId === albumContextMenu.albumId);
+                        setAlbumContextMenu(null);
+                        const title =
+                          albumGroup?.album?.title ||
+                          albumGroup?.tracks[0]?.mappedFields.album?.[0];
+                        if (title) {
+                          onUploadAlbum(title);
+                        }
+                      }}
+                      type="button"
+                    >
+                      Upload to remote...
+                    </button>
+                  ) : null}
                   <button onClick={() => void runAlbumContextAction(onGoToDirectory)} type="button">
                     Go to directory
                   </button>

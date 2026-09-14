@@ -5,7 +5,10 @@ pub mod playlist;
 pub mod remote;
 pub mod settings;
 
-pub use events::{AppEvent, LibraryEvent, PlaybackEvent, PlaylistEvent};
+pub use events::{
+    AppEvent, LibraryEvent, PlaybackEvent, PlaylistEvent, RemoteEvent, UploadCompletedEvent,
+    UploadProgressEvent,
+};
 pub use remote::{
     AlbumManifest, ManifestTrack, MasterAlbumSummary, MasterLibraryIndex, RemoteBackendType,
     RemoteSourceLocation, RemoteSyncedItem, RemoteTarget, CURRENT_MANIFEST_VERSION,
@@ -36,4 +39,6 @@ pub struct AppBootstrap {
     pub playback: PlaybackSnapshot,
     pub playlists: PlaylistSnapshot,
     pub settings: SettingsSnapshot,
+    #[serde(default)]
+    pub remote_targets: Vec<RemoteTarget>,
 }

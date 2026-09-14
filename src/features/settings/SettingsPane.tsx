@@ -13,6 +13,7 @@ import { CatalogRulesPanel } from '../library/CatalogRulesPanel';
 import { FieldMappingsPanel } from '../library/FieldMappingsPanel';
 import { LibraryPanel } from '../library/LibraryPanel';
 import { PlaybackSettingsPanel } from './PlaybackSettingsPanel';
+import { RemoteSettingsPanel } from './RemoteSettingsPanel';
 import { SettingsPanel } from './SettingsPanel';
 import {
   fieldMappingFormatLabel,
@@ -28,6 +29,8 @@ type SettingsPaneProps = {
   draftCatalogRules: CatalogRule[];
   selectedMappingFormat: FieldMappingFormat;
   settings: SettingsSnapshot;
+  remoteTargets: import('../../types/aria').RemoteTarget[];
+  onRemoteTargetsChange: (targets: import('../../types/aria').RemoteTarget[]) => void;
   onAddDirectory: () => void;
   onClearLibrary: () => void;
   onRemoveRoot: (path: string) => void;
@@ -57,6 +60,8 @@ export function SettingsPane({
   draftCatalogRules,
   selectedMappingFormat,
   settings,
+  remoteTargets,
+  onRemoteTargetsChange,
   onAddDirectory,
   onClearLibrary,
   onRemoveRoot,
@@ -170,6 +175,11 @@ export function SettingsPane({
           settings={settings}
         />
       </div>
+
+      <RemoteSettingsPanel
+        targets={remoteTargets}
+        onTargetsChange={onRemoteTargetsChange}
+      />
 
       {isMappingsDialogOpen ? (
         <ConfigDialog

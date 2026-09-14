@@ -3,14 +3,21 @@ use aria_domain::{
     LibrarySnapshot, OutputDeviceSnapshot, PlayTrackRequest, PlaybackEvent, PlaybackPreferences,
     PlaylistEvent, PlaylistSnapshot, PlaybackSessionSnapshot, PlaybackSnapshot, SettingsSnapshot,
     ThemePreference, TrackTableSettings, TrackTagEditRequest, PlaylistImportPreview, PreviewTrack,
+    RemoteBackendType, RemoteEvent, RemoteSyncedItem, RemoteTarget, ScannedTrack,
+    UploadCompletedEvent,
 };
 use aria_library::{LibraryError, LibraryService};
 use aria_playback::{PlaybackError, PlaybackService};
 use aria_playlists::{PlaylistError, PlaylistService};
+use aria_remote_storage::{
+    create_backend_for_target, upload_album, GoogleAuthConfig, GoogleDriveStoredConfig,
+    PendingAuthFlow, RemoteStorageError, StorageStatus, UploadOptions,
+};
 use aria_storage::{AppDatabase, SettingsStore, StorageError};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 
 #[derive(Debug, Error)]
 pub enum AppCoreError {
@@ -22,8 +29,12 @@ pub enum AppCoreError {
     Playback(#[from] PlaybackError),
     #[error(transparent)]
     Playlist(#[from] PlaylistError),
+    #[error(transparent)]
+    RemoteStorage(#[from] RemoteStorageError),
     #[error("failed to import playlist: {0}")]
     Import(String),
+    #[error("remote error: {0}")]
+    Remote(String),
 }
 
 #[derive(Clone)]
@@ -33,6 +44,8 @@ pub struct AppCore {
     playback: PlaybackService,
     playlists: PlaylistService,
     settings: SettingsStore,
+    database: AppDatabase,
+    pending_gdrive_auth: Arc<Mutex<Option<PendingAuthFlow>>>,
 }
 
 impl AppCore {
@@ -49,6 +62,8 @@ impl AppCore {
             ),
             playlists: PlaylistService::with_snapshot(persisted.playlists),
             settings: SettingsStore::with_snapshot(persisted.settings),
+            database: database.clone(),
+            pending_gdrive_auth: Arc::new(Mutex::new(None)),
         };
 
         core.spawn_persistence_worker(database);
@@ -67,6 +82,7 @@ impl AppCore {
             playback: self.playback.snapshot().await,
             playlists: self.playlists.snapshot().await,
             settings: self.settings.snapshot().await,
+            remote_targets: self.database.load_remote_targets().unwrap_or_default(),
         }
     }
 
@@ -653,6 +669,211 @@ impl AppCore {
                 });
             })
             .expect("failed to spawn aria-output-device-monitor");
+    }
+
+    pub fn get_remote_targets(&self) -> Result<Vec<RemoteTarget>, AppCoreError> {
+        Ok(self.database.load_remote_targets()?)
+    }
+
+    pub fn save_remote_target(&self, target: RemoteTarget) -> Result<Vec<RemoteTarget>, AppCoreError> {
+        self.database.save_remote_target(&target)?;
+        let targets = self.database.load_remote_targets()?;
+        let _ = self.events.send(AppEvent::Remote(RemoteEvent::TargetsChanged(targets.clone())));
+        Ok(targets)
+    }
+
+    pub fn delete_remote_target(&self, target_id: &str) -> Result<Vec<RemoteTarget>, AppCoreError> {
+        self.database.delete_remote_target(target_id)?;
+        let targets = self.database.load_remote_targets()?;
+        let _ = self.events.send(AppEvent::Remote(RemoteEvent::TargetsChanged(targets.clone())));
+        Ok(targets)
+    }
+
+    pub async fn test_remote_target(&self, target_id: &str) -> Result<StorageStatus, AppCoreError> {
+        let targets = self.database.load_remote_targets()?;
+        let target = targets
+            .into_iter()
+            .find(|t| t.id == target_id)
+            .ok_or_else(|| AppCoreError::Remote(format!("Target '{target_id}' not found")))?;
+        let backend = create_backend_for_target(&target)?;
+        Ok(backend.test_connection().await?)
+    }
+
+    pub async fn start_gdrive_auth_flow(
+        &self,
+        client_id: String,
+        client_secret: Option<String>,
+    ) -> Result<String, AppCoreError> {
+        let auth_config = GoogleAuthConfig {
+            client_id,
+            client_secret,
+        };
+        let flow = PendingAuthFlow::start(auth_config).await?;
+        let auth_url = flow.authorization_url.clone();
+        let mut pending = self.pending_gdrive_auth.lock().await;
+        *pending = Some(flow);
+        Ok(auth_url)
+    }
+
+    pub async fn complete_gdrive_auth_flow(
+        &self,
+        target_name: String,
+        storage_limit_bytes: Option<u64>,
+    ) -> Result<RemoteTarget, AppCoreError> {
+        let flow = {
+            let mut pending = self.pending_gdrive_auth.lock().await;
+            pending
+                .take()
+                .ok_or_else(|| AppCoreError::Remote("No pending Google Drive auth flow".into()))?
+        };
+
+        let tokens = flow.wait_for_tokens().await?;
+        let stored_cfg = GoogleDriveStoredConfig {
+            client_id: "from_oauth".to_string(),
+            client_secret: None,
+            access_token: Some(tokens.access_token),
+            refresh_token: tokens.refresh_token,
+            expires_at: Some(tokens.expires_at),
+            root_folder_name: "Aria".to_string(),
+        };
+
+        let target = RemoteTarget {
+            id: format!("gdrive-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()),
+            name: target_name,
+            backend_type: RemoteBackendType::GoogleDrive,
+            storage_limit_bytes,
+            is_enabled: true,
+            config_json: serde_json::to_string(&stored_cfg).map_err(|e| AppCoreError::Remote(e.to_string()))?,
+        };
+
+        self.save_remote_target(target.clone())?;
+        Ok(target)
+    }
+
+    pub async fn upload_album_to_target(
+        &self,
+        album_title: String,
+        target_id: String,
+    ) -> Result<(), AppCoreError> {
+        let targets = self.database.load_remote_targets()?;
+        let target = targets
+            .into_iter()
+            .find(|t| t.id == target_id)
+            .ok_or_else(|| AppCoreError::Remote(format!("Target '{target_id}' not found")))?;
+
+        let snapshot = self.library.snapshot().await;
+        let album_tracks: Vec<ScannedTrack> = snapshot
+            .tracks
+            .into_iter()
+            .filter(|t| {
+                let title = t
+                    .mapped_fields
+                    .get("album")
+                    .and_then(|a| a.first())
+                    .map(|s| s.as_str())
+                    .unwrap_or(&t.file_name);
+                title.trim().eq_ignore_ascii_case(album_title.trim())
+            })
+            .collect();
+
+        if album_tracks.is_empty() {
+            return Err(AppCoreError::Remote(format!("No tracks found for album '{album_title}'")));
+        }
+
+        let backend = create_backend_for_target(&target)?;
+        let current_usage = self.database.get_total_synced_bytes_for_target(&target_id)?;
+
+        let (progress_tx, mut progress_rx) = broadcast::channel(64);
+        let events = self.events.clone();
+
+        tokio::spawn(async move {
+            while let Ok(progress) = progress_rx.recv().await {
+                let _ = events.send(AppEvent::Remote(RemoteEvent::UploadProgress(progress)));
+            }
+        });
+
+        let core = self.clone();
+        tokio::spawn(async move {
+            let options = UploadOptions {
+                compute_checksums: false,
+                current_target_usage_bytes: current_usage,
+            };
+
+            match upload_album(
+                backend,
+                &target,
+                &album_title,
+                &album_tracks,
+                options,
+                Some(progress_tx),
+            )
+            .await
+            {
+                Ok(synced_items) => {
+                    for item in &synced_items {
+                        let _ = core.database.save_remote_synced_item(item);
+                    }
+                    let album_id = synced_items
+                        .iter()
+                        .find(|i| i.item_type == "album")
+                        .map(|i| i.item_id.clone())
+                        .unwrap_or_default();
+                    let _ = core.events.send(AppEvent::Remote(RemoteEvent::UploadCompleted(
+                        UploadCompletedEvent {
+                            target_id: target.id.clone(),
+                            album_id,
+                            album_title: album_title.clone(),
+                            success: true,
+                            error_message: None,
+                        },
+                    )));
+                }
+                Err(e) => {
+                    let _ = core.events.send(AppEvent::Remote(RemoteEvent::UploadCompleted(
+                        UploadCompletedEvent {
+                            target_id: target.id.clone(),
+                            album_id: String::new(),
+                            album_title: album_title.clone(),
+                            success: false,
+                            error_message: Some(e.to_string()),
+                        },
+                    )));
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    pub async fn delete_album_from_target(
+        &self,
+        album_id: &str,
+        target_id: &str,
+    ) -> Result<(), AppCoreError> {
+        let targets = self.database.load_remote_targets()?;
+        let target = targets
+            .into_iter()
+            .find(|t| t.id == target_id)
+            .ok_or_else(|| AppCoreError::Remote(format!("Target '{target_id}' not found")))?;
+
+        let synced_items = self.database.load_remote_synced_items_for_target(target_id)?;
+        if let Some(album_item) = synced_items.iter().find(|i| i.item_id == album_id && i.item_type == "album") {
+            let backend = create_backend_for_target(&target)?;
+            let _ = backend.delete_directory(&album_item.remote_path).await;
+        }
+
+        self.database.delete_remote_synced_item(album_id, target_id)?;
+        for item in synced_items {
+            if item.item_type == "track" {
+                let _ = self.database.delete_remote_synced_item(&item.item_id, target_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn get_remote_synced_items(&self, target_id: &str) -> Result<Vec<RemoteSyncedItem>, AppCoreError> {
+        Ok(self.database.load_remote_synced_items_for_target(target_id)?)
     }
 }
 

@@ -16,7 +16,10 @@ import type {
   PreviewTrack,
   PlaylistImportPreview,
   PlaybackSnapshot,
+  RemoteSyncedItem,
+  RemoteTarget,
   SettingsSnapshot,
+  StorageStatus,
   ThemePreference,
   TrackTagEditRequest,
   TrackRawTags,
@@ -1002,6 +1005,118 @@ export async function listenToAppEvents(
   return listen<AppEvent>(APP_EVENT_NAME, (event) => {
     handler(event.payload);
   });
+}
+
+export async function getRemoteTargets(): Promise<RemoteTarget[]> {
+  if (!isTauriRuntime) {
+    return previewBootstrap.remoteTargets ?? [];
+  }
+  return invoke<RemoteTarget[]>('get_remote_targets');
+}
+
+export async function saveRemoteTarget(target: RemoteTarget): Promise<RemoteTarget[]> {
+  if (!isTauriRuntime) {
+    const existing = previewBootstrap.remoteTargets ?? [];
+    const index = existing.findIndex((t) => t.id === target.id);
+    const updated = index >= 0
+      ? existing.map((t) => (t.id === target.id ? target : t))
+      : [...existing, target];
+    previewBootstrap = { ...previewBootstrap, remoteTargets: updated };
+    return updated;
+  }
+  return invoke<RemoteTarget[]>('save_remote_target', { target });
+}
+
+export async function deleteRemoteTarget(targetId: string): Promise<RemoteTarget[]> {
+  if (!isTauriRuntime) {
+    const existing = previewBootstrap.remoteTargets ?? [];
+    const updated = existing.filter((t) => t.id !== targetId);
+    previewBootstrap = { ...previewBootstrap, remoteTargets: updated };
+    return updated;
+  }
+  return invoke<RemoteTarget[]>('delete_remote_target', { targetId });
+}
+
+export async function testRemoteTarget(targetId: string): Promise<StorageStatus> {
+  if (!isTauriRuntime) {
+    return {
+      isConnected: true,
+      message: 'Preview mode connection OK',
+      storageUsage: {
+        usedBytes: 1024 * 1024 * 500,
+        totalBytes: 1024 * 1024 * 1024 * 15,
+        freeBytes: 1024 * 1024 * 1024 * 14.5,
+      },
+    };
+  }
+  return invoke<StorageStatus>('test_remote_target', { targetId });
+}
+
+export async function startGdriveAuthFlow(
+  clientId: string,
+  clientSecret?: string,
+): Promise<string> {
+  if (!isTauriRuntime) {
+    return 'https://accounts.google.com/o/oauth2/v2/auth?mock=preview';
+  }
+  return invoke<string>('start_gdrive_auth_flow', {
+    clientId,
+    clientSecret: clientSecret || null,
+  });
+}
+
+export async function completeGdriveAuthFlow(
+  targetName: string,
+  storageLimitBytes?: number,
+): Promise<RemoteTarget> {
+  if (!isTauriRuntime) {
+    const mockTarget: RemoteTarget = {
+      id: `gdrive-${Date.now()}`,
+      name: targetName,
+      backendType: 'google_drive',
+      storageLimitBytes: storageLimitBytes ?? null,
+      isEnabled: true,
+      configJson: '{}',
+    };
+    previewBootstrap = {
+      ...previewBootstrap,
+      remoteTargets: [...(previewBootstrap.remoteTargets ?? []), mockTarget],
+    };
+    return mockTarget;
+  }
+  return invoke<RemoteTarget>('complete_gdrive_auth_flow', {
+    targetName,
+    storageLimitBytes: storageLimitBytes ?? null,
+  });
+}
+
+export async function uploadAlbumToTarget(
+  albumTitle: string,
+  targetId: string,
+): Promise<void> {
+  if (!isTauriRuntime) {
+    return;
+  }
+  return invoke<void>('upload_album_to_target', { albumTitle, targetId });
+}
+
+export async function deleteAlbumFromTarget(
+  albumId: string,
+  targetId: string,
+): Promise<void> {
+  if (!isTauriRuntime) {
+    return;
+  }
+  return invoke<void>('delete_album_from_target', { albumId, targetId });
+}
+
+export async function getRemoteSyncedItems(
+  targetId: string,
+): Promise<RemoteSyncedItem[]> {
+  if (!isTauriRuntime) {
+    return [];
+  }
+  return invoke<RemoteSyncedItem[]>('get_remote_synced_items', { targetId });
 }
 
 function stringifyDebugError(error: unknown): string {

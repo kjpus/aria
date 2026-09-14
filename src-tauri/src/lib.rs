@@ -71,7 +71,16 @@ pub fn run() {
             commands::settings::update_album_track_table_settings,
             commands::settings::update_playlist_track_table_settings,
             commands::settings::list_output_devices,
-            commands::settings::update_playback_preferences
+            commands::settings::update_playback_preferences,
+            commands::remote::get_remote_targets,
+            commands::remote::save_remote_target,
+            commands::remote::delete_remote_target,
+            commands::remote::test_remote_target,
+            commands::remote::start_gdrive_auth_flow,
+            commands::remote::complete_gdrive_auth_flow,
+            commands::remote::upload_album_to_target,
+            commands::remote::delete_album_from_target,
+            commands::remote::get_remote_synced_items
         ])
         .build(tauri::generate_context!())
         .expect("error while building aria")

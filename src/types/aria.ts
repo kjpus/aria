@@ -164,11 +164,83 @@ export type SettingsSnapshot = {
   playback: PlaybackPreferences;
 };
 
+export type RemoteBackendType = 'google_drive' | 'filesystem' | 'web_dav' | 'smb';
+
+export type RemoteTarget = {
+  id: string;
+  name: string;
+  backendType: RemoteBackendType;
+  storageLimitBytes: number | null;
+  isEnabled: boolean;
+  configJson: string;
+};
+
+export type StorageUsage = {
+  usedBytes: number;
+  totalBytes: number | null;
+  freeBytes: number | null;
+};
+
+export type StorageStatus = {
+  isConnected: boolean;
+  message: string | null;
+  storageUsage: StorageUsage | null;
+};
+
+export type RemoteSyncedItem = {
+  itemId: string;
+  remoteTargetId: string;
+  itemType: string;
+  remotePath: string;
+  remoteFileId: string | null;
+  sizeBytes: number;
+  checksum: string | null;
+  syncStatus: string;
+  lastSyncedAt: string;
+};
+
+export type UploadProgressEvent = {
+  targetId: string;
+  albumId: string;
+  albumTitle: string;
+  currentFile: string;
+  currentFileBytes: number;
+  currentFileTotalBytes: number;
+  totalFiles: number;
+  completedFiles: number;
+  totalBytes: number;
+  completedBytes: number;
+  status: string;
+};
+
+export type UploadCompletedEvent = {
+  targetId: string;
+  albumId: string;
+  albumTitle: string;
+  success: boolean;
+  errorMessage: string | null;
+};
+
+export type RemoteEvent =
+  | {
+      kind: 'targets_changed';
+      payload: RemoteTarget[];
+    }
+  | {
+      kind: 'upload_progress';
+      payload: UploadProgressEvent;
+    }
+  | {
+      kind: 'upload_completed';
+      payload: UploadCompletedEvent;
+    };
+
 export type AppBootstrap = {
   library: LibrarySnapshot;
   playback: PlaybackSnapshot;
   playlists: PlaylistSnapshot;
   settings: SettingsSnapshot;
+  remoteTargets?: RemoteTarget[];
 };
 
 export type LibraryEvent =
@@ -208,6 +280,10 @@ export type AppEvent =
   | {
       topic: 'playlists';
       payload: PlaylistEvent;
+    }
+  | {
+      topic: 'remote';
+      payload: RemoteEvent;
     }
   | {
       topic: 'settings';

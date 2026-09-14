@@ -17,6 +17,7 @@ type LibraryPaneProps = {
   onReplaceQueue: (albumIds: string[]) => void | Promise<void>;
   onPlayAlbum: (albumIds: string[]) => void | Promise<void>;
   onGoToDirectory: (albumIds: string[]) => void | Promise<void>;
+  onUploadAlbum?: (albumTitle: string) => void;
 };
 
 type AlbumContextMenuState = {
@@ -37,6 +38,7 @@ export function LibraryPane({
   onReplaceQueue,
   onPlayAlbum,
   onGoToDirectory,
+  onUploadAlbum,
 }: LibraryPaneProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const [filter, setFilter] = useState('');
@@ -321,6 +323,20 @@ export function LibraryPane({
                 >
                   Go to directory
                 </button>
+                {onUploadAlbum && contextMenu.albumIds.length === 1 ? (
+                  <button
+                    onClick={() => {
+                      const album = albums.find((a) => a.id === contextMenu.albumIds[0]);
+                      setContextMenu(null);
+                      if (album) {
+                        onUploadAlbum(album.title);
+                      }
+                    }}
+                    type="button"
+                  >
+                    Upload to remote...
+                  </button>
+                ) : null}
               </div>,
               document.body,
             )
