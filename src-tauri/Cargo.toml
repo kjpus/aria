@@ -19,3 +19,4 @@ serde.workspace = true
 tauri = { workspace = true, features = ["protocol-asset"] }
 thiserror.workspace = true
 tokio.workspace = true
+url.workspace = true

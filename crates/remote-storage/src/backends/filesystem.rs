@@ -25,9 +25,34 @@ impl FilesystemBackend {
         &self.root_path
     }
 
-    fn resolve_remote_path(&self, relative_path: &str) -> PathBuf {
-        let normalized = relative_path.trim_start_matches(['/', '\\']);
-        self.root_path.join(normalized)
+    fn resolve_remote_path(&self, relative_path: &str) -> Result<PathBuf, RemoteStorageError> {
+        let trimmed = relative_path.trim();
+        if trimmed.is_empty() {
+            return Ok(self.root_path.clone());
+        }
+
+        // Reject leading slashes and drive letters
+        if trimmed.starts_with('/') || trimmed.starts_with('\\') {
+            return Err(RemoteStorageError::ProviderError(format!(
+                "Absolute paths not allowed in remote path: '{relative_path}'"
+            )));
+        }
+
+        let rel_path = Path::new(trimmed);
+        for comp in rel_path.components() {
+            match comp {
+                std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_) => {
+                    return Err(RemoteStorageError::ProviderError(format!(
+                        "Path traversal attempt detected in path: '{relative_path}'"
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(self.root_path.join(rel_path))
     }
 }
 
@@ -97,7 +122,7 @@ impl RemoteStorageBackend for FilesystemBackend {
     }
 
     async fn ensure_directory(&self, path: &str) -> Result<String, RemoteStorageError> {
-        let target = self.resolve_remote_path(path);
+        let target = self.resolve_remote_path(path)?;
         fs::create_dir_all(&target)
             .await
             .map_err(RemoteStorageError::Io)?;
@@ -110,7 +135,7 @@ impl RemoteStorageBackend for FilesystemBackend {
         remote_path: &str,
         progress: Option<mpsc::Sender<TransferProgress>>,
     ) -> Result<RemoteFileRef, RemoteStorageError> {
-        let target_path = self.resolve_remote_path(remote_path);
+        let target_path = self.resolve_remote_path(remote_path)?;
 
         if let Some(parent) = target_path.parent() {
             fs::create_dir_all(parent)
@@ -177,7 +202,7 @@ impl RemoteStorageBackend for FilesystemBackend {
     }
 
     async fn write_bytes(&self, remote_path: &str, data: &[u8]) -> Result<(), RemoteStorageError> {
-        let target_path = self.resolve_remote_path(remote_path);
+        let target_path = self.resolve_remote_path(remote_path)?;
 
         if let Some(parent) = target_path.parent() {
             fs::create_dir_all(parent)
@@ -198,7 +223,7 @@ impl RemoteStorageBackend for FilesystemBackend {
     }
 
     async fn read_bytes(&self, remote_path: &str) -> Result<Vec<u8>, RemoteStorageError> {
-        let target_path = self.resolve_remote_path(remote_path);
+        let target_path = self.resolve_remote_path(remote_path)?;
         if !target_path.exists() {
             return Err(RemoteStorageError::NotFound(remote_path.to_string()));
         }
@@ -208,7 +233,7 @@ impl RemoteStorageBackend for FilesystemBackend {
     }
 
     async fn delete_file(&self, remote_path: &str) -> Result<(), RemoteStorageError> {
-        let target_path = self.resolve_remote_path(remote_path);
+        let target_path = self.resolve_remote_path(remote_path)?;
         if target_path.exists() {
             fs::remove_file(&target_path)
                 .await
@@ -218,7 +243,12 @@ impl RemoteStorageBackend for FilesystemBackend {
     }
 
     async fn delete_directory(&self, remote_path: &str) -> Result<(), RemoteStorageError> {
-        let target_path = self.resolve_remote_path(remote_path);
+        let target_path = self.resolve_remote_path(remote_path)?;
+        if target_path == self.root_path {
+            return Err(RemoteStorageError::ProviderError(
+                "Refusing to delete storage root directory".into(),
+            ));
+        }
         if target_path.exists() {
             fs::remove_dir_all(&target_path)
                 .await
@@ -295,9 +325,52 @@ mod tests {
             .delete_directory("Beethoven")
             .await
             .expect("delete dir");
-        assert!(!backend.resolve_remote_path("Beethoven").exists());
+        assert!(!backend.resolve_remote_path("Beethoven").unwrap().exists());
 
         // Cleanup
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_filesystem_path_traversal_rejected() {
+        let temp_dir = std::env::temp_dir().join(format!("aria_fs_traversal_test_{}", std::process::id()));
+        let backend = FilesystemBackend::new(&temp_dir);
+
+        // Path traversal attempts should be rejected with an error
+        let traversal_paths = [
+            "../outside.txt",
+            "..\\outside.txt",
+            "Beethoven/../../secret.txt",
+            "/absolute/root.txt",
+            "C:\\Windows\\System32\\calc.exe",
+        ];
+
+        for path in traversal_paths {
+            assert!(
+                backend.resolve_remote_path(path).is_err(),
+                "Path '{path}' should have been rejected as traversal"
+            );
+            assert!(
+                backend.write_bytes(path, b"evil").await.is_err(),
+                "write_bytes on '{path}' should have failed"
+            );
+            assert!(
+                backend.read_bytes(path).await.is_err(),
+                "read_bytes on '{path}' should have failed"
+            );
+            assert!(
+                backend.delete_file(path).await.is_err(),
+                "delete_file on '{path}' should have failed"
+            );
+            assert!(
+                backend.delete_directory(path).await.is_err(),
+                "delete_directory on '{path}' should have failed"
+            );
+        }
+
+        // Refuse to delete the root directory itself
+        assert!(backend.delete_directory("").await.is_err());
+        assert!(backend.delete_directory("/").await.is_err());
+        assert!(backend.delete_directory("\\").await.is_err());
     }
 }

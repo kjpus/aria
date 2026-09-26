@@ -38,9 +38,29 @@ impl WebDavBackend {
         }
     }
 
-    fn resolve_url(&self, relative_path: &str) -> String {
-        let trimmed = relative_path.trim_start_matches(['/', '\\']);
-        format!("{}{}", self.base_url, trimmed)
+    fn resolve_url(&self, relative_path: &str) -> Result<String, RemoteStorageError> {
+        let trimmed = relative_path.trim();
+        if trimmed.is_empty() {
+            return Ok(self.base_url.clone());
+        }
+
+        // Validate that relative_path contains no parent traversal components
+        let rel_path = Path::new(trimmed.trim_start_matches(['/', '\\']));
+        for comp in rel_path.components() {
+            match comp {
+                std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_) => {
+                    return Err(RemoteStorageError::ProviderError(format!(
+                        "Path traversal attempt detected in WebDAV path: '{relative_path}'"
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        let clean_path = trimmed.trim_start_matches(['/', '\\']);
+        Ok(format!("{}{}", self.base_url, clean_path))
     }
 
     fn auth_request(&self, builder: RequestBuilder) -> RequestBuilder {
@@ -167,7 +187,7 @@ impl RemoteStorageBackend for WebDavBackend {
             }
             current_path.push_str(segment);
 
-            let dir_url = format!("{}/", self.resolve_url(&current_path));
+            let dir_url = format!("{}/", self.resolve_url(&current_path)?);
             let req = self
                 .client
                 .request(Method::from_bytes(b"MKCOL").unwrap_or(Method::POST), &dir_url);
@@ -206,7 +226,7 @@ impl RemoteStorageBackend for WebDavBackend {
             }
         }
 
-        Ok(self.resolve_url(normalized))
+        self.resolve_url(normalized)
     }
 
     async fn upload_file(
@@ -242,7 +262,7 @@ impl RemoteStorageBackend for WebDavBackend {
                 .await;
         }
 
-        let target_url = self.resolve_url(remote_path);
+        let target_url = self.resolve_url(remote_path)?;
         let req = self
             .client
             .put(&target_url)
@@ -284,7 +304,7 @@ impl RemoteStorageBackend for WebDavBackend {
             self.ensure_directory(&remote_path[..parent]).await?;
         }
 
-        let target_url = self.resolve_url(remote_path);
+        let target_url = self.resolve_url(remote_path)?;
         let req = self
             .client
             .put(&target_url)
@@ -309,7 +329,7 @@ impl RemoteStorageBackend for WebDavBackend {
     }
 
     async fn read_bytes(&self, remote_path: &str) -> Result<Vec<u8>, RemoteStorageError> {
-        let target_url = self.resolve_url(remote_path);
+        let target_url = self.resolve_url(remote_path)?;
         let req = self.client.get(&target_url);
 
         let res = self
@@ -338,7 +358,7 @@ impl RemoteStorageBackend for WebDavBackend {
     }
 
     async fn delete_file(&self, remote_path: &str) -> Result<(), RemoteStorageError> {
-        let target_url = self.resolve_url(remote_path);
+        let target_url = self.resolve_url(remote_path)?;
         let req = self.client.delete(&target_url);
 
         let res = self
@@ -363,7 +383,7 @@ impl RemoteStorageBackend for WebDavBackend {
             return Ok(());
         }
 
-        let target_url = format!("{}/", self.resolve_url(normalized));
+        let target_url = format!("{}/", self.resolve_url(normalized)?);
         let req = self.client.delete(&target_url);
 
         let res = self
@@ -397,11 +417,15 @@ mod tests {
         let backend = WebDavBackend::new(config);
         assert_eq!(backend.base_url, "https://nas.local:5006/music/");
 
-        let resolved = backend.resolve_url("Beethoven/Sym9/manifest.json");
+        let resolved = backend.resolve_url("Beethoven/Sym9/manifest.json").expect("resolve url");
         assert_eq!(
             resolved,
             "https://nas.local:5006/music/Beethoven/Sym9/manifest.json"
         );
+
+        // Path traversal should be rejected
+        assert!(backend.resolve_url("../secret.txt").is_err());
+        assert!(backend.resolve_url("Beethoven/../../evil.txt").is_err());
     }
 
     #[test]

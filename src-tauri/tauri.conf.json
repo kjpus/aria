@@ -31,7 +31,7 @@
           "$TEMP/**"
         ]
       },
-      "csp": null,
+      "csp": "default-src 'self'; img-src 'self' asset: https://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost;",
       "capabilities": [
         "main-capability"
       ]

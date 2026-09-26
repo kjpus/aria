@@ -10,6 +10,7 @@ aria-library = { path = "../library" }
 async-trait.workspace = true
 chrono.workspace = true
 dirs.workspace = true
+getrandom = "0.4.3"
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

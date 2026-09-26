@@ -131,14 +131,14 @@ impl GoogleDriveBackend {
                     let query = if let Some(ref pid) = parent_id {
                         format!(
                             "name = '{}' and '{}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
-                            segment.replace('\'', "\\'"),
-                            pid
+                            escape_drive_query_string(segment),
+                            escape_drive_query_string(pid)
                         )
                     } else {
                         // Top level folder: under drive.file scope, do not query 'root' in parents
                         format!(
                             "name = '{}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
-                            segment.replace('\'', "\\'")
+                            escape_drive_query_string(segment)
                         )
                     };
 
@@ -221,8 +221,8 @@ impl GoogleDriveBackend {
         let token = self.get_access_token().await?;
         let query = format!(
             "name = '{}' and '{}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
-            folder_name.replace('\'', "\\'"),
-            parent_id
+            escape_drive_query_string(folder_name),
+            escape_drive_query_string(parent_id)
         );
 
         let url = format!("{DRIVE_API_BASE}/files?q={}&fields=files(id,name)", urlencoding(&query));
@@ -290,8 +290,8 @@ impl GoogleDriveBackend {
         let token = self.get_access_token().await?;
         let query = format!(
             "name = '{}' and '{}' in parents and trashed = false",
-            file_name.replace('\'', "\\'"),
-            parent_id
+            escape_drive_query_string(file_name),
+            escape_drive_query_string(parent_id)
         );
 
         let url = format!("{DRIVE_API_BASE}/files?q={}&fields=files(id,name)", urlencoding(&query));
@@ -326,6 +326,10 @@ impl GoogleDriveBackend {
             None => (None, trimmed),
         }
     }
+}
+
+fn escape_drive_query_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
 fn urlencoding(s: &str) -> String {

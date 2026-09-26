@@ -113,14 +113,36 @@ impl RemoteCacheManager {
             .await
             .map_err(RemoteStorageError::Io)?;
 
-        // Determine target file extension from remote path (default: .flac)
+        // Determine target file extension from remote path (default: .flac, strictly alphanumeric)
         let ext = Path::new(remote_path)
             .extension()
             .and_then(|e| e.to_str())
+            .filter(|e| !e.is_empty() && e.chars().all(|c| c.is_ascii_alphanumeric()))
             .unwrap_or("flac");
 
-        let target_file_name = format!("{track_id}.{ext}");
+        // Sanitize track_id to ensure it cannot escape cache directory
+        let clean_track_id: String = track_id
+            .chars()
+            .map(|ch| match ch {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' => ch,
+                _ => '_',
+            })
+            .collect();
+        let trimmed_track_id = clean_track_id.trim_matches('_');
+        let effective_track_id = if trimmed_track_id.is_empty() {
+            "track"
+        } else {
+            trimmed_track_id
+        };
+
+        let target_file_name = format!("{effective_track_id}.{ext}");
         let target_path = self.cache_dir.join(&target_file_name);
+
+        if target_path.parent() != Some(&self.cache_dir) {
+            return Err(RemoteStorageError::ProviderError(
+                "Invalid cache target path: traversal attempt detected".into(),
+            ));
+        }
 
         // Check if file is already on disk from previous session
         if target_path.exists() {

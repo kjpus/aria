@@ -79,14 +79,58 @@ pub fn open_directory(path: String) -> Result<(), CommandError> {
 
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), CommandError> {
+    let parsed = url::Url::parse(&url)
+        .map_err(|e| CommandError::Message(format!("Invalid URL: {e}")))?;
+
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(CommandError::Message(
+            "Only http and https protocols are permitted.".into(),
+        ));
+    }
+
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("rundll32.exe")
-            .args(["url.dll,FileProtocolHandler", &url])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-            .spawn()
-            .map_err(|error| CommandError::Message(error.to_string()))?;
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+
+        #[link(name = "shell32")]
+        extern "system" {
+            fn ShellExecuteW(
+                hwnd: *mut std::ffi::c_void,
+                lpOperation: *const u16,
+                lpFile: *const u16,
+                lpParameters: *const u16,
+                lpDirectory: *const u16,
+                nShowCmd: i32,
+            ) -> isize;
+        }
+
+        let wide_op: Vec<u16> = OsStr::new("open")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let wide_file: Vec<u16> = OsStr::new(&url)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        const SW_SHOWNORMAL: i32 = 1;
+        let res = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                wide_op.as_ptr(),
+                wide_file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+
+        if res <= 32 {
+            return Err(CommandError::Message(format!(
+                "Failed to open URL in browser (code {res})"
+            )));
+        }
         Ok(())
     }
 

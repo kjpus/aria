@@ -42,24 +42,6 @@ pub async fn start_gdrive_auth_flow(
     client_secret: Option<String>,
 ) -> Result<String, CommandError> {
     let auth_url = state.core.start_gdrive_auth_flow(client_id, client_secret).await?;
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("rundll32.exe")
-            .args(["url.dll,FileProtocolHandler", &auth_url])
-            .creation_flags(0x08000000)
-            .spawn();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(&auth_url).spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(&auth_url).spawn();
-    }
-
     Ok(auth_url)
 }
 

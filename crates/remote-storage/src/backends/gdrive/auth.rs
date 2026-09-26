@@ -52,12 +52,31 @@ struct TokenResponse {
 /// Generates a high-entropy cryptographically random PKCE code verifier.
 pub fn generate_pkce_verifier() -> String {
     let mut bytes = [0u8; 32];
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    for (i, b) in bytes.iter_mut().enumerate() {
-        *b = ((now >> (i % 8 * 8)) ^ ((i as u128).wrapping_mul(0x9e3779b97f4a7c15))) as u8;
+    if let Err(e) = getrandom::fill(&mut bytes) {
+        tracing::error!("CSPRNG error generating PKCE verifier: {e}");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let pid = std::process::id();
+        let hash = Sha256::digest(format!("{now}:{pid}:pkce_fallback").as_bytes());
+        bytes.copy_from_slice(&hash);
+    }
+    base64url_encode(&bytes)
+}
+
+/// Generates a cryptographically random OAuth state token for CSRF protection.
+pub fn generate_oauth_state() -> String {
+    let mut bytes = [0u8; 32];
+    if let Err(e) = getrandom::fill(&mut bytes) {
+        tracing::error!("CSPRNG error generating OAuth state: {e}");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let pid = std::process::id();
+        let hash = Sha256::digest(format!("{now}:{pid}:state_fallback").as_bytes());
+        bytes.copy_from_slice(&hash);
     }
     base64url_encode(&bytes)
 }
@@ -163,6 +182,7 @@ impl PendingAuthFlow {
 
         let verifier = generate_pkce_verifier();
         let challenge = generate_pkce_challenge(&verifier);
+        let state = generate_oauth_state();
 
         let mut auth_url = Url::parse(GOOGLE_AUTH_URL)
             .map_err(|e| RemoteStorageError::AuthFailed(e.to_string()))?;
@@ -174,15 +194,17 @@ impl PendingAuthFlow {
             .append_pair("scope", GOOGLE_DRIVE_FILE_SCOPE)
             .append_pair("code_challenge", &challenge)
             .append_pair("code_challenge_method", "S256")
+            .append_pair("state", &state)
             .append_pair("access_type", "offline")
             .append_pair("prompt", "consent");
 
         let (status_tx, status_rx) = tokio::sync::watch::channel(None);
         let config_clone = config.clone();
         let redirect_uri_clone = redirect_uri.clone();
+        let expected_state = state.clone();
 
         let task = tokio::spawn(async move {
-            let res = listen_for_callback(listener, config_clone, redirect_uri_clone, verifier).await;
+            let res = listen_for_callback(listener, config_clone, redirect_uri_clone, verifier, expected_state).await;
             let _ = status_tx.send(Some(res.map_err(|e| e.to_string())));
         });
 
@@ -218,6 +240,7 @@ async fn listen_for_callback(
     config: GoogleAuthConfig,
     redirect_uri: String,
     verifier: String,
+    expected_state: String,
 ) -> Result<GoogleTokens, RemoteStorageError> {
     tokio::time::timeout(tokio::time::Duration::from_secs(300), async {
         loop {
@@ -232,7 +255,7 @@ async fn listen_for_callback(
             let req_str = String::from_utf8_lossy(&buf[..n]);
             let first_line = req_str.lines().next().unwrap_or_default();
             let mut parts = first_line.split_whitespace();
-            let _method = parts.next().unwrap_or_default();
+            let method = parts.next().unwrap_or_default();
             let path = parts.next().unwrap_or_default();
 
             if path.starts_with("/favicon.ico") {
@@ -251,9 +274,33 @@ async fn listen_for_callback(
                 continue;
             }
 
+            if method != "GET" {
+                let not_allowed = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = socket.write_all(not_allowed.as_bytes()).await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+                continue;
+            }
+
             let url = Url::parse(&format!("http://127.0.0.1{}", path))
                 .map_err(|e| RemoteStorageError::AuthFailed(e.to_string()))?;
             let params: HashMap<_, _> = url.query_pairs().into_owned().collect();
+
+            // Validate state parameter to protect against CSRF attacks (RFC 6749 §10.12)
+            let received_state = params.get("state").map(|s| s.as_str());
+            if received_state != Some(&expected_state) {
+                let body = "<!DOCTYPE html><html><body>Invalid or missing OAuth state parameter (CSRF detected)</body></html>";
+                let response = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.as_bytes().len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+                tracing::warn!("Ignored OAuth callback request with invalid state parameter (possible CSRF)");
+                continue;
+            }
 
             if let Some(error) = params.get("error") {
                 let body = format!(
@@ -537,8 +584,21 @@ mod tests {
         let res = client.get(&favicon_url).send().await.expect("send favicon");
         assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
 
-        // 2. Sending error callback should return 400 and update status to Err
-        let error_url = format!("{redirect_uri}?error=access_denied");
+        let auth_url_parsed = Url::parse(&flow.authorization_url).expect("parse auth url");
+        let state = auth_url_parsed
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .expect("state present")
+            .1
+            .to_string();
+
+        // 2. Sending request with missing or incorrect state should return 400 and trigger CSRF detection
+        let bad_state_url = format!("{redirect_uri}?error=access_denied&state=tampered");
+        let res = client.get(&bad_state_url).send().await.expect("send bad state");
+        assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        // 3. Sending error callback with valid state should update status to Google returned error
+        let error_url = format!("{redirect_uri}?error=access_denied&state={state}");
         let res = client.get(&error_url).send().await.expect("send error callback");
         assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
 
@@ -548,6 +608,7 @@ mod tests {
         assert!(current.is_some());
         let err_result = current.unwrap();
         assert!(err_result.is_err());
-        assert!(err_result.unwrap_err().contains("access_denied"));
+        let err_msg = err_result.unwrap_err();
+        assert!(err_msg.contains("access_denied"));
     }
 }
