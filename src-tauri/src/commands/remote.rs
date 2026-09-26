@@ -41,16 +41,36 @@ pub async fn start_gdrive_auth_flow(
     client_id: String,
     client_secret: Option<String>,
 ) -> Result<String, CommandError> {
-    Ok(state.core.start_gdrive_auth_flow(client_id, client_secret).await?)
+    let auth_url = state.core.start_gdrive_auth_flow(client_id, client_secret).await?;
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", &auth_url])
+            .creation_flags(0x08000000)
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(&auth_url).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&auth_url).spawn();
+    }
+
+    Ok(auth_url)
 }
 
 #[tauri::command]
 pub async fn complete_gdrive_auth_flow(
     state: State<'_, AppState>,
     target_name: String,
+    root_folder_name: Option<String>,
     storage_limit_bytes: Option<u64>,
 ) -> Result<RemoteTarget, CommandError> {
-    Ok(state.core.complete_gdrive_auth_flow(target_name, storage_limit_bytes).await?)
+    Ok(state.core.complete_gdrive_auth_flow(target_name, root_folder_name, storage_limit_bytes).await?)
 }
 
 #[tauri::command]

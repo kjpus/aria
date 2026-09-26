@@ -1068,6 +1068,7 @@ export async function startGdriveAuthFlow(
 
 export async function completeGdriveAuthFlow(
   targetName: string,
+  rootFolderName?: string,
   storageLimitBytes?: number,
 ): Promise<RemoteTarget> {
   if (!isTauriRuntime) {
@@ -1077,7 +1078,10 @@ export async function completeGdriveAuthFlow(
       backendType: 'google_drive',
       storageLimitBytes: storageLimitBytes ?? null,
       isEnabled: true,
-      configJson: '{}',
+      configJson: JSON.stringify({
+        clientId: 'preview',
+        rootFolderName: rootFolderName?.trim() || 'Aria',
+      }),
     };
     previewBootstrap = {
       ...previewBootstrap,
@@ -1087,6 +1091,7 @@ export async function completeGdriveAuthFlow(
   }
   return invoke<RemoteTarget>('complete_gdrive_auth_flow', {
     targetName,
+    rootFolderName: rootFolderName?.trim() || 'Aria',
     storageLimitBytes: storageLimitBytes ?? null,
   });
 }
@@ -1137,6 +1142,14 @@ export async function clearRemoteCache(): Promise<void> {
     return;
   }
   return invoke<void>('clear_remote_cache');
+}
+
+export async function openUrl(url: string): Promise<void> {
+  if (!isTauriRuntime) {
+    window.open(url, '_blank');
+    return;
+  }
+  return invoke<void>('open_url', { url });
 }
 
 function stringifyDebugError(error: unknown): string {

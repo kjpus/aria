@@ -29,9 +29,23 @@ fn default_root_folder() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct FilesystemConfig {
-    pub path: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub root_path: Option<String>,
+    #[serde(default, rename = "rootPath")]
+    pub root_path_camel: Option<String>,
+}
+
+impl FilesystemConfig {
+    pub fn resolved_path(&self) -> String {
+        self.path
+            .clone()
+            .or_else(|| self.root_path.clone())
+            .or_else(|| self.root_path_camel.clone())
+            .unwrap_or_default()
+    }
 }
 
 /// Constructs the appropriate `RemoteStorageBackend` instance from a `RemoteTarget` specification.
@@ -72,11 +86,50 @@ pub fn create_backend_for_target(
         }
         RemoteBackendType::Filesystem => {
             let path_str = if let Ok(cfg) = serde_json::from_str::<FilesystemConfig>(&target.config_json) {
-                cfg.path
+                let resolved = cfg.resolved_path();
+                if resolved.is_empty() {
+                    target.config_json.clone()
+                } else {
+                    resolved
+                }
+            } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&target.config_json) {
+                if let Some(s) = val.as_str() {
+                    s.to_string()
+                } else {
+                    target.config_json.clone()
+                }
             } else {
                 target.config_json.clone()
             };
             Ok(Arc::new(FilesystemBackend::new(PathBuf::from(path_str))))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_filesystem_config_deserialization_tolerant() {
+        // Both path and root_path present (previously caused Serde duplicate field error)
+        let json_both = r#"{"path":"\\\\nas\\usbshare1\\Aria","root_path":"\\\\nas\\usbshare1\\Aria"}"#;
+        let cfg: FilesystemConfig = serde_json::from_str(json_both).expect("deserialize both");
+        assert_eq!(cfg.resolved_path(), r"\\nas\usbshare1\Aria");
+
+        // Only path
+        let json_path = r#"{"path":"D:\\Music"}"#;
+        let cfg: FilesystemConfig = serde_json::from_str(json_path).expect("deserialize path");
+        assert_eq!(cfg.resolved_path(), r"D:\Music");
+
+        // Only root_path
+        let json_root = r#"{"root_path":"D:\\Music"}"#;
+        let cfg: FilesystemConfig = serde_json::from_str(json_root).expect("deserialize root_path");
+        assert_eq!(cfg.resolved_path(), r"D:\Music");
+
+        // camelCase rootPath
+        let json_camel = r#"{"rootPath":"D:\\Music"}"#;
+        let cfg: FilesystemConfig = serde_json::from_str(json_camel).expect("deserialize rootPath");
+        assert_eq!(cfg.resolved_path(), r"D:\Music");
     }
 }

@@ -32,6 +32,14 @@ pub enum RemoteEvent {
     UploadProgress(UploadProgressEvent),
     UploadCompleted(UploadCompletedEvent),
     CachePrefetchProgress(CachePrefetchEvent),
+    GoogleAuthCompleted(GoogleAuthCompletedEvent),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleAuthCompletedEvent {
+    pub success: bool,
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

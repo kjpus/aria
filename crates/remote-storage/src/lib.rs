@@ -17,7 +17,7 @@ pub use pipeline::{upload_album, UploadOptions};
 pub use backends::{
     generate_pkce_challenge, generate_pkce_verifier, refresh_access_token, FilesystemBackend,
     GoogleAuthConfig, GoogleDriveBackend, GoogleTokens, PendingAuthFlow, SmbBackend, SmbConfig,
-    WebDavBackend, WebDavConfig,
+    WebDavBackend, WebDavConfig, DEFAULT_GOOGLE_CLIENT_ID,
 };
 pub use error::RemoteStorageError;
 pub use quota::{ensure_within_quota, evaluate_quota, QuotaCheckResult};

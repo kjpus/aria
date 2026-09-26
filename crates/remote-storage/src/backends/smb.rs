@@ -10,33 +10,93 @@ use crate::traits::RemoteStorageBackend;
 use crate::types::{RemoteFileRef, StorageStatus, StorageUsage, TransferProgress};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub struct SmbConfig {
+    #[serde(default)]
     pub server: String,
+    #[serde(default)]
     pub share: String,
+    #[serde(default, rename = "sharePath")]
+    pub share_path: Option<String>,
+    #[serde(default, rename = "share_path")]
+    pub share_path_snake: Option<String>,
+    #[serde(default)]
     pub username: Option<String>,
+    #[serde(default)]
     pub password: Option<String>,
+    #[serde(default)]
     pub domain: Option<String>,
+    #[serde(default)]
     pub port: Option<u16>,
+}
+
+impl SmbConfig {
+    pub fn get_share_path(&self) -> Option<&str> {
+        self.share_path
+            .as_deref()
+            .or(self.share_path_snake.as_deref())
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct SmbBackend {
     config: SmbConfig,
+    share_root: String,
     unc_path: PathBuf,
     fs_backend: FilesystemBackend,
 }
 
 impl SmbBackend {
-    pub fn new(config: SmbConfig) -> Self {
+    pub fn new(mut config: SmbConfig) -> Self {
+        if config.server.trim().is_empty() {
+            if let Some(path) = config.get_share_path().map(|s| s.to_string()) {
+                let trimmed = path
+                    .trim()
+                    .trim_start_matches("smb://")
+                    .trim_start_matches(['\\', '/']);
+                if let Some((srv, sh)) = trimmed.split_once(['\\', '/']) {
+                    config.server = srv.to_string();
+                    config.share = sh.trim_end_matches(['\\', '/']).to_string();
+                } else {
+                    config.server = trimmed.to_string();
+                }
+            }
+        }
+
+        if config.port.is_none() && config.server.contains(':') {
+            if let Some((host, port_str)) = config.server.split_once(':') {
+                if let Ok(p) = port_str.parse::<u16>() {
+                    config.port = Some(p);
+                    config.server = host.to_string();
+                }
+            }
+        }
+
         let server = config.server.trim().trim_start_matches(['\\', '/']);
-        let share = config.share.trim().trim_matches(['\\', '/']);
-        let unc_str = format!("\\\\{}\\{}", server, share);
+        let share_full = config.share.trim().trim_matches(['\\', '/']);
+
+        // Split share_full into primary share name (e.g. "usbshare1") and optional subfolder (e.g. "Music/Classical")
+        let (primary_share, _) = match share_full.split_once(['\\', '/']) {
+            Some((first, rest)) => (first, Some(rest)),
+            None => (share_full, None),
+        };
+
+        let share_root = if primary_share.is_empty() {
+            format!("\\\\{}", server)
+        } else {
+            format!("\\\\{}\\{}", server, primary_share)
+        };
+
+        let unc_str = if share_full.is_empty() {
+            format!("\\\\{}", server)
+        } else {
+            format!("\\\\{}\\{}", server, share_full)
+        };
         let unc_path = PathBuf::from(&unc_str);
         let fs_backend = FilesystemBackend::new(&unc_path);
 
         Self {
             config,
+            share_root,
             unc_path,
             fs_backend,
         }
@@ -44,6 +104,10 @@ impl SmbBackend {
 
     pub fn unc_path(&self) -> &Path {
         &self.unc_path
+    }
+
+    pub fn share_root(&self) -> &str {
+        &self.share_root
     }
 
     /// Authenticates with the remote SMB server using in-app credentials.
@@ -62,15 +126,15 @@ impl SmbBackend {
         .map_err(|_| RemoteStorageError::ConnectionFailed(format!("Connection to {addr} timed out")))?
         .map_err(|e| RemoteStorageError::ConnectionFailed(format!("Cannot reach {addr}: {e}")))?;
 
-        // 2. Windows-native in-app authentication
+        // 2. Windows-native in-app authentication (connecting to the root share)
         #[cfg(target_os = "windows")]
         {
-            let unc_str = self.unc_path.to_string_lossy().to_string();
+            let share_root = self.share_root.clone();
             let username = self.config.username.clone();
             let password = self.config.password.clone();
 
             tokio::task::spawn_blocking(move || {
-                windows_connect_net_resource(&unc_str, username.as_deref(), password.as_deref())
+                windows_connect_net_resource(&share_root, username.as_deref(), password.as_deref())
             })
             .await
             .map_err(|e| RemoteStorageError::ProviderError(format!("Task join error: {e}")))?
@@ -226,6 +290,8 @@ mod tests {
         let config = SmbConfig {
             server: "192.168.1.50".to_string(),
             share: "ClassicalMusic".to_string(),
+            share_path: None,
+            share_path_snake: None,
             username: Some("aria_user".to_string()),
             password: Some("secret".to_string()),
             domain: None,
@@ -236,5 +302,42 @@ mod tests {
             backend.unc_path().to_string_lossy(),
             r"\\192.168.1.50\ClassicalMusic"
         );
+    }
+
+    #[test]
+    fn test_smb_share_path_deserialization_and_parsing() {
+        let json = r#"{"share_path": "\\\\192.168.1.50\\ClassicalMusic", "username": "user"}"#;
+        let config: SmbConfig = serde_json::from_str(json).expect("should deserialize share_path");
+        let backend = SmbBackend::new(config);
+        assert_eq!(
+            backend.unc_path().to_string_lossy(),
+            r"\\192.168.1.50\ClassicalMusic"
+        );
+        assert_eq!(backend.config.server, "192.168.1.50");
+        assert_eq!(backend.config.share, "ClassicalMusic");
+    }
+
+    #[test]
+    fn test_smb_subfolder_on_share_handling() {
+        let json = r#"{"share_path": "\\\\nas\\usbshare1\\Music\\Classical", "username": "user"}"#;
+        let config: SmbConfig = serde_json::from_str(json).expect("should deserialize share_path with subfolder");
+        let backend = SmbBackend::new(config);
+        assert_eq!(
+            backend.unc_path().to_string_lossy(),
+            r"\\nas\usbshare1\Music\Classical"
+        );
+        assert_eq!(backend.share_root(), r"\\nas\usbshare1");
+    }
+
+    #[test]
+    fn test_smb_both_share_path_and_share_path_snake() {
+        let json = r#"{"server":"nas","share":"usbshare1\\aria","sharePath":"\\\\nas\\usbshare1\\aria","share_path":"\\\\nas\\usbshare1\\aria"}"#;
+        let config: SmbConfig = serde_json::from_str(json).expect("should tolerate both sharePath and share_path");
+        let backend = SmbBackend::new(config);
+        assert_eq!(
+            backend.unc_path().to_string_lossy(),
+            r"\\nas\usbshare1\aria"
+        );
+        assert_eq!(backend.share_root(), r"\\nas\usbshare1");
     }
 }

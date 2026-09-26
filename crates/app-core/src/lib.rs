@@ -945,6 +945,38 @@ impl AppCore {
         };
         let flow = PendingAuthFlow::start(auth_config).await?;
         let auth_url = flow.authorization_url.clone();
+        let mut status_rx = flow.subscribe_status();
+        let events = self.events.clone();
+
+        tokio::spawn(async move {
+            loop {
+                if let Some(ref res) = *status_rx.borrow() {
+                    match res {
+                        Ok(_) => {
+                            let _ = events.send(AppEvent::Remote(RemoteEvent::GoogleAuthCompleted(
+                                aria_domain::GoogleAuthCompletedEvent {
+                                    success: true,
+                                    error_message: None,
+                                },
+                            )));
+                        }
+                        Err(err) => {
+                            let _ = events.send(AppEvent::Remote(RemoteEvent::GoogleAuthCompleted(
+                                aria_domain::GoogleAuthCompletedEvent {
+                                    success: false,
+                                    error_message: Some(err.clone()),
+                                },
+                            )));
+                        }
+                    }
+                    break;
+                }
+                if status_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
+
         let mut pending = self.pending_gdrive_auth.lock().await;
         *pending = Some(flow);
         Ok(auth_url)
@@ -953,6 +985,7 @@ impl AppCore {
     pub async fn complete_gdrive_auth_flow(
         &self,
         target_name: String,
+        root_folder_name: Option<String>,
         storage_limit_bytes: Option<u64>,
     ) -> Result<RemoteTarget, AppCoreError> {
         let flow = {
@@ -962,14 +995,21 @@ impl AppCore {
                 .ok_or_else(|| AppCoreError::Remote("No pending Google Drive auth flow".into()))?
         };
 
+        let client_id = flow.config().client_id.clone();
+        let client_secret = flow.config().client_secret.clone();
         let tokens = flow.wait_for_tokens().await?;
+        let root_folder = root_folder_name
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Aria".to_string());
+
         let stored_cfg = GoogleDriveStoredConfig {
-            client_id: "from_oauth".to_string(),
-            client_secret: None,
+            client_id,
+            client_secret,
             access_token: Some(tokens.access_token),
             refresh_token: tokens.refresh_token,
             expires_at: Some(tokens.expires_at),
-            root_folder_name: "Aria".to_string(),
+            root_folder_name: root_folder,
         };
 
         let target = RemoteTarget {

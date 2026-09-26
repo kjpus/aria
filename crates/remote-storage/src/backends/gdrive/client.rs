@@ -85,9 +85,10 @@ impl GoogleDriveBackend {
         Ok(tokens_guard.access_token.clone())
     }
 
-    /// Resolves or creates the top-level "Aria" root folder on Google Drive.
+    /// Resolves or creates the configured root folder on Google Drive (default "Aria").
+    /// Supports nested paths like "Music/Aria" or simple folder names like "Aria".
     async fn get_or_create_root_folder(&self) -> Result<String, RemoteStorageError> {
-        let cache_key = "__ARIA_ROOT__".to_string();
+        let cache_key = format!("__ROOT__{}", self.root_folder_name);
         {
             let cache = self.folder_id_cache.read().await;
             if let Some(id) = cache.get(&cache_key) {
@@ -95,70 +96,120 @@ impl GoogleDriveBackend {
             }
         }
 
-        let token = self.get_access_token().await?;
-        let query = format!(
-            "name = '{}' and 'root' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
-            self.root_folder_name
-        );
+        let segments: Vec<&str> = self
+            .root_folder_name
+            .split(['/', '\\'])
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
 
-        let url = format!("{DRIVE_API_BASE}/files?q={}&fields=files(id,name)", urlencoding(&query));
-        let res = self
-            .client
-            .get(&url)
-            .bearer_auth(&token)
-            .send()
-            .await
-            .map_err(|e| RemoteStorageError::ConnectionFailed(e.to_string()))?;
-
-        if !res.status().is_success() {
-            return Err(RemoteStorageError::ProviderError(format!(
-                "Failed to query root folder: {}",
-                res.status()
-            )));
+        if segments.is_empty() {
+            return Err(RemoteStorageError::ProviderError(
+                "Google Drive root folder name cannot be empty".into(),
+            ));
         }
 
-        let list: DriveFileList = res
-            .json()
-            .await
-            .map_err(|e| RemoteStorageError::Serialization(e.to_string()))?;
+        let token = self.get_access_token().await?;
+        let mut parent_id: Option<String> = None;
+        let mut accumulated_path = String::new();
 
-        let root_id = if let Some(first) = list.files.into_iter().next() {
-            first.id
-        } else {
-            // Create root folder
-            let create_url = format!("{DRIVE_API_BASE}/files");
-            let body = serde_json::json!({
-                "name": self.root_folder_name,
-                "mimeType": "application/vnd.google-apps.folder",
-                "parents": ["root"]
-            });
-
-            let create_res = self
-                .client
-                .post(&create_url)
-                .bearer_auth(&token)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| RemoteStorageError::ConnectionFailed(e.to_string()))?;
-
-            if !create_res.status().is_success() {
-                return Err(RemoteStorageError::ProviderError(format!(
-                    "Failed to create root folder: {}",
-                    create_res.status()
-                )));
+        for segment in segments {
+            if !accumulated_path.is_empty() {
+                accumulated_path.push('/');
             }
+            accumulated_path.push_str(segment);
 
-            let entry: DriveFileEntry = create_res
-                .json()
-                .await
-                .map_err(|e| RemoteStorageError::Serialization(e.to_string()))?;
-            entry.id
-        };
+            let segment_cache_key = format!("__ROOT__{accumulated_path}");
+            let cached_id = {
+                let cache = self.folder_id_cache.read().await;
+                cache.get(&segment_cache_key).cloned()
+            };
+
+            let folder_id = match cached_id {
+                Some(id) => id,
+                None => {
+                    let query = if let Some(ref pid) = parent_id {
+                        format!(
+                            "name = '{}' and '{}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+                            segment.replace('\'', "\\'"),
+                            pid
+                        )
+                    } else {
+                        // Top level folder: under drive.file scope, do not query 'root' in parents
+                        format!(
+                            "name = '{}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+                            segment.replace('\'', "\\'")
+                        )
+                    };
+
+                    let url = format!("{DRIVE_API_BASE}/files?q={}&fields=files(id,name)", urlencoding(&query));
+                    let res = self
+                        .client
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .send()
+                        .await
+                        .map_err(|e| RemoteStorageError::ConnectionFailed(e.to_string()))?;
+
+                    let list: DriveFileList = if res.status().is_success() {
+                        res.json().await.unwrap_or(DriveFileList { files: Vec::new() })
+                    } else {
+                        DriveFileList { files: Vec::new() }
+                    };
+
+                    let found_id = if let Some(f) = list.files.into_iter().next() {
+                        f.id
+                    } else {
+                        let create_url = format!("{DRIVE_API_BASE}/files");
+                        let mut body_map = serde_json::Map::new();
+                        body_map.insert("name".to_string(), serde_json::Value::String(segment.to_string()));
+                        body_map.insert(
+                            "mimeType".to_string(),
+                            serde_json::Value::String("application/vnd.google-apps.folder".to_string()),
+                        );
+                        if let Some(ref pid) = parent_id {
+                            body_map.insert("parents".to_string(), serde_json::json!([pid]));
+                        }
+
+                        let create_res = self
+                            .client
+                            .post(&create_url)
+                            .bearer_auth(&token)
+                            .json(&serde_json::Value::Object(body_map))
+                            .send()
+                            .await
+                            .map_err(|e| RemoteStorageError::ConnectionFailed(e.to_string()))?;
+
+                        if !create_res.status().is_success() {
+                            return Err(RemoteStorageError::ProviderError(format!(
+                                "Failed to create folder '{segment}': {}",
+                                create_res.status()
+                            )));
+                        }
+
+                        let entry: DriveFileEntry = create_res
+                            .json()
+                            .await
+                            .map_err(|e| RemoteStorageError::Serialization(e.to_string()))?;
+                        entry.id
+                    };
+
+                    let mut cache = self.folder_id_cache.write().await;
+                    cache.insert(segment_cache_key, found_id.clone());
+                    found_id
+                }
+            };
+
+            parent_id = Some(folder_id);
+        }
+
+        let final_root_id = parent_id.ok_or_else(|| {
+            RemoteStorageError::ProviderError("Failed to determine Google Drive root folder".into())
+        })?;
 
         let mut cache = self.folder_id_cache.write().await;
-        cache.insert(cache_key, root_id.clone());
-        Ok(root_id)
+        cache.insert(cache_key, final_root_id.clone());
+        Ok(final_root_id)
     }
 
     /// Resolves a folder ID within a parent folder, creating it if it does not exist.
@@ -284,7 +335,6 @@ fn urlencoding(s: &str) -> String {
             b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(b as char);
             }
-            b' ' => out.push('+'),
             _ => {
                 use std::fmt::Write;
                 let _ = write!(out, "%{:02X}", b);

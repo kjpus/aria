@@ -46,7 +46,7 @@ impl PlaybackPrefetcher {
     ) -> Self {
         let (command_tx, mut command_rx) = mpsc::channel::<PrefetchCommand>(32);
 
-        tokio::spawn(async move {
+        let worker = async move {
             while let Some(command) = command_rx.recv().await {
                 match command {
                     PrefetchCommand::PrefetchTracks {
@@ -167,7 +167,22 @@ impl PlaybackPrefetcher {
                     }
                 }
             }
-        });
+        };
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(worker);
+        } else {
+            std::thread::Builder::new()
+                .name("aria-prefetcher".into())
+                .spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .expect("failed to create aria-prefetcher runtime");
+                    runtime.block_on(worker);
+                })
+                .expect("failed to spawn aria-prefetcher thread");
+        }
 
         Self { command_tx }
     }

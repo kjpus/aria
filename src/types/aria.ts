@@ -237,6 +237,11 @@ export type CachePrefetchEvent = {
   errorMessage: string | null;
 };
 
+export type GoogleAuthCompletedEvent = {
+  success: boolean;
+  errorMessage: string | null;
+};
+
 export type RemoteEvent =
   | {
       kind: 'targets_changed';
@@ -253,6 +258,10 @@ export type RemoteEvent =
   | {
       kind: 'cache_prefetch_progress';
       payload: CachePrefetchEvent;
+    }
+  | {
+      kind: 'google_auth_completed';
+      payload: GoogleAuthCompletedEvent;
     };
 
 export type AppBootstrap = {

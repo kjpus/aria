@@ -34,6 +34,7 @@ pub fn run() {
             commands::system::bootstrap,
             commands::system::pick_directory,
             commands::system::open_directory,
+            commands::system::open_url,
             commands::system::show_in_explorer,
             commands::system::debug_log,
             commands::library::add_library_root,
