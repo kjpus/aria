@@ -1890,6 +1890,7 @@ button:disabled {
 
 .player-bar__identity {
   min-width: 0;
+  max-width: 100%;
   justify-self: start;
 }
 
@@ -1945,19 +1946,46 @@ button:disabled {
   display: grid;
   gap: 0.1rem;
   min-width: 0;
+  max-width: 100%;
+  flex: 1 1 auto;
+}
+
+.player-bar__title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .player-bar__meta .hover-scroll {
   max-width: 100%;
+  min-width: 0;
 }
 
 .player-bar__title {
   font-size: 0.9rem;
   font-weight: 700;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.player-bar__buffering-badge {
+  font-size: 0.68rem;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(230, 160, 40, 0.2);
+  color: #e6a028;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  flex: none;
 }
 
 .player-bar__subtitle {
   font-size: 0.76rem;
+  min-width: 0;
 }
 
 .player-bar__subtitle,
@@ -1970,7 +1998,7 @@ button:disabled {
   display: flex;
   gap: 0.35rem;
   align-items: center;
-  margin-left: 0.82rem;
+  flex: none;
 }
 
 .player-bar__rating-button {

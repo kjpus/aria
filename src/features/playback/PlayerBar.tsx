@@ -190,22 +190,10 @@ export function PlayerBar({
           </div>
         )}
         <div className="player-bar__meta">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+          <div className="player-bar__title-row">
             <HoverScrollText className="player-bar__title" speed={42} text={title} />
             {playback.status === 'buffering' ? (
-              <span
-                style={{
-                  fontSize: '0.68rem',
-                  padding: '1px 6px',
-                  borderRadius: '4px',
-                  background: 'rgba(230, 160, 40, 0.2)',
-                  color: '#e6a028',
-                  fontWeight: 600,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.04em',
-                  whiteSpace: 'nowrap',
-                }}
-              >
+              <span className="player-bar__buffering-badge">
                 Buffering
               </span>
             ) : null}
