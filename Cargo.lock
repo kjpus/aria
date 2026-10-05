@@ -71,7 +71,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "aria"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aria-app-core",
  "aria-domain",
@@ -86,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "aria-app-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aria-domain",
  "aria-library",
@@ -102,18 +102,18 @@ dependencies = [
 
 [[package]]
 name = "aria-artwork"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "aria-domain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "aria-library"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aria-domain",
  "chrono",
@@ -129,14 +129,14 @@ dependencies = [
 
 [[package]]
 name = "aria-platform-audio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aria-domain",
 ]
 
 [[package]]
 name = "aria-playback"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aria-domain",
  "rand 0.8.5",
@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "aria-playlists"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aria-domain",
  "chrono",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "aria-remote-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aria-domain",
  "aria-library",
@@ -180,11 +180,11 @@ dependencies = [
 
 [[package]]
 name = "aria-search"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "aria-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aria-domain",
  "dirs",

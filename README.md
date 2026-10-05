@@ -107,8 +107,8 @@ Typical Windows outputs:
 
 The exact installer filenames depend on the host toolchain and Tauri bundler, but on Windows you should expect artifacts such as:
 
-- `msi\Aria_0.1.0_x64_en-US.msi`
-- `nsis\Aria_0.1.0_x64-setup.exe`
+- `msi\Aria_0.2.0_x64_en-US.msi`
+- `nsis\Aria_0.2.0_x64-setup.exe`
 
 If you only want to test the optimized app locally, you can launch the release executable directly. If you want something to hand to another user, use the installer from the `bundle` directory.
 
