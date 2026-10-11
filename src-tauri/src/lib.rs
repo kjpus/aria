@@ -83,7 +83,9 @@ pub fn run() {
             commands::remote::delete_album_from_target,
             commands::remote::get_remote_synced_items,
             commands::remote::get_remote_cache_status,
-            commands::remote::clear_remote_cache
+            commands::remote::clear_remote_cache,
+            commands::remote::sync_remote_target,
+            commands::remote::sync_all_remote_targets
         ])
         .build(tauri::generate_context!())
         .expect("error while building aria")

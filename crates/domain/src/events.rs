@@ -33,6 +33,8 @@ pub enum RemoteEvent {
     UploadCompleted(UploadCompletedEvent),
     CachePrefetchProgress(CachePrefetchEvent),
     GoogleAuthCompleted(GoogleAuthCompletedEvent),
+    SyncProgress(RemoteSyncProgressEvent),
+    SyncCompleted(RemoteSyncCompletedEvent),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -75,6 +77,28 @@ pub struct UploadCompletedEvent {
     pub target_id: String,
     pub album_id: String,
     pub album_title: String,
+    pub success: bool,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSyncProgressEvent {
+    pub target_id: String,
+    pub target_name: String,
+    pub current_album: String,
+    pub completed_albums: usize,
+    pub total_albums: usize,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSyncCompletedEvent {
+    pub target_id: String,
+    pub target_name: String,
+    pub new_albums_count: usize,
+    pub new_tracks_count: usize,
     pub success: bool,
     pub error_message: Option<String>,
 }

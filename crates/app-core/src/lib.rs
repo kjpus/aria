@@ -2,20 +2,20 @@ use aria_domain::{
     AppBootstrap, AppEvent, CatalogRule, FieldExportRequest, LibraryEvent, LibraryFieldMapping,
     LibrarySnapshot, OutputDeviceSnapshot, PlayTrackRequest, PlaybackEvent, PlaybackPreferences,
     PlaybackSessionSnapshot, PlaybackSnapshot, PlaybackStatus, PlaylistEvent, PlaylistImportPreview,
-    PlaylistSnapshot, PreviewTrack, RemoteBackendType, RemoteEvent, RemoteSyncedItem, RemoteTarget,
-    ScannedTrack, SettingsSnapshot, ThemePreference, TrackTableSettings, TrackTagEditRequest,
-    UploadCompletedEvent,
+    PlaylistSnapshot, PreviewTrack, RemoteBackendType, RemoteEvent, RemoteSyncCompletedEvent,
+    RemoteSyncedItem, RemoteTarget, ScannedTrack, SettingsSnapshot,
+    ThemePreference, TrackTableSettings, TrackTagEditRequest, UploadCompletedEvent,
 };
 use aria_library::{LibraryError, LibraryService};
 use aria_playback::{PlaybackError, PlaybackService};
 use aria_playlists::{PlaylistError, PlaylistService};
 use aria_remote_storage::{
-    create_backend_for_target, upload_album, GoogleAuthConfig, GoogleDriveStoredConfig,
-    PathUpdater, PendingAuthFlow, PlaybackPrefetcher, PrefetchCandidate, RemoteCacheManager,
-    RemoteCacheStatus, RemoteStorageError, StorageStatus, UploadOptions,
+    create_backend_for_target, sync_remote_library, upload_album, GoogleAuthConfig,
+    GoogleDriveStoredConfig, PathUpdater, PendingAuthFlow, PlaybackPrefetcher, PrefetchCandidate,
+    RemoteCacheManager, RemoteCacheStatus, RemoteStorageError, StorageStatus, UploadOptions,
 };
 use aria_storage::{AppDatabase, SettingsStore, StorageError};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{broadcast, Mutex};
@@ -92,6 +92,7 @@ impl AppCore {
         core.spawn_persistence_worker(database);
         core.spawn_playback_publisher();
         core.spawn_output_device_monitor();
+        core.spawn_remote_sync_worker();
         Ok(core)
     }
 
@@ -810,6 +811,16 @@ impl AppCore {
             .expect("failed to spawn aria-persistence worker");
     }
 
+    fn spawn_remote_sync_worker(&self) {
+        let core = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+            if let Err(e) = core.sync_all_remote_targets().await {
+                tracing::warn!("Automatic remote targets startup sync encountered error: {e}");
+            }
+        });
+    }
+
     fn spawn_playback_publisher(&self) {
         let playback = self.playback.clone();
         let events = self.events.clone();
@@ -911,14 +922,24 @@ impl AppCore {
     }
 
     pub fn save_remote_target(&self, target: RemoteTarget) -> Result<Vec<RemoteTarget>, AppCoreError> {
+        let is_enabled = target.is_enabled;
+        let target_id = target.id.clone();
         self.database.save_remote_target(&target)?;
         let targets = self.database.load_remote_targets()?;
         let _ = self.events.send(AppEvent::Remote(RemoteEvent::TargetsChanged(targets.clone())));
+        if is_enabled {
+            let core = self.clone();
+            tokio::spawn(async move {
+                let _ = core.sync_remote_target(&target_id).await;
+            });
+        }
         Ok(targets)
     }
 
-    pub fn delete_remote_target(&self, target_id: &str) -> Result<Vec<RemoteTarget>, AppCoreError> {
+    pub async fn delete_remote_target(&self, target_id: &str) -> Result<Vec<RemoteTarget>, AppCoreError> {
         self.database.delete_remote_target(target_id)?;
+        let updated_snapshot = self.library.remove_remote_tracks_for_target(target_id).await;
+        let _ = self.events.send(AppEvent::Library(LibraryEvent::SnapshotChanged(updated_snapshot)));
         let targets = self.database.load_remote_targets()?;
         let _ = self.events.send(AppEvent::Remote(RemoteEvent::TargetsChanged(targets.clone())));
         Ok(targets)
@@ -1158,6 +1179,117 @@ impl AppCore {
     pub async fn clear_remote_cache(&self) -> Result<(), AppCoreError> {
         self.cache_manager.clear().await?;
         Ok(())
+    }
+
+    pub async fn sync_remote_target(
+        &self,
+        target_id: &str,
+    ) -> Result<RemoteSyncCompletedEvent, AppCoreError> {
+        let targets = self.database.load_remote_targets()?;
+        let target = targets
+            .into_iter()
+            .find(|t| t.id == target_id)
+            .ok_or_else(|| AppCoreError::Remote(format!("Target '{target_id}' not found")))?;
+
+        if !target.is_enabled {
+            return Err(AppCoreError::Remote(format!(
+                "Target '{}' is disabled",
+                target.name
+            )));
+        }
+
+        let backend = create_backend_for_target(&target)?;
+        let artwork_cache_dir = self.cache_manager.cache_dir().join("artwork");
+
+        let library_snapshot = self.library.snapshot().await;
+        let existing_ids: HashSet<String> = library_snapshot
+            .tracks
+            .iter()
+            .filter(|t| t.path.starts_with("remote://"))
+            .map(|t| t.id.clone())
+            .collect();
+
+        let (progress_tx, mut progress_rx) = broadcast::channel(64);
+        let events = self.events.clone();
+
+        tokio::spawn(async move {
+            while let Ok(progress) = progress_rx.recv().await {
+                let _ = events.send(AppEvent::Remote(RemoteEvent::SyncProgress(progress)));
+            }
+        });
+
+        match sync_remote_library(
+            backend,
+            &target,
+            &artwork_cache_dir,
+            &existing_ids,
+            Some(progress_tx),
+        )
+        .await
+        {
+            Ok(result) => {
+                // Save synced items to database
+                for item in &result.synced_items {
+                    let _ = self.database.save_remote_synced_item(item);
+                }
+
+                // Merge synced tracks into the library
+                if !result.synced_tracks.is_empty() {
+                    let updated_snapshot = self
+                        .library
+                        .merge_remote_tracks(result.synced_tracks)
+                        .await;
+                    let _ = self.events.send(AppEvent::Library(LibraryEvent::SnapshotChanged(
+                        updated_snapshot,
+                    )));
+                }
+
+                let completed = RemoteSyncCompletedEvent {
+                    target_id: target.id.clone(),
+                    target_name: target.name.clone(),
+                    new_albums_count: result.new_albums_count,
+                    new_tracks_count: result.new_tracks_count,
+                    success: true,
+                    error_message: None,
+                };
+                let _ = self.events.send(AppEvent::Remote(RemoteEvent::SyncCompleted(
+                    completed.clone(),
+                )));
+                Ok(completed)
+            }
+            Err(err) => {
+                let completed = RemoteSyncCompletedEvent {
+                    target_id: target.id.clone(),
+                    target_name: target.name.clone(),
+                    new_albums_count: 0,
+                    new_tracks_count: 0,
+                    success: false,
+                    error_message: Some(err.to_string()),
+                };
+                let _ = self.events.send(AppEvent::Remote(RemoteEvent::SyncCompleted(
+                    completed.clone(),
+                )));
+                Err(AppCoreError::RemoteStorage(err))
+            }
+        }
+    }
+
+    pub async fn sync_all_remote_targets(
+        &self,
+    ) -> Result<Vec<RemoteSyncCompletedEvent>, AppCoreError> {
+        let targets = self.database.load_remote_targets()?;
+        let mut results = Vec::new();
+        for target in targets {
+            if target.is_enabled {
+                match self.sync_remote_target(&target.id).await {
+                    Ok(event) => results.push(event),
+                    Err(e) => {
+                        tracing::warn!("Failed to sync remote target '{}': {e}", target.name);
+                    }
+                }
+            }
+        }
+        Ok(results)
     }
 }
 

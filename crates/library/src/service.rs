@@ -129,6 +129,31 @@ impl LibraryService {
         state.clone()
     }
 
+    pub async fn merge_remote_tracks(&self, remote_tracks: Vec<ScannedTrack>) -> LibrarySnapshot {
+        let mut state = self.state.write().await;
+        for new_track in remote_tracks {
+            if let Some(pos) = state.tracks.iter().position(|t| t.id == new_track.id) {
+                if state.tracks[pos].path.starts_with("remote://") {
+                    state.tracks[pos] = new_track;
+                }
+            } else {
+                state.tracks.push(new_track);
+            }
+        }
+        state.tag_inventory = build_tag_inventory(&state.tracks);
+        state.indexed_files = state.tracks.len() as u64;
+        state.clone()
+    }
+
+    pub async fn remove_remote_tracks_for_target(&self, target_id: &str) -> LibrarySnapshot {
+        let prefix = format!("remote://{target_id}/");
+        let mut state = self.state.write().await;
+        state.tracks.retain(|t| !t.path.starts_with(&prefix));
+        state.tag_inventory = build_tag_inventory(&state.tracks);
+        state.indexed_files = state.tracks.len() as u64;
+        state.clone()
+    }
+
     pub async fn set_field_mappings(&self, mappings: Vec<LibraryFieldMapping>) -> LibrarySnapshot {
         let mut state = self.state.write().await;
         state.field_mappings = mappings
@@ -216,11 +241,28 @@ impl LibraryService {
                 Ok(Ok(artifacts)) => {
                     let completed_snapshot = {
                         let mut state = state.write().await;
+                        let has_remote = state.tracks.iter().any(|t| t.path.starts_with("remote://"));
+                        let (final_tracks, final_inventory, final_count) = if has_remote {
+                            let mut combined_tracks = artifacts.tracks;
+                            for track in &state.tracks {
+                                if track.path.starts_with("remote://")
+                                    && !combined_tracks.iter().any(|t| t.id == track.id)
+                                {
+                                    combined_tracks.push(track.clone());
+                                }
+                            }
+                            let count = combined_tracks.len() as u64;
+                            let inv = build_tag_inventory(&combined_tracks);
+                            (combined_tracks, inv, count)
+                        } else {
+                            (artifacts.tracks, artifacts.tag_inventory, artifacts.indexed_files)
+                        };
+
                         state.is_scanning = false;
-                        state.indexed_files = artifacts.indexed_files;
+                        state.indexed_files = final_count;
                         state.last_scan_at = Some(Utc::now().to_rfc3339());
-                        state.tag_inventory = artifacts.tag_inventory;
-                        state.tracks = artifacts.tracks;
+                        state.tag_inventory = final_inventory;
+                        state.tracks = final_tracks;
                         state.clone()
                     };
 

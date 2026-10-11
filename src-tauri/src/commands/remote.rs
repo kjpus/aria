@@ -24,7 +24,7 @@ pub async fn delete_remote_target(
     state: State<'_, AppState>,
     target_id: String,
 ) -> Result<Vec<RemoteTarget>, CommandError> {
-    Ok(state.core.delete_remote_target(&target_id)?)
+    Ok(state.core.delete_remote_target(&target_id).await?)
 }
 
 #[tauri::command]
@@ -93,4 +93,19 @@ pub async fn clear_remote_cache(
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
     Ok(state.core.clear_remote_cache().await?)
+}
+
+#[tauri::command]
+pub async fn sync_remote_target(
+    state: State<'_, AppState>,
+    target_id: String,
+) -> Result<aria_domain::RemoteSyncCompletedEvent, CommandError> {
+    Ok(state.core.sync_remote_target(&target_id).await?)
+}
+
+#[tauri::command]
+pub async fn sync_all_remote_targets(
+    state: State<'_, AppState>,
+) -> Result<Vec<aria_domain::RemoteSyncCompletedEvent>, CommandError> {
+    Ok(state.core.sync_all_remote_targets().await?)
 }

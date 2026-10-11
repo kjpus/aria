@@ -242,6 +242,24 @@ export type GoogleAuthCompletedEvent = {
   errorMessage: string | null;
 };
 
+export type RemoteSyncProgressEvent = {
+  targetId: string;
+  targetName: string;
+  currentAlbum: string;
+  completedAlbums: number;
+  totalAlbums: number;
+  status: string;
+};
+
+export type RemoteSyncCompletedEvent = {
+  targetId: string;
+  targetName: string;
+  newAlbumsCount: number;
+  newTracksCount: number;
+  success: boolean;
+  errorMessage: string | null;
+};
+
 export type RemoteEvent =
   | {
       kind: 'targets_changed';
@@ -262,6 +280,14 @@ export type RemoteEvent =
   | {
       kind: 'google_auth_completed';
       payload: GoogleAuthCompletedEvent;
+    }
+  | {
+      kind: 'sync_progress';
+      payload: RemoteSyncProgressEvent;
+    }
+  | {
+      kind: 'sync_completed';
+      payload: RemoteSyncCompletedEvent;
     };
 
 export type AppBootstrap = {

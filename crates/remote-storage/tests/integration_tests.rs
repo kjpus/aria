@@ -125,3 +125,114 @@ async fn test_full_remote_album_upload_and_master_index_lifecycle() {
     // 11. Cleanup test files
     let _ = tokio::fs::remove_dir_all(&temp_root).await;
 }
+
+#[tokio::test]
+async fn test_sync_remote_library_full_pipeline() {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use aria_domain::{RemoteBackendType, RemoteTarget};
+    use aria_remote_storage::{sync_remote_library, upload_album, UploadOptions};
+
+    let temp_root = std::env::temp_dir().join(format!("aria_sync_test_{}", std::process::id()));
+    let artwork_cache_dir = temp_root.join("local_artwork");
+    let dummy_audio_dir = temp_root.join("source_music");
+    tokio::fs::create_dir_all(&dummy_audio_dir).await.expect("create audio dir");
+
+    let backend = Arc::new(FilesystemBackend::new(&temp_root.join("remote_store")));
+
+    let target = RemoteTarget {
+        id: "target_test_1".to_string(),
+        name: "Test Remote Store".to_string(),
+        backend_type: RemoteBackendType::Filesystem,
+        storage_limit_bytes: None,
+        is_enabled: true,
+        config_json: String::new(),
+    };
+
+    // 1. Prepare dummy audio and cover files
+    let dummy_audio_file = dummy_audio_dir.join("track1.flac");
+    tokio::fs::write(&dummy_audio_file, b"MOCK_FLAC_STREAM_DATA").await.expect("write audio");
+    let dummy_cover_file = dummy_audio_dir.join("cover.jpg");
+    tokio::fs::write(&dummy_cover_file, b"MOCK_COVER_JPEG").await.expect("write cover");
+
+    let mut mapped = BTreeMap::new();
+    mapped.insert("composer".to_string(), vec!["Ludwig van Beethoven".to_string()]);
+    mapped.insert("album".to_string(), vec!["Symphony No. 5 in C minor, Op. 67".to_string()]);
+    mapped.insert("title".to_string(), vec!["I. Allegro con brio".to_string()]);
+    mapped.insert("track_number".to_string(), vec!["1".to_string()]);
+
+    let track = ScannedTrack {
+        id: "track_lvb_5_1".to_string(),
+        path: dummy_audio_file.to_string_lossy().to_string(),
+        file_name: "track1.flac".to_string(),
+        album_art_path: Some(dummy_cover_file.to_string_lossy().to_string()),
+        audio: AudioPropertiesSnapshot {
+            format: "FLAC".to_string(),
+            duration_ms: 450_000,
+            sample_rate: Some(44100),
+            bit_depth: Some(16),
+            channels: Some(2),
+        },
+        raw_tags: BTreeMap::new(),
+        mapped_fields: mapped,
+    };
+
+    // 2. Upload album from computer 1
+    let upload_options = UploadOptions {
+        compute_checksums: false,
+        current_target_usage_bytes: 0,
+    };
+    let upload_res = upload_album(
+        backend.clone(),
+        &target,
+        "Symphony No. 5 in C minor, Op. 67",
+        &[track],
+        upload_options,
+        None,
+    )
+    .await
+    .expect("upload album");
+    assert!(!upload_res.is_empty());
+
+    // 3. Now simulate computer 2 syncing the remote library
+    let mut known_tracks = HashSet::new();
+    let sync_res = sync_remote_library(
+        backend.clone(),
+        &target,
+        &artwork_cache_dir,
+        &known_tracks,
+        None,
+    )
+    .await
+    .expect("sync remote library");
+
+    assert_eq!(sync_res.new_albums_count, 1);
+    assert_eq!(sync_res.new_tracks_count, 1);
+    assert_eq!(sync_res.synced_tracks.len(), 1);
+    assert!(sync_res.synced_tracks[0].path.starts_with("remote://target_test_1/"));
+    assert_eq!(sync_res.synced_tracks[0].mapped_fields["composer"][0], "Ludwig van Beethoven");
+
+    // Verify cover art was cached locally
+    assert!(sync_res.synced_tracks[0].album_art_path.is_some());
+    let cached_art = std::path::Path::new(sync_res.synced_tracks[0].album_art_path.as_ref().unwrap());
+    assert!(cached_art.exists(), "cached artwork should exist on disk");
+
+    // 4. Test syncing again when tracks are already known: should return 0 new
+    for t in &sync_res.synced_tracks {
+        known_tracks.insert(t.id.clone());
+    }
+    let sync_res_again = sync_remote_library(
+        backend.clone(),
+        &target,
+        &artwork_cache_dir,
+        &known_tracks,
+        None,
+    )
+    .await
+    .expect("sync again");
+    assert_eq!(sync_res_again.new_albums_count, 0);
+    assert_eq!(sync_res_again.new_tracks_count, 0);
+
+    // 5. Cleanup
+    let _ = tokio::fs::remove_dir_all(&temp_root).await;
+}

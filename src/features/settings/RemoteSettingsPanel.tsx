@@ -9,6 +9,8 @@ import {
   startGdriveAuthFlow,
   completeGdriveAuthFlow,
   openUrl,
+  syncRemoteTarget,
+  syncAllRemoteTargets,
   testRemoteTarget,
   listenToAppEvents,
 } from '../../lib/aria';
@@ -29,10 +31,90 @@ export function RemoteSettingsPanel({
   const [actionError, setActionError] = useState<string | null>(null);
   const [cacheStatus, setCacheStatus] = useState<RemoteCacheStatus | null>(null);
   const [isClearing, setIsClearing] = useState(false);
+  const [syncingTargetIds, setSyncingTargetIds] = useState<Set<string>>(new Set());
+  const [isSyncingAll, setIsSyncingAll] = useState(false);
+  const [syncStatusMessages, setSyncStatusMessages] = useState<Record<string, string>>({});
+  const [syncBanner, setSyncBanner] = useState<string | null>(null);
 
   useEffect(() => {
     getRemoteCacheStatus().then(setCacheStatus).catch(console.error);
+
+    let unlisten: (() => void) | undefined;
+    listenToAppEvents((event) => {
+      if (event.topic === 'remote') {
+        if (event.payload.kind === 'sync_progress') {
+          const payload = event.payload.payload;
+          setSyncStatusMessages((prev) => ({
+            ...prev,
+            [payload.targetId]: `Syncing (${payload.completedAlbums}/${payload.totalAlbums}): ${payload.currentAlbum || payload.status}`,
+          }));
+        } else if (event.payload.kind === 'sync_completed') {
+          const payload = event.payload.payload;
+          setSyncingTargetIds((prev) => {
+            const next = new Set(prev);
+            next.delete(payload.targetId);
+            return next;
+          });
+          setSyncStatusMessages((prev) => {
+            const next = { ...prev };
+            delete next[payload.targetId];
+            return next;
+          });
+          if (payload.success) {
+            setSyncBanner(
+              `✓ ${payload.targetName}: synced ${payload.newAlbumsCount} new album(s) (${payload.newTracksCount} track(s))`
+            );
+          } else {
+            setActionError(`Sync failed for ${payload.targetName}: ${payload.errorMessage ?? 'Unknown error'}`);
+          }
+        }
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      unlisten?.();
+    };
   }, []);
+
+  async function handleSync(targetId: string) {
+    setSyncingTargetIds((prev) => new Set(prev).add(targetId));
+    setActionError(null);
+    setSyncBanner(null);
+    try {
+      const result = await syncRemoteTarget(targetId);
+      if (result.success) {
+        setSyncBanner(
+          `✓ ${result.targetName}: synced ${result.newAlbumsCount} new album(s) (${result.newTracksCount} track(s))`
+        );
+      }
+    } catch (err) {
+      setActionError(`Sync error: ${String(err)}`);
+    } finally {
+      setSyncingTargetIds((prev) => {
+        const next = new Set(prev);
+        next.delete(targetId);
+        return next;
+      });
+    }
+  }
+
+  async function handleSyncAll() {
+    setIsSyncingAll(true);
+    setActionError(null);
+    setSyncBanner(null);
+    try {
+      const results = await syncAllRemoteTargets();
+      const totalAlbums = results.reduce((acc, r) => acc + r.newAlbumsCount, 0);
+      const totalTracks = results.reduce((acc, r) => acc + r.newTracksCount, 0);
+      setSyncBanner(`✓ Completed remote sync: ${totalAlbums} new album(s) (${totalTracks} track(s)) imported`);
+    } catch (err) {
+      setActionError(`Sync All error: ${String(err)}`);
+    } finally {
+      setIsSyncingAll(false);
+    }
+  }
 
   async function handleClearCache() {
     if (!confirm('Are you sure you want to clear all cached audio files from disk?')) {
@@ -95,19 +177,57 @@ export function RemoteSettingsPanel({
         eyebrow="Cloud & Remote"
         title="Remote storage targets"
         actions={
-          <button
-            className="ghost-button"
-            onClick={() => setIsAddDialogOpen(true)}
-            type="button"
-          >
-            Add remote
-          </button>
+          <div style={{ display: 'flex', gap: '0.4rem' }}>
+            {targets.some((t) => t.isEnabled) ? (
+              <button
+                className="ghost-button"
+                disabled={isSyncingAll || syncingTargetIds.size > 0}
+                onClick={() => void handleSyncAll()}
+                type="button"
+              >
+                {isSyncingAll ? 'Syncing all...' : 'Sync all remotes'}
+              </button>
+            ) : null}
+            <button
+              className="ghost-button"
+              onClick={() => setIsAddDialogOpen(true)}
+              type="button"
+            >
+              Add remote
+            </button>
+          </div>
         }
       >
         <p className="panel-copy">
           Configure remote storage targets (Google Drive, SMB network share, WebDAV, or local/mounted filesystem)
           to upload albums with pre-extracted classical manifests and library master indexes.
         </p>
+
+        {syncBanner ? (
+          <div
+            style={{
+              padding: '0.6rem 0.8rem',
+              borderRadius: '6px',
+              background: 'rgba(76, 175, 80, 0.15)',
+              color: '#81c784',
+              fontSize: '0.85rem',
+              marginBottom: '1rem',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            }}
+          >
+            <span>{syncBanner}</span>
+            <button
+              className="ghost-button"
+              onClick={() => setSyncBanner(null)}
+              style={{ fontSize: '0.75rem', padding: '2px 6px', height: 'auto' }}
+              type="button"
+            >
+              ✕
+            </button>
+          </div>
+        ) : null}
 
         {actionError ? (
           <div className="error-banner" style={{ marginBottom: '1rem' }}>
@@ -173,6 +293,15 @@ export function RemoteSettingsPanel({
                     <div style={{ display: 'flex', gap: '0.4rem' }}>
                       <button
                         className="ghost-button"
+                        disabled={syncingTargetIds.has(target.id) || !target.isEnabled}
+                        onClick={() => void handleSync(target.id)}
+                        style={{ fontSize: '0.8rem', padding: '2px 8px' }}
+                        type="button"
+                      >
+                        {syncingTargetIds.has(target.id) ? 'Syncing...' : 'Sync'}
+                      </button>
+                      <button
+                        className="ghost-button"
                         onClick={() => setEditingTarget(target)}
                         style={{ fontSize: '0.8rem', padding: '2px 8px' }}
                         type="button"
@@ -206,6 +335,21 @@ export function RemoteSettingsPanel({
                       </button>
                     </div>
                   </div>
+
+                  {syncStatusMessages[target.id] ? (
+                    <div
+                      style={{
+                        marginBottom: '0.4rem',
+                        fontSize: '0.8rem',
+                        padding: '0.3rem 0.5rem',
+                        borderRadius: '4px',
+                        background: 'rgba(96, 165, 250, 0.1)',
+                        color: '#60a5fa',
+                      }}
+                    >
+                      {syncStatusMessages[target.id]}
+                    </div>
+                  ) : null}
 
                   <div style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>
                     Quota: {target.storageLimitBytes ? formatBytes(target.storageLimitBytes) : 'Unlimited'}

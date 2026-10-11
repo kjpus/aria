@@ -17,6 +17,7 @@ import type {
   PlaylistImportPreview,
   PlaybackSnapshot,
   RemoteCacheStatus,
+  RemoteSyncCompletedEvent,
   RemoteSyncedItem,
   RemoteTarget,
   SettingsSnapshot,
@@ -1142,6 +1143,27 @@ export async function clearRemoteCache(): Promise<void> {
     return;
   }
   return invoke<void>('clear_remote_cache');
+}
+
+export async function syncRemoteTarget(targetId: string): Promise<RemoteSyncCompletedEvent> {
+  if (!isTauriRuntime) {
+    return {
+      targetId,
+      targetName: 'Preview Target',
+      newAlbumsCount: 0,
+      newTracksCount: 0,
+      success: true,
+      errorMessage: null,
+    };
+  }
+  return invoke<RemoteSyncCompletedEvent>('sync_remote_target', { targetId });
+}
+
+export async function syncAllRemoteTargets(): Promise<RemoteSyncCompletedEvent[]> {
+  if (!isTauriRuntime) {
+    return [];
+  }
+  return invoke<RemoteSyncCompletedEvent[]>('sync_all_remote_targets');
 }
 
 export async function openUrl(url: string): Promise<void> {
