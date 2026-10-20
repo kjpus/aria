@@ -813,12 +813,27 @@ impl AppCore {
 
     fn spawn_remote_sync_worker(&self) {
         let core = self.clone();
-        tokio::spawn(async move {
+        let worker = async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
             if let Err(e) = core.sync_all_remote_targets().await {
                 tracing::warn!("Automatic remote targets startup sync encountered error: {e}");
             }
-        });
+        };
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(worker);
+        } else {
+            std::thread::Builder::new()
+                .name("aria-remote-sync".into())
+                .spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .expect("failed to create remote sync worker runtime");
+                    runtime.block_on(worker);
+                })
+                .expect("failed to spawn aria-remote-sync worker");
+        }
     }
 
     fn spawn_playback_publisher(&self) {
@@ -929,9 +944,21 @@ impl AppCore {
         let _ = self.events.send(AppEvent::Remote(RemoteEvent::TargetsChanged(targets.clone())));
         if is_enabled {
             let core = self.clone();
-            tokio::spawn(async move {
+            let sync_fut = async move {
                 let _ = core.sync_remote_target(&target_id).await;
-            });
+            };
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(sync_fut);
+            } else {
+                std::thread::Builder::new()
+                    .name("aria-remote-target-sync".into())
+                    .spawn(move || {
+                        if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                            rt.block_on(sync_fut);
+                        }
+                    })
+                    .ok();
+            }
         }
         Ok(targets)
     }
