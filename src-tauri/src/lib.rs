@@ -80,6 +80,7 @@ pub fn run() {
             commands::remote::start_gdrive_auth_flow,
             commands::remote::complete_gdrive_auth_flow,
             commands::remote::upload_album_to_target,
+            commands::remote::upload_playlist_to_target,
             commands::remote::delete_album_from_target,
             commands::remote::get_remote_synced_items,
             commands::remote::get_remote_cache_status,

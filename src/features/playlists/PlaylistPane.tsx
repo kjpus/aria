@@ -54,6 +54,7 @@ type PlaylistPaneProps = {
   onRemoveTracks: (playlistId: string, trackIds: string[]) => void | Promise<void>;
   onOpenAlbum: (albumId: string) => void;
   onImportPlaylist: () => void | Promise<void>;
+  onUploadPlaylist?: (playlist: Playlist) => void;
 };
 
 type PlaylistContextMenuState = {
@@ -94,6 +95,7 @@ export function PlaylistPane({
   onPlayTracks,
   onRemoveTracks,
   onImportPlaylist,
+  onUploadPlaylist,
 }: PlaylistPaneProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const resizeStateRef = useRef<ResizeState | null>(null);
@@ -545,6 +547,15 @@ export function PlaylistPane({
                   </div>
                   <div className="inline-actions">
                     <span className="pane-chip">{playlistTracks.length} tracks</span>
+                    {onUploadPlaylist && selectedPlaylist ? (
+                      <button
+                        className="ghost-button"
+                        onClick={() => onUploadPlaylist(selectedPlaylist)}
+                        type="button"
+                      >
+                        Upload to remote...
+                      </button>
+                    ) : null}
                     <button
                       className="ghost-button"
                       onClick={() => void onAddPlaylistToQueue(selectedPlaylist.id)}
@@ -685,6 +696,20 @@ export function PlaylistPane({
                 <button onClick={() => void runPlaylistAction(onExportPlaylist)} type="button">
                   Export to M3U
                 </button>
+                {onUploadPlaylist ? (
+                  <button
+                    onClick={() => {
+                      const playlist = playlists.find((item) => item.id === contextMenu.playlistId);
+                      setContextMenu(null);
+                      if (playlist) {
+                        onUploadPlaylist(playlist);
+                      }
+                    }}
+                    type="button"
+                  >
+                    Upload to remote...
+                  </button>
+                ) : null}
               </div>
             ) : null}
 

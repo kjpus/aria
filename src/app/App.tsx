@@ -21,6 +21,7 @@ import { PlaylistPane } from '../features/playlists/PlaylistPane';
 import { PlaylistImportDialog } from '../features/playlists/PlaylistImportDialog';
 import { QueuePane } from '../features/queue/QueuePane';
 import { RemoteUploadDialog } from '../features/remote/RemoteUploadDialog';
+import { RemotePlaylistUploadDialog } from '../features/remote/RemotePlaylistUploadDialog';
 import { SettingsPane } from '../features/settings/SettingsPane';
 import { TrackPane } from '../features/tracks/TrackPane';
 import {
@@ -62,7 +63,9 @@ import {
   updatePlaybackPreferences,
   updateTrackTableSettings,
   pickPlaylistFile,
+  syncAllRemoteTargets,
 } from '../lib/aria';
+import { RefreshIcon } from '../components/RefreshIcon';
 import type {
   AppBootstrap,
   AppEvent,
@@ -70,7 +73,9 @@ import type {
   LibraryFieldMapping,
   OutputDeviceSnapshot,
   PlaybackPreferences,
+  Playlist,
   PlaylistSnapshot,
+  RemoteSyncProgressEvent,
   ScannedTrack,
   ThemePreference,
   TrackTagEditUpdate,
@@ -145,8 +150,12 @@ export function App() {
   } | null>(null);
   const [playlistImportPath, setPlaylistImportPath] = useState<string | null>(null);
   const [uploadAlbumTitle, setUploadAlbumTitle] = useState<string | null>(null);
+  const [uploadPlaylist, setUploadPlaylist] = useState<Playlist | null>(null);
   const [activeUploadProgress, setActiveUploadProgress] = useState<UploadProgressEvent | null>(null);
   const [uploadStatusMessage, setUploadStatusMessage] = useState<string | null>(null);
+  const [isSyncingRemote, setIsSyncingRemote] = useState(false);
+  const [activeSyncProgress, setActiveSyncProgress] = useState<RemoteSyncProgressEvent | null>(null);
+  const [syncStatusMessage, setSyncStatusMessage] = useState<string | null>(null);
 
   const [selectedMappingFormat, setSelectedMappingFormat] = useState<FieldMappingFormat>(
     DEFAULT_FIELD_MAPPING_FORMAT,
@@ -213,6 +222,23 @@ export function App() {
             setTimeout(() => setUploadStatusMessage(null), 5000);
           } else {
             setError(`Upload error: ${completed.errorMessage ?? 'Unknown failure'}`);
+          }
+        } else if (event.payload.kind === 'sync_progress') {
+          setActiveSyncProgress(event.payload.payload);
+        } else if (event.payload.kind === 'sync_completed') {
+          setActiveSyncProgress(null);
+          const completed = event.payload.payload;
+          if (completed.success) {
+            if (completed.newAlbumsCount > 0 || completed.newTracksCount > 0) {
+              setSyncStatusMessage(
+                `Synced from ${completed.targetName}: ${completed.newAlbumsCount} new album(s) (${completed.newTracksCount} track(s))`
+              );
+            } else {
+              setSyncStatusMessage(`Remote sync complete (${completed.targetName}): library is up to date.`);
+            }
+            setTimeout(() => setSyncStatusMessage(null), 5000);
+          } else {
+            setError(`Remote sync error (${completed.targetName}): ${completed.errorMessage ?? 'Unknown failure'}`);
           }
         }
       }
@@ -391,6 +417,39 @@ export function App() {
       setError(null);
     } catch (reason) {
       setError(String(reason));
+    }
+  }
+
+  async function handleRefreshFromRemote() {
+    const enabledTargets = (bootstrap?.remoteTargets ?? []).filter((t) => t.isEnabled);
+    if (enabledTargets.length === 0) {
+      setActivePane('settings');
+      setError('No enabled remote storage targets found. Please configure or enable one in Settings > Remote Storage.');
+      return;
+    }
+
+    setIsSyncingRemote(true);
+    setError(null);
+    setSyncStatusMessage(null);
+    try {
+      const results = await syncAllRemoteTargets();
+      const totalAlbums = results.reduce((acc, r) => acc + r.newAlbumsCount, 0);
+      const totalTracks = results.reduce((acc, r) => acc + r.newTracksCount, 0);
+      const failed = results.filter((r) => !r.success);
+      if (failed.length > 0) {
+        setError(`Sync error: ${failed.map((f) => `${f.targetName}: ${f.errorMessage ?? 'Failed'}`).join(', ')}`);
+      } else if (totalAlbums > 0 || totalTracks > 0) {
+        setSyncStatusMessage(
+          `✓ Synced from remote: ${totalAlbums} new album(s) (${totalTracks} track(s)) imported.`
+        );
+      } else {
+        setSyncStatusMessage('✓ Synced from remote: library is up to date.');
+      }
+      setTimeout(() => setSyncStatusMessage(null), 5000);
+    } catch (err) {
+      setError(`Remote refresh failed: ${String(err)}`);
+    } finally {
+      setIsSyncingRemote(false);
     }
   }
 
@@ -1294,54 +1353,114 @@ export function App() {
             ))}
           </nav>
           <div className="workspace__status">
-            {activeUploadProgress ? (
+            <button
+              className="ghost-button workspace__sync-button"
+              disabled={isSyncingRemote}
+              onClick={() => void handleRefreshFromRemote()}
+              title="Refresh and download library metadata and tracks from remote storage"
+              type="button"
+            >
+              <RefreshIcon className={isSyncingRemote ? 'aria-spinning' : ''} />
+              <span>{isSyncingRemote ? 'Refreshing...' : 'Refresh Remote'}</span>
+            </button>
+            {error ? (
               <div
-                className="device-chip"
+                className="device-chip workspace__status-chip"
+                style={{
+                  background: 'rgba(214, 88, 72, 0.15)',
+                  border: '1px solid rgba(214, 88, 72, 0.4)',
+                  color: '#ffbeb2',
+                }}
+                title={error}
+              >
+                <span>{error}</span>
+                <button
+                  aria-label="Dismiss error"
+                  className="ghost-button"
+                  onClick={() => {
+                    setError(null);
+                    setActiveUploadProgress(null);
+                  }}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: '#ffbeb2',
+                    cursor: 'pointer',
+                    padding: '0 0.2rem',
+                    marginLeft: '0.4rem',
+                    fontSize: '1.05rem',
+                    lineHeight: 1,
+                    flexShrink: 0,
+                  }}
+                  title="Dismiss"
+                  type="button"
+                >
+                  ×
+                </button>
+              </div>
+            ) : activeUploadProgress ? (
+              <div
+                className="device-chip workspace__status-chip"
                 style={{
                   background: 'rgba(214, 177, 106, 0.15)',
                   border: '1px solid var(--accent)',
                   color: 'var(--accent)',
-                  padding: '0.4rem 0.8rem',
-                  fontSize: '0.85rem',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.5rem',
                 }}
+                title={`Uploading: ${activeUploadProgress.albumTitle} (${activeUploadProgress.currentFile})`}
               >
                 <span>
-                  Uploading: <strong>{activeUploadProgress.albumTitle}</strong> (
-                  {activeUploadProgress.completedFiles}/{activeUploadProgress.totalFiles} files)
-                </span>
-                <span style={{ fontSize: '0.75rem', opacity: 0.85 }}>
-                  {activeUploadProgress.currentFile}
+                  {Math.min(activeUploadProgress.completedFiles, activeUploadProgress.totalFiles)}/{activeUploadProgress.totalFiles} tracks uploaded
                 </span>
               </div>
-            ) : null}
-            {uploadStatusMessage ? (
+            ) : activeSyncProgress ? (
               <div
-                className="device-chip"
+                className="device-chip workspace__status-chip"
+                style={{
+                  background: 'rgba(214, 177, 106, 0.15)',
+                  border: '1px solid var(--accent)',
+                  color: 'var(--accent)',
+                }}
+                title={activeSyncProgress.currentAlbum ? `Current: ${activeSyncProgress.currentAlbum}` : undefined}
+              >
+                <RefreshIcon className="aria-spinning" />
+                <span>
+                  {activeSyncProgress.completedAlbums}/{activeSyncProgress.totalAlbums} albums synced
+                </span>
+              </div>
+            ) : uploadStatusMessage ? (
+              <div
+                className="device-chip workspace__status-chip"
                 style={{
                   background: 'rgba(76, 175, 80, 0.15)',
                   color: '#81c784',
-                  padding: '0.4rem 0.8rem',
-                  fontSize: '0.85rem',
                 }}
               >
-                {uploadStatusMessage}
+                <span>{uploadStatusMessage}</span>
+              </div>
+            ) : syncStatusMessage ? (
+              <div
+                className="device-chip workspace__status-chip"
+                style={{
+                  background: 'rgba(76, 175, 80, 0.15)',
+                  color: '#81c784',
+                }}
+              >
+                <span>{syncStatusMessage}</span>
               </div>
             ) : null}
-            {error ? <div className="error-banner">{error}</div> : null}
           </div>
         </div>
 
         <section className="workspace__content">
           {activePane === 'library' ? (
             <LibraryPane
+              isSyncingRemote={isSyncingRemote}
               onAddToPlaylist={handleAddAlbumsToPlaylist}
               onAddToQueue={handleAddAlbumsToQueue}
               onGoToDirectory={handleGoToAlbumDirectories}
               onOpenAlbum={handleOpenAlbum}
               onPlayAlbum={(albumIds) => handleReplaceQueueForAlbums(albumIds, true)}
+              onRefreshRemote={handleRefreshFromRemote}
               onReplaceQueue={(albumIds) =>
                 handleReplaceQueueForAlbums(albumIds, false)}
               onUploadAlbum={(albumTitle) => setUploadAlbumTitle(albumTitle)}
@@ -1418,6 +1537,7 @@ export function App() {
               settings={bootstrap.settings.playlistTrackTable}
               tracks={bootstrap.library.tracks}
               onImportPlaylist={handleImportPlaylist}
+              onUploadPlaylist={(playlist) => setUploadPlaylist(playlist)}
             />
           ) : null}
 
@@ -1506,9 +1626,26 @@ export function App() {
           targets={bootstrap.remoteTargets ?? []}
           onClose={() => setUploadAlbumTitle(null)}
           onUploadStarted={(targetName, title) => {
+            setError(null);
+            setActiveUploadProgress(null);
             setUploadStatusMessage(`Starting upload of "${title}" to ${targetName}...`);
             setTimeout(() => setUploadStatusMessage(null), 4000);
           }}
+        />
+      ) : null}
+
+      {uploadPlaylist ? (
+        <RemotePlaylistUploadDialog
+          onClose={() => setUploadPlaylist(null)}
+          onUploadStarted={(targetName, playlistName) => {
+            setError(null);
+            setActiveUploadProgress(null);
+            setUploadStatusMessage(`Starting upload of playlist "${playlistName}" to ${targetName}...`);
+            setTimeout(() => setUploadStatusMessage(null), 4000);
+          }}
+          playlist={uploadPlaylist}
+          targets={bootstrap.remoteTargets ?? []}
+          tracks={bootstrap.library.tracks}
         />
       ) : null}
     </main>

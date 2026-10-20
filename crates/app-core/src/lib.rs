@@ -1168,6 +1168,147 @@ impl AppCore {
         Ok(())
     }
 
+    pub async fn upload_playlist_to_target(
+        &self,
+        playlist_id: String,
+        target_id: String,
+        upload_full_albums: bool,
+    ) -> Result<(), AppCoreError> {
+        let targets = self.database.load_remote_targets()?;
+        let target = targets
+            .into_iter()
+            .find(|t| t.id == target_id)
+            .ok_or_else(|| AppCoreError::Remote(format!("Target '{target_id}' not found")))?;
+
+        let playlist_snapshot = self.playlists.snapshot().await;
+        let playlist = playlist_snapshot
+            .playlists
+            .into_iter()
+            .find(|p| p.id == playlist_id)
+            .ok_or_else(|| AppCoreError::Playlist(PlaylistError::PlaylistNotFound))?;
+
+        let snapshot = self.library.snapshot().await;
+        let track_map: std::collections::HashMap<String, ScannedTrack> = snapshot
+            .tracks
+            .iter()
+            .map(|t| (t.id.clone(), t.clone()))
+            .collect();
+
+        let playlist_tracks: Vec<ScannedTrack> = playlist
+            .track_ids
+            .iter()
+            .filter_map(|id| track_map.get(id).cloned())
+            .collect();
+
+        if playlist_tracks.is_empty() {
+            return Err(AppCoreError::Remote(format!(
+                "No tracks found in library for playlist '{}'",
+                playlist.name
+            )));
+        }
+
+        let album_groups = group_playlist_tracks_by_album(
+            &playlist_tracks,
+            &snapshot.tracks,
+            upload_full_albums,
+        );
+
+        if album_groups.is_empty() {
+            return Err(AppCoreError::Remote(format!(
+                "No album tracks found for playlist '{}'",
+                playlist.name
+            )));
+        }
+
+        let backend = create_backend_for_target(&target)?;
+        let mut current_usage = self.database.get_total_synced_bytes_for_target(&target_id)?;
+
+        let (progress_tx, mut progress_rx) = broadcast::channel(64);
+        let events = self.events.clone();
+
+        tokio::spawn(async move {
+            while let Ok(progress) = progress_rx.recv().await {
+                let _ = events.send(AppEvent::Remote(RemoteEvent::UploadProgress(progress)));
+            }
+        });
+
+        let core = self.clone();
+        let playlist_name = playlist.name.clone();
+        let playlist_id_clone = playlist.id.clone();
+
+        tokio::spawn(async move {
+            let mut any_failed = false;
+
+            for (album_title, tracks_to_upload) in album_groups {
+                let options = UploadOptions {
+                    compute_checksums: false,
+                    current_target_usage_bytes: current_usage,
+                };
+
+                match upload_album(
+                    backend.clone(),
+                    &target,
+                    &album_title,
+                    &tracks_to_upload,
+                    options,
+                    Some(progress_tx.clone()),
+                )
+                .await
+                {
+                    Ok(synced_items) => {
+                        for item in &synced_items {
+                            let _ = core.database.save_remote_synced_item(item);
+                        }
+                        if let Ok(usage) = core.database.get_total_synced_bytes_for_target(&target.id) {
+                            current_usage = usage;
+                        }
+                        let album_id = synced_items
+                            .iter()
+                            .find(|i| i.item_type == "album")
+                            .map(|i| i.item_id.clone())
+                            .unwrap_or_default();
+                        let _ = core.events.send(AppEvent::Remote(RemoteEvent::UploadCompleted(
+                            UploadCompletedEvent {
+                                target_id: target.id.clone(),
+                                album_id,
+                                album_title: album_title.clone(),
+                                success: true,
+                                error_message: None,
+                            },
+                        )));
+                    }
+                    Err(e) => {
+                        any_failed = true;
+                        let _ = core.events.send(AppEvent::Remote(RemoteEvent::UploadCompleted(
+                            UploadCompletedEvent {
+                                target_id: target.id.clone(),
+                                album_id: String::new(),
+                                album_title: album_title.clone(),
+                                success: false,
+                                error_message: Some(e.to_string()),
+                            },
+                        )));
+                        break;
+                    }
+                }
+            }
+
+            if !any_failed {
+                let _ = core.events.send(AppEvent::Remote(RemoteEvent::UploadCompleted(
+                    UploadCompletedEvent {
+                        target_id: target.id.clone(),
+                        album_id: playlist_id_clone,
+                        album_title: format!("Playlist \"{}\"", playlist_name),
+                        success: true,
+                        error_message: None,
+                    },
+                )));
+            }
+        });
+
+        Ok(())
+    }
+
     pub async fn delete_album_from_target(
         &self,
         album_id: &str,
@@ -1312,6 +1453,14 @@ impl AppCore {
                     Ok(event) => results.push(event),
                     Err(e) => {
                         tracing::warn!("Failed to sync remote target '{}': {e}", target.name);
+                        results.push(RemoteSyncCompletedEvent {
+                            target_id: target.id.clone(),
+                            target_name: target.name.clone(),
+                            new_albums_count: 0,
+                            new_tracks_count: 0,
+                            success: false,
+                            error_message: Some(e.to_string()),
+                        });
                     }
                 }
             }
@@ -1479,6 +1628,51 @@ fn parse_playlist_content(content: &str, extension: &str) -> Vec<(String, Option
     raw_paths
 }
 
+pub fn group_playlist_tracks_by_album(
+    playlist_tracks: &[ScannedTrack],
+    all_library_tracks: &[ScannedTrack],
+    upload_full_albums: bool,
+) -> Vec<(String, Vec<ScannedTrack>)> {
+    let get_album_title = |t: &ScannedTrack| -> String {
+        t.mapped_fields
+            .get("album")
+            .and_then(|a| a.first())
+            .map(|s| s.as_str())
+            .unwrap_or(&t.file_name)
+            .trim()
+            .to_string()
+    };
+
+    let mut album_groups: Vec<(String, Vec<ScannedTrack>)> = Vec::new();
+    let mut seen_albums = std::collections::HashSet::new();
+
+    for track in playlist_tracks {
+        let title = get_album_title(track);
+        let title_key = title.to_lowercase();
+        if seen_albums.insert(title_key) {
+            let tracks_to_upload: Vec<ScannedTrack> = if upload_full_albums {
+                all_library_tracks
+                    .iter()
+                    .filter(|t| get_album_title(t).eq_ignore_ascii_case(&title))
+                    .cloned()
+                    .collect()
+            } else {
+                playlist_tracks
+                    .iter()
+                    .filter(|t| get_album_title(t).eq_ignore_ascii_case(&title))
+                    .cloned()
+                    .collect()
+            };
+
+            if !tracks_to_upload.is_empty() {
+                album_groups.push((title, tracks_to_upload));
+            }
+        }
+    }
+
+    album_groups
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1554,5 +1748,64 @@ Version=2
         {
             assert!(decode_with_codepage(cp1252_bytes, 1252).is_err());
         }
+    }
+
+    #[test]
+    fn test_group_playlist_tracks_by_album_playlist_only() {
+        let mut t1 = ScannedTrack::default();
+        t1.id = "t1".into();
+        t1.file_name = "01.flac".into();
+        t1.mapped_fields.insert("album".into(), vec!["Album A".into()]);
+
+        let mut t2 = ScannedTrack::default();
+        t2.id = "t2".into();
+        t2.file_name = "02.flac".into();
+        t2.mapped_fields.insert("album".into(), vec!["Album B".into()]);
+
+        let mut t3 = ScannedTrack::default();
+        t3.id = "t3".into();
+        t3.file_name = "03.flac".into();
+        t3.mapped_fields.insert("album".into(), vec!["Album A".into()]);
+
+        let playlist_tracks = vec![t1.clone(), t2.clone(), t3.clone()];
+        let all_library_tracks = vec![t1.clone(), t2.clone(), t3.clone()];
+
+        let groups = group_playlist_tracks_by_album(&playlist_tracks, &all_library_tracks, false);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, "Album A");
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[0].1[0].id, "t1");
+        assert_eq!(groups[0].1[1].id, "t3");
+
+        assert_eq!(groups[1].0, "Album B");
+        assert_eq!(groups[1].1.len(), 1);
+        assert_eq!(groups[1].1[0].id, "t2");
+    }
+
+    #[test]
+    fn test_group_playlist_tracks_by_album_full_albums() {
+        let mut t1 = ScannedTrack::default();
+        t1.id = "t1".into();
+        t1.file_name = "01.flac".into();
+        t1.mapped_fields.insert("album".into(), vec!["Album A".into()]);
+
+        let mut t2 = ScannedTrack::default();
+        t2.id = "t2".into();
+        t2.file_name = "02.flac".into();
+        t2.mapped_fields.insert("album".into(), vec!["Album A".into()]);
+
+        let mut t3 = ScannedTrack::default();
+        t3.id = "t3".into();
+        t3.file_name = "03.flac".into();
+        t3.mapped_fields.insert("album".into(), vec!["Album A".into()]);
+
+        // Playlist only has t1
+        let playlist_tracks = vec![t1.clone()];
+        let all_library_tracks = vec![t1.clone(), t2.clone(), t3.clone()];
+
+        let groups = group_playlist_tracks_by_album(&playlist_tracks, &all_library_tracks, true);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "Album A");
+        assert_eq!(groups[0].1.len(), 3);
     }
 }

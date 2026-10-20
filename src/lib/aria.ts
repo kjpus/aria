@@ -1107,6 +1107,21 @@ export async function uploadAlbumToTarget(
   return invoke<void>('upload_album_to_target', { albumTitle, targetId });
 }
 
+export async function uploadPlaylistToTarget(
+  playlistId: string,
+  targetId: string,
+  uploadFullAlbums: boolean,
+): Promise<void> {
+  if (!isTauriRuntime) {
+    return;
+  }
+  return invoke<void>('upload_playlist_to_target', {
+    playlistId,
+    targetId,
+    uploadFullAlbums,
+  });
+}
+
 export async function deleteAlbumFromTarget(
   albumId: string,
   targetId: string,

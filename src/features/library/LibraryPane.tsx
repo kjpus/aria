@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { ClearableInput } from '../../components/ClearableInput';
+import { RefreshIcon } from '../../components/RefreshIcon';
 import { SectionCard } from '../../components/SectionCard';
 import { toLocalImageSrc } from '../../lib/runtime';
 import type { ScannedTrack } from '../../types/aria';
@@ -18,6 +19,8 @@ type LibraryPaneProps = {
   onPlayAlbum: (albumIds: string[]) => void | Promise<void>;
   onGoToDirectory: (albumIds: string[]) => void | Promise<void>;
   onUploadAlbum?: (albumTitle: string) => void;
+  onRefreshRemote?: () => void;
+  isSyncingRemote?: boolean;
 };
 
 type AlbumContextMenuState = {
@@ -39,6 +42,8 @@ export function LibraryPane({
   onPlayAlbum,
   onGoToDirectory,
   onUploadAlbum,
+  onRefreshRemote,
+  isSyncingRemote,
 }: LibraryPaneProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const [filter, setFilter] = useState('');
@@ -235,6 +240,19 @@ export function LibraryPane({
             value={filter}
             onChange={(event) => setFilter(event.target.value)}
           />
+          {onRefreshRemote ? (
+            <button
+              className="ghost-button"
+              disabled={isSyncingRemote}
+              onClick={onRefreshRemote}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '0.45rem', whiteSpace: 'nowrap' }}
+              title="Refresh and download library metadata and tracks from remote storage"
+              type="button"
+            >
+              <RefreshIcon className={isSyncingRemote ? 'aria-spinning' : ''} />
+              <span>{isSyncingRemote ? 'Refreshing...' : 'Refresh Remote'}</span>
+            </button>
+          ) : null}
           <span className="pane-chip">{filteredAlbums.length} albums</span>
         </div>
 

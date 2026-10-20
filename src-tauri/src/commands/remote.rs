@@ -65,6 +65,19 @@ pub async fn upload_album_to_target(
 }
 
 #[tauri::command]
+pub async fn upload_playlist_to_target(
+    state: State<'_, AppState>,
+    playlist_id: String,
+    target_id: String,
+    upload_full_albums: bool,
+) -> Result<(), CommandError> {
+    Ok(state
+        .core
+        .upload_playlist_to_target(playlist_id, target_id, upload_full_albums)
+        .await?)
+}
+
+#[tauri::command]
 pub async fn delete_album_from_target(
     state: State<'_, AppState>,
     album_id: String,
