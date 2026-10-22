@@ -1686,9 +1686,11 @@ export function App() {
 
             {activePane === 'playlist' ? (
               <PlaylistPane
+                gridSize={uiPrefs.gridSize}
                 onAddPlaylistToQueue={handleAddPlaylistToQueue}
                 onDeletePlaylist={handleDeletePlaylist}
                 onExportPlaylist={handleExportPlaylist}
+                onGridSizeChange={(gridSize) => handleUiPrefsChange({ ...uiPrefs, gridSize })}
                 onImportPlaylist={handleImportPlaylist}
                 onOpenAlbum={handleOpenAlbum}
                 onPlayPlaylist={handlePlayPlaylist}

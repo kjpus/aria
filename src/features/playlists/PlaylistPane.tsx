@@ -6,8 +6,14 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
+import {
+  GridLargeIcon,
+  GridMediumIcon,
+  GridSmallIcon,
+} from '../../components/Icons';
 import { SectionCard } from '../../components/SectionCard';
 import { toLocalImageSrc } from '../../lib/runtime';
+import type { AlbumGridSize } from '../../lib/ui-preferences';
 import type {
   Playlist,
   ScannedTrack,
@@ -41,6 +47,8 @@ type PlaylistPaneProps = {
   tracks: ScannedTrack[];
   settings: TrackTableSettings;
   selectedPlaylistId: string | null;
+  gridSize?: AlbumGridSize;
+  onGridSizeChange?: (size: AlbumGridSize) => void;
   onSelectPlaylist: (playlistId: string) => void;
   onTrackTableChange: (settings: TrackTableSettings) => void;
   onRenamePlaylist: (playlistId: string, name: string) => void | Promise<void>;
@@ -83,6 +91,8 @@ export function PlaylistPane({
   tracks,
   settings,
   selectedPlaylistId,
+  gridSize = 'medium',
+  onGridSizeChange,
   onSelectPlaylist,
   onTrackTableChange,
   onRenamePlaylist,
@@ -483,10 +493,48 @@ export function PlaylistPane({
               >
                 Import Playlist
               </button>
-              <span className="pane-chip">{playlists.length} playlists</span>
+
+              <div className="library-toolbar__controls">
+                {onGridSizeChange ? (
+                  <div aria-label="Playlist cover size" className="segmented-control segmented-control--compact">
+                    <button
+                      aria-label="Small covers"
+                      aria-pressed={gridSize === 'small'}
+                      className={gridSize === 'small' ? 'segmented-control__active' : ''}
+                      onClick={() => onGridSizeChange('small')}
+                      title="Compact covers"
+                      type="button"
+                    >
+                      <GridSmallIcon size={14} />
+                    </button>
+                    <button
+                      aria-label="Medium covers"
+                      aria-pressed={gridSize === 'medium'}
+                      className={gridSize === 'medium' ? 'segmented-control__active' : ''}
+                      onClick={() => onGridSizeChange('medium')}
+                      title="Medium covers"
+                      type="button"
+                    >
+                      <GridMediumIcon size={14} />
+                    </button>
+                    <button
+                      aria-label="Large covers"
+                      aria-pressed={gridSize === 'large'}
+                      className={gridSize === 'large' ? 'segmented-control__active' : ''}
+                      onClick={() => onGridSizeChange('large')}
+                      title="Large covers"
+                      type="button"
+                    >
+                      <GridLargeIcon size={14} />
+                    </button>
+                  </div>
+                ) : null}
+
+                <span className="pane-chip">{playlists.length} playlists</span>
+              </div>
             </div>
 
-            <div className="playlist-carousel">
+            <div className={`playlist-grid playlist-grid--${gridSize} playlist-carousel`}>
               {playlists.map((playlist) => {
                 const playlistTracks = tracksForPlaylist(tracks, playlist);
                 const collageArts = buildPlaylistCollage(playlist, playlistTracks);

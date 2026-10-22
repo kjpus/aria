@@ -1725,11 +1725,34 @@ fn normalize_for_comparison(path: &std::path::Path) -> String {
     cleaned.to_string_lossy().replace('\\', "/").to_lowercase()
 }
 
+pub fn fold_for_matching(s: &str) -> String {
+    // Normalize well-known visual homoglyphs before deunicoding:
+    // Greek beta '\u{03b2}' / '\u{03d0}' is frequently typed or CP437-converted in place of German sharp s 'ß' (U+00DF).
+    let homoglyphs_normalized = s
+        .replace('\u{03b2}', "ss")
+        .replace('\u{03d0}', "ss")
+        .replace('ß', "ss");
+    deunicode::deunicode(&homoglyphs_normalized)
+}
+
+fn extract_track_number_prefix(filename: &str) -> Option<u32> {
+    let trimmed = filename.trim_start();
+    let digits: String = trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if !digits.is_empty() {
+        let rest = &trimmed[digits.len()..];
+        if rest.starts_with('.') || rest.starts_with('-') || rest.starts_with(' ') || rest.starts_with('_') {
+            return digits.parse::<u32>().ok();
+        }
+    }
+    None
+}
+
 pub struct PlaylistTrackMatcher<'a> {
     exact_path: std::collections::HashMap<String, &'a str>,
     folded_path: std::collections::HashMap<String, Vec<&'a str>>,
     by_filename: std::collections::HashMap<String, Vec<&'a ScannedTrack>>,
     by_folded_filename: std::collections::HashMap<String, Vec<&'a ScannedTrack>>,
+    by_parent_folder: std::collections::HashMap<String, Vec<&'a ScannedTrack>>,
 }
 
 impl<'a> PlaylistTrackMatcher<'a> {
@@ -1741,23 +1764,28 @@ impl<'a> PlaylistTrackMatcher<'a> {
             std::collections::HashMap::with_capacity(tracks.len());
         let mut by_folded_filename: std::collections::HashMap<String, Vec<&'a ScannedTrack>> =
             std::collections::HashMap::with_capacity(tracks.len());
+        let mut by_parent_folder: std::collections::HashMap<String, Vec<&'a ScannedTrack>> =
+            std::collections::HashMap::new();
 
         for track in tracks {
             let norm = normalize_for_comparison(std::path::Path::new(&track.path));
             exact_path.insert(norm.clone(), track.id.as_str());
 
-            let folded = deunicode::deunicode(&norm);
+            let folded = fold_for_matching(&norm);
             folded_path.entry(folded).or_default().push(track.id.as_str());
 
-            if let Some(file_name) = std::path::Path::new(&track.path)
-                .file_name()
-                .and_then(|f| f.to_str())
-            {
+            let track_p = std::path::Path::new(&track.path);
+            if let Some(file_name) = track_p.file_name().and_then(|f| f.to_str()) {
                 let fn_lower = file_name.to_lowercase();
                 by_filename.entry(fn_lower.clone()).or_default().push(track);
 
-                let fn_folded = deunicode::deunicode(&fn_lower);
+                let fn_folded = fold_for_matching(&fn_lower);
                 by_folded_filename.entry(fn_folded).or_default().push(track);
+            }
+
+            if let Some(parent_name) = track_p.parent().and_then(|p| p.file_name()).and_then(|f| f.to_str()) {
+                let folder_folded = fold_for_matching(parent_name).to_lowercase();
+                by_parent_folder.entry(folder_folded).or_default().push(track);
             }
         }
 
@@ -1766,6 +1794,7 @@ impl<'a> PlaylistTrackMatcher<'a> {
             folded_path,
             by_filename,
             by_folded_filename,
+            by_parent_folder,
         }
     }
 
@@ -1777,8 +1806,8 @@ impl<'a> PlaylistTrackMatcher<'a> {
             return Some((*id).to_string());
         }
 
-        // Tier 2: Diacritic / accent-folded path match
-        let folded = deunicode::deunicode(&norm);
+        // Tier 2: Diacritic / accent / homoglyph-folded path match
+        let folded = fold_for_matching(&norm);
         if let Some(ids) = self.folded_path.get(&folded) {
             if ids.len() == 1 {
                 return Some(ids[0].to_string());
@@ -1788,10 +1817,11 @@ impl<'a> PlaylistTrackMatcher<'a> {
         // Tier 3: Filename + Parent directory / Unique Filename match
         if let Some(file_name) = resolved.file_name().and_then(|f| f.to_str()) {
             let fn_lower = file_name.to_lowercase();
+            let fn_folded = fold_for_matching(&fn_lower);
             let candidates = self
                 .by_filename
                 .get(&fn_lower)
-                .or_else(|| self.by_folded_filename.get(&deunicode::deunicode(&fn_lower)));
+                .or_else(|| self.by_folded_filename.get(&fn_folded));
 
             if let Some(candidates) = candidates {
                 if candidates.len() == 1 {
@@ -1802,7 +1832,7 @@ impl<'a> PlaylistTrackMatcher<'a> {
                 if let Some(playlist_parent) =
                     resolved.parent().and_then(|p| p.file_name()).and_then(|f| f.to_str())
                 {
-                    let folded_parent = deunicode::deunicode(playlist_parent).to_lowercase();
+                    let folded_parent = fold_for_matching(playlist_parent).to_lowercase();
                     let parent_matches: Vec<&ScannedTrack> = candidates
                         .iter()
                         .copied()
@@ -1812,13 +1842,42 @@ impl<'a> PlaylistTrackMatcher<'a> {
                                 .parent()
                                 .and_then(|p| p.file_name())
                                 .and_then(|f| f.to_str())
-                                .map(|name| deunicode::deunicode(name).to_lowercase() == folded_parent)
+                                .map(|name| fold_for_matching(name).to_lowercase() == folded_parent)
                                 .unwrap_or(false)
                         })
                         .collect();
 
                     if parent_matches.len() == 1 {
                         return Some(parent_matches[0].id.clone());
+                    }
+                }
+            }
+        }
+
+        // Tier 4: Parent Folder + Track Number Prefix Match
+        // Handles cases where track titles in filenames had punctuation or minor differences
+        if let Some(playlist_parent) =
+            resolved.parent().and_then(|p| p.file_name()).and_then(|f| f.to_str())
+        {
+            let folded_parent = fold_for_matching(playlist_parent).to_lowercase();
+            if let Some(folder_tracks) = self.by_parent_folder.get(&folded_parent) {
+                if let Some(file_name) = resolved.file_name().and_then(|f| f.to_str()) {
+                    if let Some(target_track_num) = extract_track_number_prefix(file_name) {
+                        let num_matches: Vec<&ScannedTrack> = folder_tracks
+                            .iter()
+                            .copied()
+                            .filter(|c| {
+                                std::path::Path::new(&c.path)
+                                    .file_name()
+                                    .and_then(|f| f.to_str())
+                                    .and_then(extract_track_number_prefix)
+                                    == Some(target_track_num)
+                            })
+                            .collect();
+
+                        if num_matches.len() == 1 {
+                            return Some(num_matches[0].id.clone());
+                        }
                     }
                 }
             }
@@ -2168,5 +2227,38 @@ Version=2
         let playlist_path = std::path::Path::new("E:\\OldMusic\\Goldberg\\01. Aria.flac");
         let matched = matcher.find_match(playlist_path);
         assert_eq!(matched.as_deref(), Some("bach_track"));
+    }
+
+    #[test]
+    fn test_playlist_track_matcher_greek_beta_homoglyph() {
+        let mut track = ScannedTrack::default();
+        track.id = "petibon_track_29".into();
+        // On disk/in DB: uses Greek small letter beta '\u{03b2}' in "flieβen"
+        track.path = "G:\\Mozart 50\\Patricia Petibon - Mozart Die Entführung aus dem Serail, K. 384 (1999) [16B-44.1kHz]\\29. Die Entführung aus dem Serail, K. 384, Act 2 Arie. Wenn der Freude Tränen flie\u{03b2}en (Belmonte).flac".into();
+        track.file_name = "29. Die Entführung aus dem Serail, K. 384, Act 2 Arie. Wenn der Freude Tränen flie\u{03b2}en (Belmonte).flac".into();
+
+        let library_tracks = vec![track];
+        let matcher = PlaylistTrackMatcher::new(&library_tracks);
+
+        // In playlist: uses German sharp s 'ß' (U+00DF) in "fließen"
+        let playlist_path = std::path::Path::new("G:\\Mozart 50\\Patricia Petibon - Mozart Die Entführung aus dem Serail, K. 384 (1999) [16B-44.1kHz]\\29. Die Entführung aus dem Serail, K. 384, Act 2 Arie. Wenn der Freude Tränen fließen (Belmonte).flac");
+        let matched = matcher.find_match(playlist_path);
+        assert_eq!(matched.as_deref(), Some("petibon_track_29"));
+    }
+
+    #[test]
+    fn test_playlist_track_matcher_track_number_fallback() {
+        let mut track = ScannedTrack::default();
+        track.id = "aria_track_29".into();
+        track.path = "C:\\Music\\Mozart\\Album\\29. Arie. Wenn der Freude Traenen fliessen.flac".into();
+        track.file_name = "29. Arie. Wenn der Freude Traenen fliessen.flac".into();
+
+        let library_tracks = vec![track];
+        let matcher = PlaylistTrackMatcher::new(&library_tracks);
+
+        // Playlist has quotation marks and different spelling in filename, but same parent album and track number 29
+        let playlist_path = std::path::Path::new("C:\\Music\\Mozart\\Album\\29. Arie. \"Wenn der Freude\".flac");
+        let matched = matcher.find_match(playlist_path);
+        assert_eq!(matched.as_deref(), Some("aria_track_29"));
     }
 }
