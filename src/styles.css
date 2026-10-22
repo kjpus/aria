@@ -1374,6 +1374,10 @@ button:disabled {
 .album-card {
   display: flex;
   flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  width: 100%;
+  text-align: left;
   gap: 0.55rem;
   border-radius: 9px;
   border: 1px solid var(--line);
@@ -1387,6 +1391,8 @@ button:disabled {
 .album-card--button {
   width: 100%;
   text-align: left;
+  align-items: stretch;
+  justify-content: flex-start;
   appearance: none;
   color: var(--text);
   font: inherit;
@@ -1497,6 +1503,9 @@ button:disabled {
   flex-direction: column;
   gap: 0.15rem;
   min-width: 0;
+  width: 100%;
+  align-items: stretch;
+  text-align: left;
 }
 
 .album-card__composer {
@@ -1506,6 +1515,7 @@ button:disabled {
   letter-spacing: 0.08em;
   color: var(--accent);
   line-height: 1.2;
+  text-align: left;
 }
 
 .album-card__title {
@@ -1513,18 +1523,21 @@ button:disabled {
   font-weight: 600;
   line-height: 1.25;
   color: var(--text);
+  text-align: left;
 }
 
 .album-card__detail {
   color: var(--muted);
   font-size: 0.8rem;
   line-height: 1.2;
+  text-align: left;
 }
 
 .album-card__footer {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  width: 100%;
   font-size: 0.74rem;
   color: var(--muted);
   border-top: 1px solid var(--line);
@@ -1825,19 +1838,41 @@ button:disabled {
 .hover-scroll {
   overflow: hidden;
   white-space: nowrap;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  position: relative;
+}
+
+.hover-scroll--active {
+  mask-image: linear-gradient(to right, black calc(100% - 1.25rem), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 1.25rem), transparent 100%);
 }
 
 .hover-scroll__inner {
   display: inline-block;
   min-width: 100%;
+  text-align: left;
   transform: translateX(0);
-  transition: transform 240ms ease;
+  transition: transform 250ms ease-out;
   will-change: transform;
 }
 
-.hover-scroll--active:hover .hover-scroll__inner {
-  transform: translateX(calc(var(--scroll-distance) * -1));
-  transition: transform var(--scroll-duration) linear;
+@media (hover: hover) and (pointer: fine) {
+  .album-card:hover .hover-scroll--active,
+  .playlist-card:hover .hover-scroll--active,
+  .hover-scroll--active:hover {
+    mask-image: none;
+    -webkit-mask-image: none;
+  }
+
+  .album-card:hover .hover-scroll--active .hover-scroll__inner,
+  .playlist-card:hover .hover-scroll--active .hover-scroll__inner,
+  .player-bar__meta:hover .hover-scroll--active .hover-scroll__inner,
+  .hover-scroll--active:hover .hover-scroll__inner {
+    transform: translateX(calc(var(--scroll-distance) * -1));
+    transition: transform var(--scroll-duration) linear 0.35s;
+  }
 }
 
 .track-controls {

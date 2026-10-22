@@ -24,10 +24,8 @@ export function HoverScrollText({
         return;
       }
 
-      const nextOverflow = Math.max(
-        0,
-        innerRef.current.scrollWidth - outerRef.current.clientWidth,
-      );
+      const diff = innerRef.current.scrollWidth - outerRef.current.clientWidth;
+      const nextOverflow = diff > 1 ? Math.ceil(diff) : 0;
       setOverflow(nextOverflow);
     };
 
