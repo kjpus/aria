@@ -9,6 +9,7 @@ import {
   startGdriveAuthFlow,
   completeGdriveAuthFlow,
   openUrl,
+  copyToClipboard,
   syncRemoteTarget,
   syncAllRemoteTargets,
   testRemoteTarget,
@@ -998,7 +999,7 @@ function AddRemoteDialog({ onClose, onAdded }: AddRemoteDialogProps) {
                     className="ghost-button"
                     onClick={() => {
                       if (gdriveAuthUrl) {
-                        void navigator.clipboard.writeText(gdriveAuthUrl);
+                        void copyToClipboard(gdriveAuthUrl);
                         setCopiedAuthUrl(true);
                         setTimeout(() => setCopiedAuthUrl(false), 3000);
                       }

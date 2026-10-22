@@ -53,9 +53,17 @@ pub struct AppDatabase {
 
 impl AppDatabase {
     pub fn new_default() -> Result<Self, StorageError> {
+        #[cfg(target_os = "android")]
+        let base_dir = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/data/data/com.aria.player"))
+            .join("files");
+
+        #[cfg(not(target_os = "android"))]
         let base_dir = dirs::data_local_dir()
             .or_else(|| std::env::current_dir().ok().map(|dir| dir.join(".cache")))
             .ok_or(StorageError::MissingStorageDir)?;
+
         let db_dir = base_dir.join("Aria");
         Self::at(db_dir.join("aria.sqlite3"))
     }
@@ -517,35 +525,94 @@ impl AppDatabase {
         let connection = self.connect()?;
         connection.execute("delete from remote_targets where id = ?1", params![id])?;
         connection.execute("delete from remote_synced_items where remote_target_id = ?1", params![id])?;
+        let sync_key = format!("remote_target_last_sync:{id}");
+        connection.execute("delete from app_settings where setting_key = ?1", params![sync_key])?;
+        Ok(())
+    }
+
+    pub fn get_remote_target_last_sync(&self, target_id: &str) -> Result<Option<String>, StorageError> {
+        let connection = self.connect()?;
+        let sync_key = format!("remote_target_last_sync:{target_id}");
+        let mut statement = connection.prepare("select value_json from app_settings where setting_key = ?1 limit 1")?;
+        let mut rows = statement.query(params![sync_key])?;
+        if let Some(row) = rows.next()? {
+            let val: String = row.get(0)?;
+            Ok(Some(val))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn save_remote_target_last_sync(&self, target_id: &str, last_sync_index_time: &str) -> Result<(), StorageError> {
+        let connection = self.connect()?;
+        let sync_key = format!("remote_target_last_sync:{target_id}");
+        connection.execute(
+            "insert into app_settings (setting_key, value_json)
+             values (?1, ?2)
+             on conflict(setting_key) do update set value_json = excluded.value_json",
+            params![sync_key, last_sync_index_time],
+        )?;
         Ok(())
     }
 
     pub fn save_remote_synced_item(&self, item: &RemoteSyncedItem) -> Result<(), StorageError> {
-        let connection = self.connect()?;
-        connection.execute(
-            "insert into remote_synced_items (item_id, remote_target_id, item_type, remote_path, remote_file_id, size_bytes, checksum, sync_status, last_synced_at)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             on conflict(item_id, remote_target_id) do update set
-                item_type = excluded.item_type,
-                remote_path = excluded.remote_path,
-                remote_file_id = excluded.remote_file_id,
-                size_bytes = excluded.size_bytes,
-                checksum = excluded.checksum,
-                sync_status = excluded.sync_status,
-                last_synced_at = excluded.last_synced_at",
-            params![
-                item.item_id,
-                item.remote_target_id,
-                item.item_type,
-                item.remote_path,
-                item.remote_file_id,
-                item.size_bytes as i64,
-                item.checksum,
-                item.sync_status,
-                item.last_synced_at,
-            ],
-        )?;
+        self.save_remote_synced_items_batch(std::slice::from_ref(item))
+    }
+
+    pub fn save_remote_synced_items_batch(&self, items: &[RemoteSyncedItem]) -> Result<(), StorageError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        let mut connection = self.connect()?;
+        let tx = connection.transaction()?;
+        {
+            let mut statement = tx.prepare(
+                "insert into remote_synced_items (item_id, remote_target_id, item_type, remote_path, remote_file_id, size_bytes, checksum, sync_status, last_synced_at)
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 on conflict(item_id, remote_target_id) do update set
+                    item_type = excluded.item_type,
+                    remote_path = excluded.remote_path,
+                    remote_file_id = excluded.remote_file_id,
+                    size_bytes = excluded.size_bytes,
+                    checksum = excluded.checksum,
+                    sync_status = excluded.sync_status,
+                    last_synced_at = excluded.last_synced_at",
+            )?;
+
+            for item in items {
+                statement.execute(params![
+                    item.item_id,
+                    item.remote_target_id,
+                    item.item_type,
+                    item.remote_path,
+                    item.remote_file_id,
+                    item.size_bytes as i64,
+                    item.checksum,
+                    item.sync_status,
+                    item.last_synced_at,
+                ])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
+    }
+
+    pub fn load_synced_album_timestamps_for_target(&self, target_id: &str) -> Result<HashMap<String, String>, StorageError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "select item_id, last_synced_at from remote_synced_items where remote_target_id = ?1 and item_type = 'album'",
+        )?;
+        let rows = statement.query_map(params![target_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        let mut map = HashMap::new();
+        for item in rows {
+            let (album_id, last_synced_at) = item?;
+            map.insert(album_id, last_synced_at);
+        }
+        Ok(map)
     }
 
     pub fn load_remote_synced_items_for_target(&self, target_id: &str) -> Result<Vec<RemoteSyncedItem>, StorageError> {
@@ -1181,14 +1248,40 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].item_id, "alb_123");
 
+        let timestamps = database.load_synced_album_timestamps_for_target("target_gdrive_1").expect("load album timestamps");
+        assert_eq!(timestamps.get("alb_123"), Some(&"2026-09-13T20:00:00Z".to_string()));
+
+        // Test batch save
+        let synced_track_item = aria_domain::RemoteSyncedItem {
+            item_id: "trk_456".to_string(),
+            remote_target_id: "target_gdrive_1".to_string(),
+            item_type: "track".to_string(),
+            remote_path: "Beethoven/Sym9/01.flac".to_string(),
+            remote_file_id: None,
+            size_bytes: 50_000_000,
+            checksum: Some("abc".to_string()),
+            sync_status: "synced".to_string(),
+            last_synced_at: "2026-09-13T20:00:00Z".to_string(),
+        };
+        database.save_remote_synced_items_batch(&[synced_track_item]).expect("batch save");
+        let items_batch = database.load_remote_synced_items_for_target("target_gdrive_1").expect("load items");
+        assert_eq!(items_batch.len(), 2);
+
+        // Test target sync timestamp
+        database.save_remote_target_last_sync("target_gdrive_1", "2026-09-13T20:00:00Z").expect("save sync timestamp");
+        let loaded_sync_time = database.get_remote_target_last_sync("target_gdrive_1").expect("get sync timestamp");
+        assert_eq!(loaded_sync_time, Some("2026-09-13T20:00:00Z".to_string()));
+
         let total_bytes = database.get_total_synced_bytes_for_target("target_gdrive_1").expect("total bytes");
-        assert_eq!(total_bytes, 500_000_000);
+        assert_eq!(total_bytes, 550_000_000);
 
         database.delete_remote_target("target_gdrive_1").expect("delete target");
         let targets_after = database.load_remote_targets().expect("load targets after delete");
         assert!(targets_after.is_empty());
         let items_after = database.load_remote_synced_items_for_target("target_gdrive_1").expect("load items after delete");
         assert!(items_after.is_empty());
+        let sync_time_after = database.get_remote_target_last_sync("target_gdrive_1").expect("get sync timestamp after delete");
+        assert!(sync_time_after.is_none());
 
         let _ = fs::remove_dir_all(&test_root);
     }

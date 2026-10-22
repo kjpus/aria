@@ -196,11 +196,14 @@ async fn test_sync_remote_library_full_pipeline() {
 
     // 3. Now simulate computer 2 syncing the remote library
     let mut known_tracks = HashSet::new();
+    let empty_album_times = std::collections::HashMap::new();
     let sync_res = sync_remote_library(
         backend.clone(),
         &target,
         &artwork_cache_dir,
         &known_tracks,
+        None,
+        &empty_album_times,
         None,
     )
     .await
@@ -209,6 +212,7 @@ async fn test_sync_remote_library_full_pipeline() {
     assert_eq!(sync_res.new_albums_count, 1);
     assert_eq!(sync_res.new_tracks_count, 1);
     assert_eq!(sync_res.synced_tracks.len(), 1);
+    assert!(sync_res.master_index_updated_at.is_some());
     assert!(sync_res.synced_tracks[0].path.starts_with("remote://target_test_1/"));
     assert_eq!(sync_res.synced_tracks[0].mapped_fields["composer"][0], "Ludwig van Beethoven");
 
@@ -221,11 +225,17 @@ async fn test_sync_remote_library_full_pipeline() {
     for t in &sync_res.synced_tracks {
         known_tracks.insert(t.id.clone());
     }
+    let mut album_times = std::collections::HashMap::new();
+    if let Some(album_item) = sync_res.synced_items.iter().find(|i| i.item_type == "album") {
+        album_times.insert(album_item.item_id.clone(), album_item.last_synced_at.clone());
+    }
     let sync_res_again = sync_remote_library(
         backend.clone(),
         &target,
         &artwork_cache_dir,
         &known_tracks,
+        None,
+        &album_times,
         None,
     )
     .await
@@ -233,6 +243,88 @@ async fn test_sync_remote_library_full_pipeline() {
     assert_eq!(sync_res_again.new_albums_count, 0);
     assert_eq!(sync_res_again.new_tracks_count, 0);
 
-    // 5. Cleanup
+    // 5. Test master index early-exit when target_last_synced_at matches
+    let sync_res_early_exit = sync_remote_library(
+        backend.clone(),
+        &target,
+        &artwork_cache_dir,
+        &known_tracks,
+        sync_res.master_index_updated_at.as_deref(),
+        &album_times,
+        None,
+    )
+    .await
+    .expect("sync early exit");
+    assert_eq!(sync_res_early_exit.new_albums_count, 0);
+    assert_eq!(sync_res_early_exit.new_tracks_count, 0);
+    assert!(sync_res_early_exit.synced_tracks.is_empty());
+
+    // 6. Test uploading a playlist to the remote target
+    use aria_domain::{Playlist, RemotePlaylistTrack};
+    use aria_remote_storage::{sync_remote_playlists, upload_playlist};
+
+    let playlist = Playlist {
+        id: "playlist_fav_beethoven".to_string(),
+        name: "Beethoven Masterpieces".to_string(),
+        collage_seed: 7,
+        track_ids: vec![sync_res.synced_tracks[0].id.clone()],
+        created_at: Some("2026-10-22T10:00:00Z".to_string()),
+    };
+
+    let playlist_tracks = vec![RemotePlaylistTrack {
+        track_id: sync_res.synced_tracks[0].id.clone(),
+        relative_path: "Ludwig van Beethoven/Symphony No. 5 in C minor, Op. 67/01 - I. Allegro con brio.flac".to_string(),
+        title: "I. Allegro con brio".to_string(),
+        composer: Some("Ludwig van Beethoven".to_string()),
+        album: Some("Symphony No. 5 in C minor, Op. 67".to_string()),
+        duration_ms: 450_000,
+    }];
+
+    let playlist_item = upload_playlist(
+        backend.clone(),
+        &target,
+        &playlist,
+        &playlist_tracks,
+        None,
+    )
+    .await
+    .expect("upload playlist");
+
+    assert_eq!(playlist_item.item_id, "playlist_fav_beethoven");
+    assert_eq!(playlist_item.item_type, "playlist");
+    assert_eq!(playlist_item.remote_path, "playlists/playlist_fav_beethoven.json");
+
+    // Verify playlist files on remote storage
+    let playlist_json_bytes = backend
+        .read_bytes("playlists/playlist_fav_beethoven.json")
+        .await
+        .expect("read remote playlist json");
+    assert!(!playlist_json_bytes.is_empty());
+
+    let m3u8_bytes = backend
+        .read_bytes("playlists/Beethoven Masterpieces.m3u8")
+        .await
+        .expect("read remote playlist m3u8");
+    let m3u8_str = String::from_utf8_lossy(&m3u8_bytes);
+    assert!(m3u8_str.starts_with("#EXTM3U"));
+    assert!(m3u8_str.contains("../Ludwig van Beethoven/Symphony No. 5 in C minor, Op. 67/01 - I. Allegro con brio.flac"));
+
+    let playlists_index_bytes = backend
+        .read_bytes("aria-playlists-index.json")
+        .await
+        .expect("read remote playlists index");
+    assert!(!playlists_index_bytes.is_empty());
+
+    // 7. Test sync_remote_playlists discovers and deserializes the remote playlist
+    let remote_playlists = sync_remote_playlists(backend.clone(), &target)
+        .await
+        .expect("sync remote playlists");
+    assert_eq!(remote_playlists.len(), 1);
+    assert_eq!(remote_playlists[0].playlist_id, "playlist_fav_beethoven");
+    assert_eq!(remote_playlists[0].name, "Beethoven Masterpieces");
+    assert_eq!(remote_playlists[0].tracks.len(), 1);
+    assert_eq!(remote_playlists[0].tracks[0].track_id, sync_res.synced_tracks[0].id);
+
+    // 8. Cleanup
     let _ = tokio::fs::remove_dir_all(&temp_root).await;
 }

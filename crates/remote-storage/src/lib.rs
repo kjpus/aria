@@ -12,7 +12,10 @@ pub use cache::{RemoteCacheManager, RemoteCacheStatus};
 pub use prefetcher::{PlaybackPrefetcher, PrefetchCandidate, PrefetchCommand, PathUpdater};
 
 pub use factory::{create_backend_for_target, FilesystemConfig, GoogleDriveStoredConfig};
-pub use pipeline::{sync_remote_library, upload_album, SyncRemoteResult, UploadOptions};
+pub use pipeline::{
+    sync_remote_library, sync_remote_playlists, upload_album, upload_playlist, SyncRemoteResult,
+    UploadOptions,
+};
 
 pub use backends::{
     generate_pkce_challenge, generate_pkce_verifier, refresh_access_token, FilesystemBackend,

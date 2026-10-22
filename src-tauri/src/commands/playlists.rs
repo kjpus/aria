@@ -1,3 +1,4 @@
+#[cfg(target_os = "windows")]
 use std::fs;
 
 use aria_domain::{PlaylistImportPreview, PlaylistSnapshot};

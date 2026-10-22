@@ -256,6 +256,7 @@ export type RemoteSyncCompletedEvent = {
   targetName: string;
   newAlbumsCount: number;
   newTracksCount: number;
+  newPlaylistsCount?: number;
   success: boolean;
   errorMessage: string | null;
 };

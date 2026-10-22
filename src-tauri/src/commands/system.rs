@@ -1,3 +1,4 @@
+#[cfg(target_os = "windows")]
 use std::path::{Path, PathBuf};
 
 use aria_domain::AppBootstrap;
@@ -150,6 +151,15 @@ pub fn open_url(url: String) -> Result<(), CommandError> {
             .spawn()
             .map_err(|error| CommandError::Message(error.to_string()))?;
         Ok(())
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        let _ = parsed;
+        let _ = url;
+        Err(CommandError::Message(
+            "Opening external URLs is not supported on this platform yet.".into(),
+        ))
     }
 }
 

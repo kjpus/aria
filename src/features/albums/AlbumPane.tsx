@@ -24,12 +24,14 @@ import {
   getTrackColumnValue,
 } from '../library/view-models';
 import { HoverScrollText } from './HoverScrollText';
+import { ArrowLeftIcon, EmptyArtPlaceholder } from '../../components/Icons';
 
 type AlbumPaneProps = {
   tracks: ScannedTrack[];
   mappings: LibraryFieldMapping[];
   settings: TrackTableSettings;
   selectedAlbumId: string | null;
+  onBackToLibrary?: () => void;
   onTrackTableChange: (settings: TrackTableSettings) => void;
   onPlayTracks: (tracks: ScannedTrack[]) => void | Promise<void>;
   onAddTracksToQueue: (tracks: ScannedTrack[]) => void | Promise<void>;
@@ -106,6 +108,7 @@ export function AlbumPane({
   onPlayAlbum,
   onGoToDirectory,
   onUploadAlbum,
+  onBackToLibrary,
   sessionExportTags,
 }: AlbumPaneProps) {
   const albumDetailRef = useRef<HTMLDivElement>(null);
@@ -395,6 +398,17 @@ export function AlbumPane({
           <div className="placeholder-pane">
             <strong>No album selected</strong>
             <p>Select an album from the Library tab to view the tracks inside it.</p>
+            {onBackToLibrary ? (
+              <button
+                className="ghost-button"
+                onClick={onBackToLibrary}
+                style={{ marginTop: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: '0.45rem' }}
+                type="button"
+              >
+                <ArrowLeftIcon size={14} />
+                <span>Go to Library</span>
+              </button>
+            ) : null}
           </div>
         </SectionCard>
       </div>
@@ -659,6 +673,16 @@ export function AlbumPane({
       <SectionCard hideHeader>
         <div className="album-detail" onContextMenu={openContextMenu} ref={albumDetailRef}>
           <div className="album-detail__toolbar">
+            {onBackToLibrary ? (
+              <button
+                className="ghost-button album-detail__back-button"
+                onClick={onBackToLibrary}
+                type="button"
+              >
+                <ArrowLeftIcon size={14} />
+                <span>Back to Library</span>
+              </button>
+            ) : null}
             <p className="section-card__eyebrow">Album</p>
           </div>
           <div className="album-detail__hero">
@@ -671,7 +695,7 @@ export function AlbumPane({
                   src={art}
                 />
               ) : (
-                <div className="album-detail__art album-card__art--empty">Aria</div>
+                <EmptyArtPlaceholder className="album-detail__art" />
               )}
               <div className="album-detail__art-caption">
                 {selectedAlbum.trackCount} tracks

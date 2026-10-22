@@ -4,8 +4,17 @@ import { createPortal } from 'react-dom';
 import { ClearableInput } from '../../components/ClearableInput';
 import { RefreshIcon } from '../../components/RefreshIcon';
 import { SectionCard } from '../../components/SectionCard';
+import {
+  EmptyArtPlaceholder,
+  GridLargeIcon,
+  GridMediumIcon,
+  GridSmallIcon,
+  PlaySimpleIcon,
+  SortIcon,
+} from '../../components/Icons';
 import { toLocalImageSrc } from '../../lib/runtime';
 import type { ScannedTrack } from '../../types/aria';
+import type { AlbumGridSize } from '../../lib/ui-preferences';
 import { HoverScrollText } from '../albums/HoverScrollText';
 import { buildAlbumCards } from './view-models';
 
@@ -21,6 +30,8 @@ type LibraryPaneProps = {
   onUploadAlbum?: (albumTitle: string) => void;
   onRefreshRemote?: () => void;
   isSyncingRemote?: boolean;
+  gridSize?: AlbumGridSize;
+  onGridSizeChange?: (size: AlbumGridSize) => void;
 };
 
 type AlbumContextMenuState = {
@@ -31,6 +42,8 @@ type AlbumContextMenuState = {
   y: number;
   maxHeight: number;
 };
+
+type AlbumSortOption = 'composer' | 'title' | 'year_desc' | 'year_asc' | 'tracks';
 
 export function LibraryPane({
   tracks,
@@ -44,9 +57,12 @@ export function LibraryPane({
   onUploadAlbum,
   onRefreshRemote,
   isSyncingRemote,
+  gridSize = 'medium',
+  onGridSizeChange,
 }: LibraryPaneProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const [filter, setFilter] = useState('');
+  const [sortBy, setSortBy] = useState<AlbumSortOption>('composer');
   const [contextMenu, setContextMenu] = useState<AlbumContextMenuState | null>(null);
   const [selectedAlbumIds, setSelectedAlbumIds] = useState<string[]>(
     selectedAlbumId ? [selectedAlbumId] : [],
@@ -56,19 +72,47 @@ export function LibraryPane({
   );
 
   const albums = useMemo(() => buildAlbumCards(tracks), [tracks]);
+
   const filteredAlbums = useMemo(() => {
     const query = filter.trim().toLowerCase();
-    if (!query) {
-      return albums;
-    }
+    const list = query
+      ? albums.filter((album) =>
+          [album.title, album.composer, album.credit, album.year]
+            .join(' ')
+            .toLowerCase()
+            .includes(query),
+        )
+      : [...albums];
 
-    return albums.filter((album) =>
-      [album.title, album.composer, album.credit, album.year]
-        .join(' ')
-        .toLowerCase()
-        .includes(query),
-    );
-  }, [albums, filter]);
+    switch (sortBy) {
+      case 'composer':
+        return list.sort((a, b) => {
+          const compA = (a.composer || 'ZZZ').toLowerCase();
+          const compB = (b.composer || 'ZZZ').toLowerCase();
+          if (compA !== compB) return compA.localeCompare(compB);
+          return a.title.localeCompare(b.title);
+        });
+      case 'title':
+        return list.sort((a, b) => a.title.localeCompare(b.title));
+      case 'year_desc':
+        return list.sort((a, b) => {
+          const yrA = parseInt(a.year, 10) || 0;
+          const yrB = parseInt(b.year, 10) || 0;
+          return yrB - yrA;
+        });
+      case 'year_asc':
+        return list.sort((a, b) => {
+          const yrA = parseInt(a.year, 10) || 9999;
+          const yrB = parseInt(b.year, 10) || 9999;
+          return yrA - yrB;
+        });
+      case 'tracks':
+        return list.sort((a, b) => b.trackCount - a.trackCount);
+      default:
+        return list;
+    }
+  }, [albums, filter, sortBy]);
+
   const selectedAlbumSet = useMemo(
     () => new Set(selectedAlbumIds),
     [selectedAlbumIds],
@@ -229,36 +273,95 @@ export function LibraryPane({
     <div className="pane-stack">
       <SectionCard hideHeader>
         <div className="library-toolbar">
-          <label className="library-toolbar__label" htmlFor="album-filter">
-            Filter albums
-          </label>
-          <ClearableInput
-            className="library-toolbar__input"
-            id="album-filter"
-            onClear={() => setFilter('')}
-            placeholder="Search album, composer, conductor or performer, year"
-            value={filter}
-            onChange={(event) => setFilter(event.target.value)}
-          />
-          {onRefreshRemote ? (
-            <button
-              className="ghost-button"
-              disabled={isSyncingRemote}
-              onClick={onRefreshRemote}
-              style={{ display: 'inline-flex', alignItems: 'center', gap: '0.45rem', whiteSpace: 'nowrap' }}
-              title="Refresh and download library metadata and tracks from remote storage"
-              type="button"
-            >
-              <RefreshIcon className={isSyncingRemote ? 'aria-spinning' : ''} />
-              <span>{isSyncingRemote ? 'Refreshing...' : 'Refresh Remote'}</span>
-            </button>
-          ) : null}
-          <span className="pane-chip">{filteredAlbums.length} albums</span>
+          <div className="library-toolbar__search">
+            <ClearableInput
+              className="library-toolbar__input"
+              id="album-filter"
+              onChange={(e) => setFilter(e.target.value)}
+              onClear={() => setFilter('')}
+              placeholder="Filter by composer, album, performer, or year..."
+              value={filter}
+            />
+          </div>
+
+          <div className="library-toolbar__controls">
+            <div className="library-toolbar__sort">
+              <SortIcon className="library-toolbar__sort-icon" size={14} />
+              <select
+                aria-label="Sort albums"
+                className="library-toolbar__select"
+                onChange={(e) => setSortBy(e.target.value as AlbumSortOption)}
+                value={sortBy}
+              >
+                <option value="composer">Composer (A–Z)</option>
+                <option value="title">Album Title (A–Z)</option>
+                <option value="year_desc">Year (Newest first)</option>
+                <option value="year_asc">Year (Oldest first)</option>
+                <option value="tracks">Track Count</option>
+              </select>
+            </div>
+
+            {onGridSizeChange ? (
+              <div aria-label="Album cover size" className="segmented-control segmented-control--compact">
+                <button
+                  aria-label="Small covers"
+                  aria-pressed={gridSize === 'small'}
+                  className={gridSize === 'small' ? 'segmented-control__active' : ''}
+                  onClick={() => onGridSizeChange('small')}
+                  title="Compact covers"
+                  type="button"
+                >
+                  <GridSmallIcon size={14} />
+                </button>
+                <button
+                  aria-label="Medium covers"
+                  aria-pressed={gridSize === 'medium'}
+                  className={gridSize === 'medium' ? 'segmented-control__active' : ''}
+                  onClick={() => onGridSizeChange('medium')}
+                  title="Medium covers"
+                  type="button"
+                >
+                  <GridMediumIcon size={14} />
+                </button>
+                <button
+                  aria-label="Large covers"
+                  aria-pressed={gridSize === 'large'}
+                  className={gridSize === 'large' ? 'segmented-control__active' : ''}
+                  onClick={() => onGridSizeChange('large')}
+                  title="Large covers"
+                  type="button"
+                >
+                  <GridLargeIcon size={14} />
+                </button>
+              </div>
+            ) : null}
+
+            {onRefreshRemote ? (
+              <button
+                className="ghost-button library-toolbar__button"
+                disabled={isSyncingRemote}
+                onClick={onRefreshRemote}
+                title="Refresh and download library metadata and tracks from remote storage"
+                type="button"
+              >
+                <RefreshIcon className={isSyncingRemote ? 'aria-spinning' : ''} />
+                <span>{isSyncingRemote ? 'Refreshing...' : 'Refresh'}</span>
+              </button>
+            ) : null}
+
+            <span className="pane-chip">{filteredAlbums.length} albums</span>
+          </div>
         </div>
 
-        <div className="album-grid">
+        <div className={`album-grid album-grid--${gridSize}`}>
           {filteredAlbums.length === 0 ? (
-            <p className="empty-state">No albums match the current filter.</p>
+            <div className="empty-state-card">
+              <p className="empty-state">
+                {albums.length === 0
+                  ? 'No music scanned yet. Go to Settings to add your music folders.'
+                  : 'No albums match the current filter.'}
+              </p>
+            </div>
           ) : (
             filteredAlbums.map((album) => {
               const art = toLocalImageSrc(album.artPath);
@@ -272,23 +375,38 @@ export function LibraryPane({
                   onContextMenu={(event) => openContextMenu(event, album.id)}
                   type="button"
                 >
-                  {art ? (
-                    <img alt="" className="album-card__art" src={art} />
-                  ) : (
-                    <div className="album-card__art album-card__art--empty">Aria</div>
-                  )}
+                  <div className="album-card__cover-wrapper">
+                    {art ? (
+                      <img alt="" className="album-card__art" src={art} />
+                    ) : (
+                      <EmptyArtPlaceholder className="album-card__art" />
+                    )}
+                    <button
+                      aria-label={`Play ${album.title}`}
+                      className="album-card__quick-play"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void onPlayAlbum([album.id]);
+                      }}
+                      title={`Play ${album.title}`}
+                      type="button"
+                    >
+                      <PlaySimpleIcon size={14} />
+                    </button>
+                  </div>
+
                   <div className="album-card__meta">
+                    {album.composer ? (
+                      <HoverScrollText
+                        className="album-card__composer"
+                        text={album.composer}
+                      />
+                    ) : null}
                     <HoverScrollText
                       className="album-card__title"
                       speed={52}
                       text={album.title}
                     />
-                    {album.composer ? (
-                      <HoverScrollText
-                        className="album-card__detail"
-                        text={album.composer}
-                      />
-                    ) : null}
                     {album.credit ? (
                       <HoverScrollText
                         className="album-card__detail"
@@ -297,8 +415,8 @@ export function LibraryPane({
                     ) : null}
                   </div>
                   <div className="album-card__footer">
-                    <span>{album.trackCount} tracks</span>
-                    <span>{album.year || 'Year unknown'}</span>
+                    <span>{album.trackCount} {album.trackCount === 1 ? 'track' : 'tracks'}</span>
+                    <span>{album.year || '—'}</span>
                   </div>
                 </button>
               );
@@ -318,10 +436,10 @@ export function LibraryPane({
                 }}
               >
                 <button
-                  onClick={() => void runContextAction(onAddToPlaylist)}
+                  onClick={() => void runContextAction(onPlayAlbum)}
                   type="button"
                 >
-                  Add to playlist
+                  Play album
                 </button>
                 <button onClick={() => void runContextAction(onAddToQueue)} type="button">
                   Add to queue
@@ -330,10 +448,13 @@ export function LibraryPane({
                   onClick={() => void runContextAction(onReplaceQueue)}
                   type="button"
                 >
-                  Put in queue
+                  Replace queue
                 </button>
-                <button onClick={() => void runContextAction(onPlayAlbum)} type="button">
-                  Play album
+                <button
+                  onClick={() => void runContextAction(onAddToPlaylist)}
+                  type="button"
+                >
+                  Add to playlist...
                 </button>
                 <button
                   onClick={() => void runContextAction(onGoToDirectory)}

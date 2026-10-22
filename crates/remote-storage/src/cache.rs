@@ -50,11 +50,19 @@ impl RemoteCacheManager {
     /// Resolves the default local cache directory:
     /// `%LOCALAPPDATA%/Aria/remote_cache` on Windows, or standard cache on Linux/macOS.
     pub fn default_cache_dir() -> Result<PathBuf, RemoteStorageError> {
+        #[cfg(target_os = "android")]
+        let base_dir = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/data/data/com.aria.player"))
+            .join("cache");
+
+        #[cfg(not(target_os = "android"))]
         let base_dir = dirs::data_local_dir()
             .or_else(|| std::env::current_dir().ok().map(|dir| dir.join(".cache")))
             .ok_or_else(|| {
                 RemoteStorageError::ProviderError("Could not resolve local app data directory".into())
             })?;
+
         Ok(base_dir.join("Aria").join("remote_cache"))
     }
 

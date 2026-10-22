@@ -1132,6 +1132,16 @@ export async function deleteAlbumFromTarget(
   return invoke<void>('delete_album_from_target', { albumId, targetId });
 }
 
+export async function deletePlaylistFromTarget(
+  playlistId: string,
+  targetId: string,
+): Promise<void> {
+  if (!isTauriRuntime) {
+    return;
+  }
+  return invoke<void>('delete_playlist_from_target', { playlistId, targetId });
+}
+
 export async function getRemoteSyncedItems(
   targetId: string,
 ): Promise<RemoteSyncedItem[]> {
@@ -1181,12 +1191,71 @@ export async function syncAllRemoteTargets(): Promise<RemoteSyncCompletedEvent[]
   return invoke<RemoteSyncCompletedEvent[]>('sync_all_remote_targets');
 }
 
+declare global {
+  interface Window {
+    AriaAndroid?: {
+      openUrl: (url: string) => boolean;
+      copyText: (text: string) => boolean;
+    };
+  }
+}
+
 export async function openUrl(url: string): Promise<void> {
+  if (typeof window !== 'undefined' && window.AriaAndroid?.openUrl) {
+    try {
+      if (window.AriaAndroid.openUrl(url)) {
+        return;
+      }
+    } catch (err) {
+      console.warn('AriaAndroid.openUrl failed, trying fallback:', err);
+    }
+  }
+
   if (!isTauriRuntime) {
     window.open(url, '_blank');
     return;
   }
   return invoke<void>('open_url', { url });
+}
+
+export async function copyToClipboard(text: string): Promise<void> {
+  if (typeof window !== 'undefined' && window.AriaAndroid?.copyText) {
+    try {
+      if (window.AriaAndroid.copyText(text)) {
+        return;
+      }
+    } catch (err) {
+      console.warn('AriaAndroid.copyText failed, trying fallback:', err);
+    }
+  }
+
+  if (isTauriRuntime) {
+    try {
+      await invoke<void>('copy_to_clipboard', { text });
+      return;
+    } catch {
+      // fallback
+    }
+  }
+
+  if (navigator?.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // fallback
+    }
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'true');
+  textarea.style.position = 'absolute';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  document.body.removeChild(textarea);
 }
 
 function stringifyDebugError(error: unknown): string {

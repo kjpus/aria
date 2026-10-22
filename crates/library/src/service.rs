@@ -131,12 +131,21 @@ impl LibraryService {
 
     pub async fn merge_remote_tracks(&self, remote_tracks: Vec<ScannedTrack>) -> LibrarySnapshot {
         let mut state = self.state.write().await;
+        let mut track_indices: HashMap<String, usize> = state
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.id.clone(), i))
+            .collect();
+
         for new_track in remote_tracks {
-            if let Some(pos) = state.tracks.iter().position(|t| t.id == new_track.id) {
+            if let Some(&pos) = track_indices.get(&new_track.id) {
                 if state.tracks[pos].path.starts_with("remote://") {
                     state.tracks[pos] = new_track;
                 }
             } else {
+                let new_pos = state.tracks.len();
+                track_indices.insert(new_track.id.clone(), new_pos);
                 state.tracks.push(new_track);
             }
         }
@@ -499,11 +508,18 @@ fn scan_library(
 }
 
 fn album_art_cache_root() -> PathBuf {
-    dirs::data_local_dir()
+    #[cfg(target_os = "android")]
+    let base_dir = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/data/data/com.aria.player"))
+        .join("cache");
+
+    #[cfg(not(target_os = "android"))]
+    let base_dir = dirs::data_local_dir()
         .or_else(dirs::cache_dir)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Aria")
-        .join("album-art")
+        .unwrap_or_else(std::env::temp_dir);
+
+    base_dir.join("Aria").join("album-art")
 }
 
 fn should_skip_entry(entry: &walkdir::DirEntry) -> bool {

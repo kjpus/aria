@@ -82,6 +82,7 @@ pub fn run() {
             commands::remote::upload_album_to_target,
             commands::remote::upload_playlist_to_target,
             commands::remote::delete_album_from_target,
+            commands::remote::delete_playlist_from_target,
             commands::remote::get_remote_synced_items,
             commands::remote::get_remote_cache_status,
             commands::remote::clear_remote_cache,

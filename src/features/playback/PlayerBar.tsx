@@ -185,8 +185,22 @@ export function PlayerBar({
             src={art}
           />
         ) : (
-          <div className="player-bar__art">
-            <span>Aria</span>
+          <div className="player-bar__art player-bar__art--empty">
+            <svg
+              aria-hidden="true"
+              fill="none"
+              height="20"
+              stroke="currentColor"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth="1.75"
+              viewBox="0 0 24 24"
+              width="20"
+            >
+              <circle cx="12" cy="12" r="10" />
+              <circle cx="12" cy="12" r="4" />
+              <circle cx="12" cy="12" fill="currentColor" r="1.5" />
+            </svg>
           </div>
         )}
         <div className="player-bar__meta">

@@ -1,18 +1,21 @@
 use aria_domain::{
     AppBootstrap, AppEvent, CatalogRule, FieldExportRequest, LibraryEvent, LibraryFieldMapping,
     LibrarySnapshot, OutputDeviceSnapshot, PlayTrackRequest, PlaybackEvent, PlaybackPreferences,
-    PlaybackSessionSnapshot, PlaybackSnapshot, PlaybackStatus, PlaylistEvent, PlaylistImportPreview,
-    PlaylistSnapshot, PreviewTrack, RemoteBackendType, RemoteEvent, RemoteSyncCompletedEvent,
-    RemoteSyncedItem, RemoteTarget, ScannedTrack, SettingsSnapshot,
-    ThemePreference, TrackTableSettings, TrackTagEditRequest, UploadCompletedEvent,
+    PlaybackSessionSnapshot, PlaybackSnapshot, PlaybackStatus, Playlist, PlaylistEvent,
+    PlaylistImportPreview, PlaylistSnapshot, PreviewTrack, RemoteBackendType, RemoteEvent,
+    RemotePlaylistTrack, RemoteSyncCompletedEvent, RemoteSyncedItem, RemoteTarget, ScannedTrack,
+    SettingsSnapshot, ThemePreference, TrackTableSettings, TrackTagEditRequest,
+    UploadCompletedEvent,
 };
+use aria_library::manifest::{build_album_manifest, derive_systematic_folder_name};
 use aria_library::{LibraryError, LibraryService};
 use aria_playback::{PlaybackError, PlaybackService};
 use aria_playlists::{PlaylistError, PlaylistService};
 use aria_remote_storage::{
-    create_backend_for_target, sync_remote_library, upload_album, GoogleAuthConfig,
-    GoogleDriveStoredConfig, PathUpdater, PendingAuthFlow, PlaybackPrefetcher, PrefetchCandidate,
-    RemoteCacheManager, RemoteCacheStatus, RemoteStorageError, StorageStatus, UploadOptions,
+    create_backend_for_target, sync_remote_library, sync_remote_playlists, upload_album,
+    upload_playlist, GoogleAuthConfig, GoogleDriveStoredConfig, PathUpdater, PendingAuthFlow,
+    PlaybackPrefetcher, PrefetchCandidate, RemoteCacheManager, RemoteCacheStatus,
+    RemoteStorageError, StorageStatus, UploadOptions,
 };
 use aria_storage::{AppDatabase, SettingsStore, StorageError};
 use std::collections::{BTreeMap, HashSet};
@@ -1133,9 +1136,7 @@ impl AppCore {
             .await
             {
                 Ok(synced_items) => {
-                    for item in &synced_items {
-                        let _ = core.database.save_remote_synced_item(item);
-                    }
+                    let _ = core.database.save_remote_synced_items_batch(&synced_items);
                     let album_id = synced_items
                         .iter()
                         .find(|i| i.item_type == "album")
@@ -1233,17 +1234,69 @@ impl AppCore {
         });
 
         let core = self.clone();
+        let playlist_clone = playlist.clone();
         let playlist_name = playlist.name.clone();
         let playlist_id_clone = playlist.id.clone();
 
         tokio::spawn(async move {
             let mut any_failed = false;
+            let mut track_info_map: std::collections::HashMap<String, RemotePlaylistTrack> =
+                std::collections::HashMap::new();
 
             for (album_title, tracks_to_upload) in album_groups {
                 let options = UploadOptions {
                     compute_checksums: false,
                     current_target_usage_bytes: current_usage,
                 };
+
+                // Pre-compute remote track paths and canonical track IDs for playlist manifest
+                if let Ok(manifest) = build_album_manifest(&album_title, &tracks_to_upload, None, false) {
+                    let relative_folder = derive_systematic_folder_name(&manifest);
+                    for (idx, m_track) in manifest.tracks.iter().enumerate() {
+                        if let Some(orig_track) = tracks_to_upload.get(idx) {
+                            let (track_id, rel_path) = if orig_track.path.starts_with(&format!("remote://{}/", target.id)) {
+                                (
+                                    orig_track.id.clone(),
+                                    orig_track
+                                        .path
+                                        .strip_prefix(&format!("remote://{}/", target.id))
+                                        .unwrap_or(&orig_track.path)
+                                        .to_string(),
+                                )
+                            } else {
+                                (
+                                    m_track.track_id.clone(),
+                                    format!("{}/{}", relative_folder, m_track.relative_file_name),
+                                )
+                            };
+
+                            track_info_map.insert(
+                                orig_track.id.clone(),
+                                RemotePlaylistTrack {
+                                    track_id,
+                                    relative_path: rel_path,
+                                    title: orig_track
+                                        .mapped_fields
+                                        .get("title")
+                                        .and_then(|t| t.first())
+                                        .cloned()
+                                        .unwrap_or_else(|| orig_track.file_name.clone()),
+                                    composer: orig_track
+                                        .mapped_fields
+                                        .get("composer")
+                                        .and_then(|t| t.first())
+                                        .cloned(),
+                                    album: orig_track
+                                        .mapped_fields
+                                        .get("album")
+                                        .and_then(|t| t.first())
+                                        .cloned(),
+                                    duration_ms: orig_track.audio.duration_ms,
+                                },
+                            );
+                        }
+                    }
+                }
 
                 match upload_album(
                     backend.clone(),
@@ -1256,9 +1309,7 @@ impl AppCore {
                 .await
                 {
                     Ok(synced_items) => {
-                        for item in &synced_items {
-                            let _ = core.database.save_remote_synced_item(item);
-                        }
+                        let _ = core.database.save_remote_synced_items_batch(&synced_items);
                         if let Ok(usage) = core.database.get_total_synced_bytes_for_target(&target.id) {
                             current_usage = usage;
                         }
@@ -1294,15 +1345,47 @@ impl AppCore {
             }
 
             if !any_failed {
-                let _ = core.events.send(AppEvent::Remote(RemoteEvent::UploadCompleted(
-                    UploadCompletedEvent {
-                        target_id: target.id.clone(),
-                        album_id: playlist_id_clone,
-                        album_title: format!("Playlist \"{}\"", playlist_name),
-                        success: true,
-                        error_message: None,
-                    },
-                )));
+                // Upload the playlist manifest (.json) and portable playlist (.m3u8) to remote
+                let mut playlist_remote_tracks = Vec::new();
+                for track_id in &playlist_clone.track_ids {
+                    if let Some(rpt) = track_info_map.get(track_id) {
+                        playlist_remote_tracks.push(rpt.clone());
+                    }
+                }
+
+                match upload_playlist(
+                    backend.clone(),
+                    &target,
+                    &playlist_clone,
+                    &playlist_remote_tracks,
+                    Some(progress_tx.clone()),
+                )
+                .await
+                {
+                    Ok(synced_item) => {
+                        let _ = core.database.save_remote_synced_item(&synced_item);
+                        let _ = core.events.send(AppEvent::Remote(RemoteEvent::UploadCompleted(
+                            UploadCompletedEvent {
+                                target_id: target.id.clone(),
+                                album_id: playlist_id_clone,
+                                album_title: format!("Playlist \"{}\"", playlist_name),
+                                success: true,
+                                error_message: None,
+                            },
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = core.events.send(AppEvent::Remote(RemoteEvent::UploadCompleted(
+                            UploadCompletedEvent {
+                                target_id: target.id.clone(),
+                                album_id: playlist_id_clone,
+                                album_title: format!("Playlist \"{}\"", playlist_name),
+                                success: false,
+                                error_message: Some(format!("Failed to upload playlist manifest: {e}")),
+                            },
+                        )));
+                    }
+                }
             }
         });
 
@@ -1333,6 +1416,42 @@ impl AppCore {
             }
         }
 
+        Ok(())
+    }
+
+    pub async fn delete_playlist_from_target(
+        &self,
+        playlist_id: &str,
+        target_id: &str,
+    ) -> Result<(), AppCoreError> {
+        let targets = self.database.load_remote_targets()?;
+        let target = targets
+            .into_iter()
+            .find(|t| t.id == target_id)
+            .ok_or_else(|| AppCoreError::Remote(format!("Target '{target_id}' not found")))?;
+
+        let backend = create_backend_for_target(&target)?;
+        let manifest_path = format!("playlists/{playlist_id}.json");
+        let _ = backend.delete_file(&manifest_path).await;
+
+        // Also update aria-playlists-index.json
+        if let Ok(bytes) = backend.read_bytes("aria-playlists-index.json").await {
+            let json = String::from_utf8_lossy(&bytes);
+            if let Ok(mut index) = aria_library::manifest::deserialize_master_playlist_index(&json) {
+                if let Some(removed) = index.playlists.iter().find(|p| p.playlist_id == playlist_id) {
+                    if let Some(ref m3u) = removed.m3u_path {
+                        let _ = backend.delete_file(m3u).await;
+                    }
+                }
+                index.playlists.retain(|p| p.playlist_id != playlist_id);
+                index.updated_at = chrono::Utc::now().to_rfc3339();
+                if let Ok(serialized) = aria_library::manifest::serialize_master_playlist_index(&index) {
+                    let _ = backend.write_bytes("aria-playlists-index.json", serialized.as_bytes()).await;
+                }
+            }
+        }
+
+        self.database.delete_remote_synced_item(playlist_id, target_id)?;
         Ok(())
     }
 
@@ -1377,6 +1496,11 @@ impl AppCore {
             .map(|t| t.id.clone())
             .collect();
 
+        let target_last_synced_at = self.database.get_remote_target_last_sync(&target.id)?;
+        let existing_album_sync_times = self
+            .database
+            .load_synced_album_timestamps_for_target(&target.id)?;
+
         let (progress_tx, mut progress_rx) = broadcast::channel(64);
         let events = self.events.clone();
 
@@ -1386,19 +1510,31 @@ impl AppCore {
             }
         });
 
+        let backend_for_playlists = backend.clone();
         match sync_remote_library(
             backend,
             &target,
             &artwork_cache_dir,
             &existing_ids,
+            target_last_synced_at.as_deref(),
+            &existing_album_sync_times,
             Some(progress_tx),
         )
         .await
         {
             Ok(result) => {
-                // Save synced items to database
-                for item in &result.synced_items {
-                    let _ = self.database.save_remote_synced_item(item);
+                // Save synced items to database in a single batch
+                if !result.synced_items.is_empty() {
+                    let _ = self
+                        .database
+                        .save_remote_synced_items_batch(&result.synced_items);
+                }
+
+                // Update target last sync timestamp from master index
+                if let Some(ref updated_at) = result.master_index_updated_at {
+                    let _ = self
+                        .database
+                        .save_remote_target_last_sync(&target.id, updated_at);
                 }
 
                 // Merge synced tracks into the library
@@ -1412,11 +1548,97 @@ impl AppCore {
                     )));
                 }
 
+                // Sync playlists from remote target
+                let mut new_playlists_count = 0;
+                if let Ok(remote_playlists) = sync_remote_playlists(backend_for_playlists, &target).await {
+                    let library_snapshot = self.library.snapshot().await;
+                    let current_playlists = self.playlists.snapshot().await;
+                    let mut playlist_changed = false;
+
+                    for remote_pl in remote_playlists {
+                        let mut resolved_track_ids = Vec::new();
+                        for rpt in &remote_pl.tracks {
+                            // 1. Direct match by canonical track ID
+                            if let Some(track) = library_snapshot.tracks.iter().find(|t| t.id == rpt.track_id) {
+                                resolved_track_ids.push(track.id.clone());
+                                continue;
+                            }
+                            // 2. Match by remote path suffix
+                            let remote_suffix = format!("{}/{}", target.id, rpt.relative_path);
+                            if let Some(track) = library_snapshot.tracks.iter().find(|t| t.path.ends_with(&remote_suffix)) {
+                                resolved_track_ids.push(track.id.clone());
+                                continue;
+                            }
+                            // 3. Match by mapped title and album
+                            if let Some(track) = library_snapshot.tracks.iter().find(|t| {
+                                let title_match = t
+                                    .mapped_fields
+                                    .get("title")
+                                    .and_then(|v| v.first())
+                                    .map(|s| s.as_str())
+                                    .unwrap_or(&t.file_name)
+                                    .eq_ignore_ascii_case(&rpt.title);
+                                let album_match = if let Some(ref alb) = rpt.album {
+                                    t.mapped_fields
+                                        .get("album")
+                                        .and_then(|v| v.first())
+                                        .map(|s| s.as_str())
+                                        .unwrap_or("")
+                                        .eq_ignore_ascii_case(alb)
+                                } else {
+                                    true
+                                };
+                                title_match && album_match
+                            }) {
+                                resolved_track_ids.push(track.id.clone());
+                            }
+                        }
+
+                        let playlist_synced_item = RemoteSyncedItem {
+                            item_id: remote_pl.playlist_id.clone(),
+                            remote_target_id: target.id.clone(),
+                            item_type: "playlist".to_string(),
+                            remote_path: format!("playlists/{}.json", remote_pl.playlist_id),
+                            remote_file_id: None,
+                            size_bytes: 0,
+                            checksum: None,
+                            sync_status: "synced".to_string(),
+                            last_synced_at: remote_pl.updated_at.clone(),
+                        };
+                        let _ = self.database.save_remote_synced_item(&playlist_synced_item);
+
+                        if let Some(existing) = current_playlists.playlists.iter().find(|p| p.id == remote_pl.playlist_id) {
+                            if existing.track_ids.is_empty() && !resolved_track_ids.is_empty() {
+                                let _ = self.playlists.add_tracks(existing.id.clone(), resolved_track_ids).await;
+                                playlist_changed = true;
+                            }
+                        } else {
+                            let _ = self.playlists.import_synced_playlist(Playlist {
+                                id: remote_pl.playlist_id.clone(),
+                                name: remote_pl.name.clone(),
+                                collage_seed: remote_pl.collage_seed,
+                                track_ids: resolved_track_ids,
+                                created_at: remote_pl.created_at.clone(),
+                            }).await;
+                            new_playlists_count += 1;
+                            playlist_changed = true;
+                        }
+                    }
+
+                    if playlist_changed {
+                        let updated_playlists = self.playlists.snapshot().await;
+                        let _ = self.events.send(AppEvent::Playlists(PlaylistEvent::SnapshotChanged(
+                            updated_playlists,
+                        )));
+                    }
+                }
+
                 let completed = RemoteSyncCompletedEvent {
                     target_id: target.id.clone(),
                     target_name: target.name.clone(),
                     new_albums_count: result.new_albums_count,
                     new_tracks_count: result.new_tracks_count,
+                    new_playlists_count,
                     success: true,
                     error_message: None,
                 };
@@ -1431,6 +1653,7 @@ impl AppCore {
                     target_name: target.name.clone(),
                     new_albums_count: 0,
                     new_tracks_count: 0,
+                    new_playlists_count: 0,
                     success: false,
                     error_message: Some(err.to_string()),
                 };
@@ -1458,6 +1681,7 @@ impl AppCore {
                             target_name: target.name.clone(),
                             new_albums_count: 0,
                             new_tracks_count: 0,
+                            new_playlists_count: 0,
                             success: false,
                             error_message: Some(e.to_string()),
                         });

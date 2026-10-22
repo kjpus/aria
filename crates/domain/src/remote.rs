@@ -107,6 +107,8 @@ pub struct MasterAlbumSummary {
     pub track_count: usize,
     pub total_duration_ms: u64,
     pub total_size_bytes: u64,
+    #[serde(default)]
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -115,4 +117,50 @@ pub struct MasterLibraryIndex {
     pub manifest_version: u32,
     pub updated_at: String,
     pub albums: Vec<MasterAlbumSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePlaylistTrack {
+    pub track_id: String,
+    pub relative_path: String,
+    pub title: String,
+    #[serde(default)]
+    pub composer: Option<String>,
+    #[serde(default)]
+    pub album: Option<String>,
+    #[serde(default)]
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePlaylistManifest {
+    pub manifest_version: u32,
+    pub playlist_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub collage_seed: u32,
+    pub created_at: Option<String>,
+    pub updated_at: String,
+    pub tracks: Vec<RemotePlaylistTrack>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePlaylistSummary {
+    pub playlist_id: String,
+    pub name: String,
+    pub track_count: usize,
+    pub updated_at: String,
+    pub relative_path: String,
+    pub m3u_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MasterPlaylistIndex {
+    pub manifest_version: u32,
+    pub updated_at: String,
+    pub playlists: Vec<RemotePlaylistSummary>,
 }

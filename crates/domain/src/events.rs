@@ -99,6 +99,8 @@ pub struct RemoteSyncCompletedEvent {
     pub target_name: String,
     pub new_albums_count: usize,
     pub new_tracks_count: usize,
+    #[serde(default)]
+    pub new_playlists_count: usize,
     pub success: bool,
     pub error_message: Option<String>,
 }

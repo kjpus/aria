@@ -66,6 +66,22 @@ import {
   syncAllRemoteTargets,
 } from '../lib/aria';
 import { RefreshIcon } from '../components/RefreshIcon';
+import {
+  AlbumIcon,
+  AriaAppLogo,
+  LibraryIcon,
+  PlaylistIcon,
+  QueueIcon,
+  SettingsIcon,
+  SidebarToggleIcon,
+  TracksIcon,
+} from '../components/Icons';
+import {
+  applyUiPreferences,
+  loadUiPreferences,
+  saveUiPreferences,
+  type UiPreferences,
+} from '../lib/ui-preferences';
 import type {
   AppBootstrap,
   AppEvent,
@@ -132,8 +148,26 @@ function resolveTheme(theme: ThemePreference, prefersDark: boolean): 'light' | '
   return theme;
 }
 
+function getPaneIcon(pane: PaneKey) {
+  switch (pane) {
+    case 'library':
+      return <LibraryIcon size={17} />;
+    case 'album':
+      return <AlbumIcon size={17} />;
+    case 'tracks':
+      return <TracksIcon size={17} />;
+    case 'playlist':
+      return <PlaylistIcon size={17} />;
+    case 'queue':
+      return <QueueIcon size={17} />;
+    case 'settings':
+      return <SettingsIcon size={17} />;
+  }
+}
+
 export function App() {
   const [bootstrap, setBootstrap] = useState<AppBootstrap | null>(null);
+  const [uiPrefs, setUiPrefs] = useState<UiPreferences>(() => loadUiPreferences());
   const [activePane, setActivePane] = useState<PaneKey>('library');
   const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(null);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
@@ -357,6 +391,63 @@ export function App() {
       0,
     );
   }, [bootstrap]);
+
+  useEffect(() => {
+    applyUiPreferences(uiPrefs);
+  }, [uiPrefs]);
+
+  function handleUiPrefsChange(nextPrefs: UiPreferences) {
+    setUiPrefs(nextPrefs);
+    saveUiPreferences(nextPrefs);
+    applyUiPreferences(nextPrefs);
+  }
+
+  function handleToggleSidebar() {
+    handleUiPrefsChange({
+      ...uiPrefs,
+      sidebarCollapsed: !uiPrefs.sidebarCollapsed,
+    });
+  }
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.target instanceof HTMLInputElement ||
+        event.target instanceof HTMLTextAreaElement ||
+        event.target instanceof HTMLSelectElement
+      ) {
+        return;
+      }
+
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey) {
+        if (event.key === '1') {
+          event.preventDefault();
+          setActivePane('library');
+        } else if (event.key === '2') {
+          event.preventDefault();
+          setActivePane('album');
+        } else if (event.key === '3') {
+          event.preventDefault();
+          setActivePane('tracks');
+        } else if (event.key === '4') {
+          event.preventDefault();
+          setActivePane('playlist');
+        } else if (event.key === '5') {
+          event.preventDefault();
+          setActivePane('queue');
+        } else if (event.key === '6') {
+          event.preventDefault();
+          setActivePane('settings');
+        } else if (event.key === 'b' || event.key === 'B') {
+          event.preventDefault();
+          handleToggleSidebar();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [uiPrefs]);
 
   function handleOpenAlbum(albumId: string) {
     setSelectedAlbumId(albumId);
@@ -1335,255 +1426,333 @@ export function App() {
   }
 
   return (
-    <main className="app-shell">
-      <section className="workspace">
-        <div className="workspace__topbar">
-          <nav className="pane-tabs">
-            {(Object.keys(paneMeta) as PaneKey[]).map((pane) => (
+    <main className={`app-shell app-shell--${uiPrefs.navStyle}`}>
+      <div className="app-shell__body">
+        {uiPrefs.navStyle === 'sidebar' ? (
+          <aside
+            aria-label="App Navigation"
+            className={`app-sidebar${uiPrefs.sidebarCollapsed ? ' app-sidebar--collapsed' : ''}`}
+          >
+            <div className="app-sidebar__header">
+              <div
+                className="app-sidebar__brand"
+                onClick={() => setActivePane('library')}
+                role="button"
+                style={{ cursor: 'pointer' }}
+                tabIndex={0}
+                title="Aria — Hi-Fi Classical"
+              >
+                <span className="app-sidebar__logo">
+                  <AriaAppLogo size={28} />
+                </span>
+                {!uiPrefs.sidebarCollapsed ? (
+                  <div className="app-sidebar__brand-text">
+                    <span className="app-sidebar__title">Aria</span>
+                    <span className="app-sidebar__tagline">Hi-Fi Classical</span>
+                  </div>
+                ) : null}
+              </div>
               <button
-                className={activePane === pane ? 'pane-tabs__active' : 'ghost-button'}
-                key={pane}
-                onClick={() => setActivePane(pane)}
+                aria-label={uiPrefs.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                className="ghost-button app-sidebar__collapse-toggle"
+                onClick={handleToggleSidebar}
+                title={uiPrefs.sidebarCollapsed ? 'Expand sidebar (Ctrl+B)' : 'Collapse sidebar (Ctrl+B)'}
                 type="button"
               >
-                {pane === 'queue'
-                  ? `${paneMeta[pane].label} (${remainingQueueCount})`
-                  : paneMeta[pane].label}
+                <SidebarToggleIcon size={16} />
               </button>
-            ))}
-          </nav>
-          <div className="workspace__status">
-            <button
-              className="ghost-button workspace__sync-button"
-              disabled={isSyncingRemote}
-              onClick={() => void handleRefreshFromRemote()}
-              title="Refresh and download library metadata and tracks from remote storage"
-              type="button"
-            >
-              <RefreshIcon className={isSyncingRemote ? 'aria-spinning' : ''} />
-              <span>{isSyncingRemote ? 'Refreshing...' : 'Refresh Remote'}</span>
-            </button>
-            {error ? (
-              <div
-                className="device-chip workspace__status-chip"
-                style={{
-                  background: 'rgba(214, 88, 72, 0.15)',
-                  border: '1px solid rgba(214, 88, 72, 0.4)',
-                  color: '#ffbeb2',
-                }}
-                title={error}
+            </div>
+
+            <nav className="app-sidebar__nav">
+              {(Object.keys(paneMeta) as PaneKey[]).map((pane) => {
+                const isActive = activePane === pane;
+                return (
+                  <button
+                    aria-current={isActive ? 'page' : undefined}
+                    className={`app-sidebar__item${isActive ? ' app-sidebar__item--active' : ''}`}
+                    key={pane}
+                    onClick={() => setActivePane(pane)}
+                    title={paneMeta[pane].label}
+                    type="button"
+                  >
+                    <span className="app-sidebar__item-icon">{getPaneIcon(pane)}</span>
+                    {!uiPrefs.sidebarCollapsed ? (
+                      <span className="app-sidebar__item-label">{paneMeta[pane].label}</span>
+                    ) : null}
+                    {pane === 'queue' && remainingQueueCount > 0 ? (
+                      <span className="app-sidebar__item-badge">{remainingQueueCount}</span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </nav>
+
+            <div className="app-sidebar__footer">
+              <button
+                className="ghost-button app-sidebar__sync-button"
+                disabled={isSyncingRemote}
+                onClick={() => void handleRefreshFromRemote()}
+                title="Refresh and download library metadata and tracks from remote storage"
+                type="button"
               >
-                <span>{error}</span>
+                <RefreshIcon className={isSyncingRemote ? 'aria-spinning' : ''} />
+                {!uiPrefs.sidebarCollapsed ? (
+                  <span>{isSyncingRemote ? 'Syncing...' : 'Sync Remote'}</span>
+                ) : null}
+              </button>
+            </div>
+          </aside>
+        ) : null}
+
+        <section className="workspace">
+          <div className="workspace__topbar">
+            {uiPrefs.navStyle === 'topbar' ? (
+              <div className="workspace__brand-and-tabs">
+                <div
+                  className="app-sidebar__brand"
+                  onClick={() => setActivePane('library')}
+                  role="button"
+                  style={{ cursor: 'pointer' }}
+                  tabIndex={0}
+                  title="Aria — Hi-Fi Classical"
+                >
+                  <span className="app-sidebar__logo">
+                    <AriaAppLogo size={26} />
+                  </span>
+                  <div className="app-sidebar__brand-text">
+                    <span className="app-sidebar__title" style={{ fontSize: '0.9rem' }}>Aria</span>
+                  </div>
+                </div>
+                <nav className="pane-tabs">
+                  {(Object.keys(paneMeta) as PaneKey[]).map((pane) => (
+                    <button
+                      className={activePane === pane ? 'pane-tabs__active' : 'ghost-button'}
+                      key={pane}
+                      onClick={() => setActivePane(pane)}
+                      type="button"
+                    >
+                      <span className="pane-tabs__icon">{getPaneIcon(pane)}</span>
+                      <span>
+                        {pane === 'queue'
+                          ? `${paneMeta[pane].label} (${remainingQueueCount})`
+                          : paneMeta[pane].label}
+                      </span>
+                    </button>
+                  ))}
+                </nav>
+              </div>
+            ) : (
+              <div className="workspace__heading">
+                <h1 className="workspace__pane-title">{paneMeta[activePane].label}</h1>
+              </div>
+            )}
+
+            <div className="workspace__status">
+              {uiPrefs.navStyle === 'topbar' ? (
                 <button
-                  aria-label="Dismiss error"
-                  className="ghost-button"
-                  onClick={() => {
-                    setError(null);
-                    setActiveUploadProgress(null);
-                  }}
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    color: '#ffbeb2',
-                    cursor: 'pointer',
-                    padding: '0 0.2rem',
-                    marginLeft: '0.4rem',
-                    fontSize: '1.05rem',
-                    lineHeight: 1,
-                    flexShrink: 0,
-                  }}
-                  title="Dismiss"
+                  className="ghost-button workspace__sync-button"
+                  disabled={isSyncingRemote}
+                  onClick={() => void handleRefreshFromRemote()}
+                  title="Refresh and download library metadata and tracks from remote storage"
                   type="button"
                 >
-                  ×
+                  <RefreshIcon className={isSyncingRemote ? 'aria-spinning' : ''} />
+                  <span>{isSyncingRemote ? 'Refreshing...' : 'Refresh Remote'}</span>
                 </button>
-              </div>
-            ) : activeUploadProgress ? (
-              <div
-                className="device-chip workspace__status-chip"
-                style={{
-                  background: 'rgba(214, 177, 106, 0.15)',
-                  border: '1px solid var(--accent)',
-                  color: 'var(--accent)',
-                }}
-                title={`Uploading: ${activeUploadProgress.albumTitle} (${activeUploadProgress.currentFile})`}
-              >
-                <span>
-                  {Math.min(activeUploadProgress.completedFiles, activeUploadProgress.totalFiles)}/{activeUploadProgress.totalFiles} tracks uploaded
-                </span>
-              </div>
-            ) : activeSyncProgress ? (
-              <div
-                className="device-chip workspace__status-chip"
-                style={{
-                  background: 'rgba(214, 177, 106, 0.15)',
-                  border: '1px solid var(--accent)',
-                  color: 'var(--accent)',
-                }}
-                title={activeSyncProgress.currentAlbum ? `Current: ${activeSyncProgress.currentAlbum}` : undefined}
-              >
-                <RefreshIcon className="aria-spinning" />
-                <span>
-                  {activeSyncProgress.completedAlbums}/{activeSyncProgress.totalAlbums} albums synced
-                </span>
-              </div>
-            ) : uploadStatusMessage ? (
-              <div
-                className="device-chip workspace__status-chip"
-                style={{
-                  background: 'rgba(76, 175, 80, 0.15)',
-                  color: '#81c784',
-                }}
-              >
-                <span>{uploadStatusMessage}</span>
-              </div>
-            ) : syncStatusMessage ? (
-              <div
-                className="device-chip workspace__status-chip"
-                style={{
-                  background: 'rgba(76, 175, 80, 0.15)',
-                  color: '#81c784',
-                }}
-              >
-                <span>{syncStatusMessage}</span>
-              </div>
-            ) : null}
+              ) : null}
+              {error ? (
+                <div
+                  className="device-chip workspace__status-chip workspace__status-chip--error"
+                  title={error}
+                >
+                  <span>{error}</span>
+                  <button
+                    aria-label="Dismiss error"
+                    className="ghost-button"
+                    onClick={() => {
+                      setError(null);
+                      setActiveUploadProgress(null);
+                    }}
+                    title="Dismiss"
+                    type="button"
+                  >
+                    ×
+                  </button>
+                </div>
+              ) : activeUploadProgress ? (
+                <div
+                  className="device-chip workspace__status-chip workspace__status-chip--active"
+                  title={`Uploading: ${activeUploadProgress.albumTitle} (${activeUploadProgress.currentFile})`}
+                >
+                  <span>
+                    {Math.min(activeUploadProgress.completedFiles, activeUploadProgress.totalFiles)}/{activeUploadProgress.totalFiles} tracks uploaded
+                  </span>
+                </div>
+              ) : activeSyncProgress ? (
+                <div
+                  className="device-chip workspace__status-chip workspace__status-chip--active"
+                  title={activeSyncProgress.currentAlbum ? `Current: ${activeSyncProgress.currentAlbum}` : undefined}
+                >
+                  <RefreshIcon className="aria-spinning" />
+                  <span>
+                    {activeSyncProgress.completedAlbums}/{activeSyncProgress.totalAlbums} albums synced
+                  </span>
+                </div>
+              ) : uploadStatusMessage ? (
+                <div
+                  className="device-chip workspace__status-chip workspace__status-chip--success"
+                >
+                  <span>{uploadStatusMessage}</span>
+                </div>
+              ) : syncStatusMessage ? (
+                <div
+                  className="device-chip workspace__status-chip workspace__status-chip--success"
+                >
+                  <span>{syncStatusMessage}</span>
+                </div>
+              ) : null}
+            </div>
           </div>
-        </div>
 
-        <section className="workspace__content">
-          {activePane === 'library' ? (
-            <LibraryPane
-              isSyncingRemote={isSyncingRemote}
-              onAddToPlaylist={handleAddAlbumsToPlaylist}
-              onAddToQueue={handleAddAlbumsToQueue}
-              onGoToDirectory={handleGoToAlbumDirectories}
-              onOpenAlbum={handleOpenAlbum}
-              onPlayAlbum={(albumIds) => handleReplaceQueueForAlbums(albumIds, true)}
-              onRefreshRemote={handleRefreshFromRemote}
-              onReplaceQueue={(albumIds) =>
-                handleReplaceQueueForAlbums(albumIds, false)}
-              onUploadAlbum={(albumTitle) => setUploadAlbumTitle(albumTitle)}
-              selectedAlbumId={selectedAlbumId}
-              tracks={bootstrap.library.tracks}
-            />
-          ) : null}
+          <section className="workspace__content">
+            {activePane === 'library' ? (
+              <LibraryPane
+                gridSize={uiPrefs.gridSize}
+                isSyncingRemote={isSyncingRemote}
+                onAddToPlaylist={handleAddAlbumsToPlaylist}
+                onAddToQueue={handleAddAlbumsToQueue}
+                onGoToDirectory={handleGoToAlbumDirectories}
+                onGridSizeChange={(gridSize) => handleUiPrefsChange({ ...uiPrefs, gridSize })}
+                onOpenAlbum={handleOpenAlbum}
+                onPlayAlbum={(albumIds) => handleReplaceQueueForAlbums(albumIds, true)}
+                onRefreshRemote={handleRefreshFromRemote}
+                onReplaceQueue={(albumIds) =>
+                  handleReplaceQueueForAlbums(albumIds, false)}
+                onUploadAlbum={(albumTitle) => setUploadAlbumTitle(albumTitle)}
+                selectedAlbumId={selectedAlbumId}
+                tracks={bootstrap.library.tracks}
+              />
+            ) : null}
 
-          {activePane === 'album' ? (
-            <AlbumPane
-              onAddAlbumToPlaylist={handleAddAlbumToPlaylist}
-              onExportField={handleExportField}
-              onRememberExportTag={rememberSessionExportTag}
-              onAddTracksToPlaylist={handleAddTracksToPlaylist}
+            {activePane === 'album' ? (
+              <AlbumPane
+                mappings={bootstrap.library.fieldMappings}
+                onAddAlbumToPlaylist={handleAddAlbumToPlaylist}
+                onAddTracksToPlaylist={handleAddTracksToPlaylist}
+                onAddTracksToQueue={handleAddTracksToQueue}
+                onAddToQueue={handleAddAlbumToQueue}
+                onBackToLibrary={() => setActivePane('library')}
+                onExportField={handleExportField}
+                onGoToDirectory={handleGoToAlbumDirectory}
+                onPlayAlbum={(albumId) => handleReplaceQueue(albumId, true)}
+                onPlayTracks={handlePlayTracks}
+                onRememberExportTag={rememberSessionExportTag}
+                onReplaceQueue={(albumId) => handleReplaceQueue(albumId, false)}
+                onShowInExplorer={handleShowTrackInExplorer}
+                onTrackTableChange={handleAlbumTrackTableChange}
+                onUploadAlbum={(albumTitle) => setUploadAlbumTitle(albumTitle)}
+                selectedAlbumId={selectedAlbumId}
+                sessionExportTags={sessionExportTags}
+                settings={bootstrap.settings.albumTrackTable}
+                tracks={bootstrap.library.tracks}
+              />
+            ) : null}
+
+            <TrackPane
+              highlightTrackId={highlightTrackId}
+              isActive={activePane === 'tracks'}
               mappings={bootstrap.library.fieldMappings}
-              onAddTracksToQueue={handleAddTracksToQueue}
-              onAddToQueue={handleAddAlbumToQueue}
+              onAddAlbumToPlaylist={handleAddAlbumToPlaylist}
+              onAddAlbumToQueue={handleAddAlbumToQueue}
+              onAddToPlaylist={handleAddTracksToPlaylist}
+              onAddToQueue={handleAddTracksToQueue}
+              onClearHighlightTrack={() => setHighlightTrackId(null)}
+              onEditTrackTags={handleEditTrackTags}
+              onExportField={handleExportField}
               onGoToDirectory={handleGoToAlbumDirectory}
+              onOpenAlbum={handleOpenAlbum}
               onPlayAlbum={(albumId) => handleReplaceQueue(albumId, true)}
               onPlayTracks={handlePlayTracks}
+              onRememberExportTag={rememberSessionExportTag}
               onReplaceQueue={(albumId) => handleReplaceQueue(albumId, false)}
+              onReplaceQueueAndPlayTracks={handleReplaceQueueAndPlayTracks}
               onShowInExplorer={handleShowTrackInExplorer}
+              onTrackTableChange={handleTrackTableChange}
               onUploadAlbum={(albumTitle) => setUploadAlbumTitle(albumTitle)}
               sessionExportTags={sessionExportTags}
-              selectedAlbumId={selectedAlbumId}
-              settings={bootstrap.settings.albumTrackTable}
-              onTrackTableChange={handleAlbumTrackTableChange}
+              settings={bootstrap.settings.trackTable}
               tracks={bootstrap.library.tracks}
             />
-          ) : null}
 
-          <TrackPane
-            isActive={activePane === 'tracks'}
-            onAddAlbumToPlaylist={handleAddAlbumToPlaylist}
-            onAddToPlaylist={handleAddTracksToPlaylist}
-            onAddAlbumToQueue={handleAddAlbumToQueue}
-            onEditTrackTags={handleEditTrackTags}
-            onExportField={handleExportField}
-            onRememberExportTag={rememberSessionExportTag}
-            mappings={bootstrap.library.fieldMappings}
-            onAddToQueue={handleAddTracksToQueue}
-            onGoToDirectory={handleGoToAlbumDirectory}
-            onOpenAlbum={handleOpenAlbum}
-            onPlayAlbum={(albumId) => handleReplaceQueue(albumId, true)}
-            onPlayTracks={handlePlayTracks}
-            onReplaceQueueAndPlayTracks={handleReplaceQueueAndPlayTracks}
-            onReplaceQueue={(albumId) => handleReplaceQueue(albumId, false)}
-            sessionExportTags={sessionExportTags}
-            onShowInExplorer={handleShowTrackInExplorer}
-            onTrackTableChange={handleTrackTableChange}
-            onUploadAlbum={(albumTitle) => setUploadAlbumTitle(albumTitle)}
-            settings={bootstrap.settings.trackTable}
-            tracks={bootstrap.library.tracks}
-            highlightTrackId={highlightTrackId}
-            onClearHighlightTrack={() => setHighlightTrackId(null)}
-          />
+            {activePane === 'playlist' ? (
+              <PlaylistPane
+                onAddPlaylistToQueue={handleAddPlaylistToQueue}
+                onDeletePlaylist={handleDeletePlaylist}
+                onExportPlaylist={handleExportPlaylist}
+                onImportPlaylist={handleImportPlaylist}
+                onOpenAlbum={handleOpenAlbum}
+                onPlayPlaylist={handlePlayPlaylist}
+                onPlayTracks={handlePlayTracks}
+                onRegeneratePlaylistIcon={handleRegeneratePlaylistIcon}
+                onRemoveTracks={handleRemoveTracksFromPlaylist}
+                onRenamePlaylist={handleRenamePlaylist}
+                onSelectPlaylist={setSelectedPlaylistId}
+                onShufflePlayPlaylist={handleShufflePlayPlaylist}
+                onTrackTableChange={handlePlaylistTrackTableChange}
+                onUploadPlaylist={(playlist) => setUploadPlaylist(playlist)}
+                playlists={bootstrap.playlists.playlists}
+                selectedPlaylistId={selectedPlaylistId}
+                settings={bootstrap.settings.playlistTrackTable}
+                tracks={bootstrap.library.tracks}
+              />
+            ) : null}
 
-          {activePane === 'playlist' ? (
-            <PlaylistPane
-              onDeletePlaylist={handleDeletePlaylist}
-              onExportPlaylist={handleExportPlaylist}
-              onAddPlaylistToQueue={handleAddPlaylistToQueue}
-              onOpenAlbum={handleOpenAlbum}
-              onPlayPlaylist={handlePlayPlaylist}
-              onShufflePlayPlaylist={handleShufflePlayPlaylist}
-              onPlayTracks={handlePlayTracks}
-              onRemoveTracks={handleRemoveTracksFromPlaylist}
-              onRegeneratePlaylistIcon={handleRegeneratePlaylistIcon}
-              onRenamePlaylist={handleRenamePlaylist}
-              onSelectPlaylist={setSelectedPlaylistId}
-              onTrackTableChange={handlePlaylistTrackTableChange}
-              playlists={bootstrap.playlists.playlists}
-              selectedPlaylistId={selectedPlaylistId}
-              settings={bootstrap.settings.playlistTrackTable}
-              tracks={bootstrap.library.tracks}
-              onImportPlaylist={handleImportPlaylist}
-              onUploadPlaylist={(playlist) => setUploadPlaylist(playlist)}
-            />
-          ) : null}
+            {activePane === 'queue' ? (
+              <QueuePane
+                onClearQueue={handleClearQueue}
+                onOpenAlbum={handleOpenAlbum}
+                onOpenTrack={handleOpenTrack}
+                onRestoreOrder={handleRestoreQueueOrder}
+                onShuffle={handleShuffleQueue}
+                playback={bootstrap.playback}
+                tracks={bootstrap.library.tracks}
+              />
+            ) : null}
 
-          {activePane === 'queue' ? (
-            <QueuePane
-              onClearQueue={handleClearQueue}
-              onRestoreOrder={handleRestoreQueueOrder}
-              onShuffle={handleShuffleQueue}
-              playback={bootstrap.playback}
-              tracks={bootstrap.library.tracks}
-              onOpenAlbum={handleOpenAlbum}
-              onOpenTrack={handleOpenTrack}
-            />
-          ) : null}
-
-          {activePane === 'settings' ? (
-            <SettingsPane
-              currentOutputDevice={bootstrap.playback.outputDevice}
-              draftCatalogRules={draftCatalogRules}
-              draftMappings={draftMappings}
-              onAddCatalogRule={handleAddCatalogRule}
-              onAddDirectory={handleAddDirectory}
-              library={bootstrap.library}
-              outputDevices={outputDevices}
-              onAddField={handleAddField}
-              onClearLibrary={handleClearLibrary}
-              onPlaybackPreferencesChange={handlePlaybackPreferencesChange}
-              onRemoveField={handleRemoveField}
-              onRemoveRoot={handleRemoveRoot}
-              onRemoveCatalogRule={handleRemoveCatalogRule}
-              onSaveCatalogRules={handleSaveCatalogRules}
-              onSaveMappings={handleSaveMappings}
-              onRescanAll={handleRescanAll}
-              onSelectMappingFormat={setSelectedMappingFormat}
-              onThemeChange={handleThemeChange}
-              onUpdateCatalogRule={handleUpdateCatalogRule}
-              onUpdateField={handleUpdateField}
-              remoteTargets={bootstrap.remoteTargets ?? []}
-              onRemoteTargetsChange={(targets) =>
-                setBootstrap((current) => (current ? { ...current, remoteTargets: targets } : current))}
-              selectedMappingFormat={selectedMappingFormat}
-              settings={bootstrap.settings}
-            />
-          ) : null}
+            {activePane === 'settings' ? (
+              <SettingsPane
+                currentOutputDevice={bootstrap.playback.outputDevice}
+                draftCatalogRules={draftCatalogRules}
+                draftMappings={draftMappings}
+                library={bootstrap.library}
+                onAddCatalogRule={handleAddCatalogRule}
+                onAddDirectory={handleAddDirectory}
+                onAddField={handleAddField}
+                onClearLibrary={handleClearLibrary}
+                onPlaybackPreferencesChange={handlePlaybackPreferencesChange}
+                onRemoveCatalogRule={handleRemoveCatalogRule}
+                onRemoveField={handleRemoveField}
+                onRemoveRoot={handleRemoveRoot}
+                onRemoteTargetsChange={(targets) =>
+                  setBootstrap((current) => (current ? { ...current, remoteTargets: targets } : current))}
+                onRescanAll={handleRescanAll}
+                onSaveCatalogRules={handleSaveCatalogRules}
+                onSaveMappings={handleSaveMappings}
+                onSelectMappingFormat={setSelectedMappingFormat}
+                onThemeChange={handleThemeChange}
+                onUiPrefsChange={handleUiPrefsChange}
+                onUpdateCatalogRule={handleUpdateCatalogRule}
+                onUpdateField={handleUpdateField}
+                outputDevices={outputDevices}
+                remoteTargets={bootstrap.remoteTargets ?? []}
+                selectedMappingFormat={selectedMappingFormat}
+                settings={bootstrap.settings}
+                uiPrefs={uiPrefs}
+              />
+            ) : null}
+          </section>
         </section>
-      </section>
+      </div>
 
       <PlayerBar
         currentTrack={currentTrackDetails}

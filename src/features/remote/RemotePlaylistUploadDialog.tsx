@@ -97,8 +97,8 @@ export function RemotePlaylistUploadDialog({
 
         <p className="dialog-card__copy">
           Upload playlist <strong>"{playlist.name}"</strong> ({playlistTracks.length} tracks across{' '}
-          {uniqueAlbums.length} {uniqueAlbums.length === 1 ? 'album' : 'albums'}) with pre-computed
-          classical manifests and master index.
+          {uniqueAlbums.length} {uniqueAlbums.length === 1 ? 'album' : 'albums'}). The audio files, album manifests,
+          portable M3U8 playlist, and playlist manifest will be saved to the remote storage.
         </p>
 
         {enabledTargets.length === 0 ? (

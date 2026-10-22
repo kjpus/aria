@@ -3,7 +3,8 @@ use std::io::{Read, Result as IoResult};
 use std::path::Path;
 
 use aria_domain::{
-    AlbumManifest, ManifestTrack, MasterAlbumSummary, MasterLibraryIndex, ScannedTrack,
+    AlbumManifest, ManifestTrack, MasterAlbumSummary, MasterLibraryIndex, MasterPlaylistIndex,
+    Playlist, RemotePlaylistManifest, RemotePlaylistSummary, RemotePlaylistTrack, ScannedTrack,
     CURRENT_MANIFEST_VERSION,
 };
 use chrono::Utc;
@@ -270,6 +271,7 @@ pub fn build_master_album_summary(manifest: &AlbumManifest, relative_folder: &st
         track_count: manifest.tracks.len(),
         total_duration_ms,
         total_size_bytes,
+        updated_at: Some(manifest.updated_at.clone()),
     }
 }
 
@@ -295,6 +297,62 @@ pub fn serialize_master_index(index: &MasterLibraryIndex) -> Result<String, serd
 }
 
 pub fn deserialize_master_index(json: &str) -> Result<MasterLibraryIndex, serde_json::Error> {
+    serde_json::from_str(json)
+}
+
+/// Creates a `RemotePlaylistManifest` from a `Playlist` and resolved `RemotePlaylistTrack`s.
+pub fn build_remote_playlist_manifest(
+    playlist: &Playlist,
+    tracks: Vec<RemotePlaylistTrack>,
+) -> RemotePlaylistManifest {
+    RemotePlaylistManifest {
+        manifest_version: CURRENT_MANIFEST_VERSION,
+        playlist_id: playlist.id.clone(),
+        name: playlist.name.clone(),
+        collage_seed: playlist.collage_seed,
+        created_at: playlist.created_at.clone(),
+        updated_at: Utc::now().to_rfc3339(),
+        tracks,
+    }
+}
+
+/// Builds an M3U8 string with relative paths for a remote playlist located in `playlists/`.
+pub fn build_remote_playlist_m3u8(manifest: &RemotePlaylistManifest) -> String {
+    let mut lines = vec!["#EXTM3U".to_string()];
+    for track in &manifest.tracks {
+        let duration_secs = track.duration_ms / 1000;
+        let display = match (&track.composer, &track.title) {
+            (Some(c), t) if !c.trim().is_empty() => format!("{} - {}", c.trim(), t.trim()),
+            _ => track.title.trim().to_string(),
+        };
+        lines.push(format!("#EXTINF:{duration_secs},{display}"));
+        lines.push(format!("../{}", track.relative_path.trim_start_matches('/')));
+    }
+    lines.join("\r\n")
+}
+
+/// Builds a `MasterPlaylistIndex` from a list of playlist summaries.
+pub fn build_master_playlist_index(playlists: Vec<RemotePlaylistSummary>) -> MasterPlaylistIndex {
+    MasterPlaylistIndex {
+        manifest_version: CURRENT_MANIFEST_VERSION,
+        updated_at: Utc::now().to_rfc3339(),
+        playlists,
+    }
+}
+
+pub fn serialize_playlist_manifest(manifest: &RemotePlaylistManifest) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(manifest)
+}
+
+pub fn deserialize_playlist_manifest(json: &str) -> Result<RemotePlaylistManifest, serde_json::Error> {
+    serde_json::from_str(json)
+}
+
+pub fn serialize_master_playlist_index(index: &MasterPlaylistIndex) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(index)
+}
+
+pub fn deserialize_master_playlist_index(json: &str) -> Result<MasterPlaylistIndex, serde_json::Error> {
     serde_json::from_str(json)
 }
 
@@ -384,10 +442,57 @@ mod tests {
         let summary = build_master_album_summary(&manifest, &folder);
         assert_eq!(summary.track_count, 1);
         assert_eq!(summary.total_duration_ms, 120_000);
+        assert_eq!(summary.updated_at, Some(manifest.updated_at.clone()));
 
         let master_index = build_master_library_index(vec![summary]);
         let index_json = serialize_master_index(&master_index).expect("serialize master");
         let deserialized_index = deserialize_master_index(&index_json).expect("deserialize master");
         assert_eq!(master_index, deserialized_index);
+    }
+
+    #[test]
+    fn test_remote_playlist_manifest_and_m3u8_roundtrip() {
+        let playlist = Playlist {
+            id: "my-favorites-123".to_string(),
+            name: "Favorites".to_string(),
+            collage_seed: 42,
+            track_ids: vec!["trk_1".to_string()],
+            created_at: Some("2026-10-21T10:00:00Z".to_string()),
+        };
+
+        let tracks = vec![RemotePlaylistTrack {
+            track_id: "trk_1".to_string(),
+            relative_path: "J.S. Bach/Well-Tempered Clavier/01 - Prelude.flac".to_string(),
+            title: "Prelude in C Major".to_string(),
+            composer: Some("J.S. Bach".to_string()),
+            album: Some("Well-Tempered Clavier".to_string()),
+            duration_ms: 120_000,
+        }];
+
+        let manifest = build_remote_playlist_manifest(&playlist, tracks);
+        assert_eq!(manifest.playlist_id, "my-favorites-123");
+        assert_eq!(manifest.name, "Favorites");
+        assert_eq!(manifest.tracks.len(), 1);
+
+        let json = serialize_playlist_manifest(&manifest).expect("serialize playlist manifest");
+        let deserialized = deserialize_playlist_manifest(&json).expect("deserialize playlist manifest");
+        assert_eq!(manifest, deserialized);
+
+        let m3u8 = build_remote_playlist_m3u8(&manifest);
+        assert!(m3u8.starts_with("#EXTM3U\r\n#EXTINF:120,J.S. Bach - Prelude in C Major\r\n../J.S. Bach/Well-Tempered Clavier/01 - Prelude.flac"));
+
+        let summary = RemotePlaylistSummary {
+            playlist_id: manifest.playlist_id.clone(),
+            name: manifest.name.clone(),
+            track_count: manifest.tracks.len(),
+            updated_at: manifest.updated_at.clone(),
+            relative_path: format!("playlists/{}.json", manifest.playlist_id),
+            m3u_path: Some("playlists/Favorites.m3u8".to_string()),
+        };
+
+        let index = build_master_playlist_index(vec![summary]);
+        let index_json = serialize_master_playlist_index(&index).expect("serialize playlist index");
+        let deserialized_index = deserialize_master_playlist_index(&index_json).expect("deserialize playlist index");
+        assert_eq!(index, deserialized_index);
     }
 }

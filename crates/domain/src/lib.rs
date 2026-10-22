@@ -11,7 +11,8 @@ pub use events::{
     UploadCompletedEvent, UploadProgressEvent,
 };
 pub use remote::{
-    AlbumManifest, ManifestTrack, MasterAlbumSummary, MasterLibraryIndex, RemoteBackendType,
+    AlbumManifest, ManifestTrack, MasterAlbumSummary, MasterLibraryIndex, MasterPlaylistIndex,
+    RemoteBackendType, RemotePlaylistManifest, RemotePlaylistSummary, RemotePlaylistTrack,
     RemoteSourceLocation, RemoteSyncedItem, RemoteTarget, CURRENT_MANIFEST_VERSION,
 };
 pub use library::{

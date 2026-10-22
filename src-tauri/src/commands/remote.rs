@@ -87,6 +87,15 @@ pub async fn delete_album_from_target(
 }
 
 #[tauri::command]
+pub async fn delete_playlist_from_target(
+    state: State<'_, AppState>,
+    playlist_id: String,
+    target_id: String,
+) -> Result<(), CommandError> {
+    Ok(state.core.delete_playlist_from_target(&playlist_id, &target_id).await?)
+}
+
+#[tauri::command]
 pub async fn get_remote_synced_items(
     state: State<'_, AppState>,
     target_id: String,

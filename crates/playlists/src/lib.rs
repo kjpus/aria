@@ -172,6 +172,21 @@ impl PlaylistService {
         Ok(state.clone())
     }
 
+    pub async fn import_synced_playlist(&self, playlist: Playlist) -> PlaylistSnapshot {
+        let mut state = self.state.write().await;
+        if let Some(existing) = state.playlists.iter_mut().find(|p| p.id == playlist.id) {
+            existing.name = playlist.name;
+            existing.collage_seed = playlist.collage_seed;
+            existing.track_ids = playlist.track_ids;
+            if playlist.created_at.is_some() && existing.created_at.is_none() {
+                existing.created_at = playlist.created_at;
+            }
+        } else {
+            state.playlists.push(playlist);
+        }
+        state.clone()
+    }
+
     pub async fn clear(&self) -> PlaylistSnapshot {
         let mut state = self.state.write().await;
         state.playlists.clear();
@@ -284,5 +299,33 @@ mod tests {
         assert_eq!(current_state.playlists[0].id, "favorites");
         assert_eq!(current_state.playlists[0].name, "Favorites");
         assert_eq!(current_state.playlists[0].track_ids, vec!["track-1"]);
+    }
+
+    #[tokio::test]
+    async fn test_import_synced_playlist() {
+        let snapshot = PlaylistSnapshot::default();
+        let service = PlaylistService::with_snapshot(snapshot);
+
+        let remote_pl = Playlist {
+            id: "remote-pl-1".to_string(),
+            name: "Beethoven Symphonies".to_string(),
+            collage_seed: 5,
+            track_ids: vec!["trk-1".to_string(), "trk-2".to_string()],
+            created_at: Some("2026-10-22T10:00:00Z".to_string()),
+        };
+
+        let updated = service.import_synced_playlist(remote_pl.clone()).await;
+        assert_eq!(updated.playlists.len(), 2);
+        let imported = updated.playlists.iter().find(|p| p.id == "remote-pl-1").unwrap();
+        assert_eq!(imported.name, "Beethoven Symphonies");
+        assert_eq!(imported.track_ids.len(), 2);
+
+        // Update existing playlist
+        let mut modified = remote_pl.clone();
+        modified.track_ids.push("trk-3".to_string());
+        let updated2 = service.import_synced_playlist(modified).await;
+        assert_eq!(updated2.playlists.len(), 2);
+        let imported2 = updated2.playlists.iter().find(|p| p.id == "remote-pl-1").unwrap();
+        assert_eq!(imported2.track_ids.len(), 3);
     }
 }

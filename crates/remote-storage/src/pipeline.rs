@@ -1,15 +1,21 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use futures_util::stream::{self, StreamExt};
 
 use aria_domain::{
-    AlbumManifest, RemoteSyncProgressEvent, RemoteSyncedItem, RemoteTarget, ScannedTrack,
-    UploadProgressEvent,
+    AlbumManifest, MasterAlbumSummary, Playlist, RemotePlaylistManifest,
+    RemotePlaylistSummary, RemotePlaylistTrack, RemoteSyncProgressEvent, RemoteSyncedItem,
+    RemoteTarget, ScannedTrack, UploadProgressEvent,
 };
 use aria_library::manifest::{
     build_album_manifest, build_master_album_summary, build_master_library_index,
+    build_master_playlist_index, build_remote_playlist_manifest, build_remote_playlist_m3u8,
     derive_systematic_folder_name, deserialize_manifest, deserialize_master_index,
-    serialize_manifest, serialize_master_index,
+    deserialize_master_playlist_index, deserialize_playlist_manifest, sanitize_path_segment,
+    serialize_manifest, serialize_master_index, serialize_master_playlist_index,
+    serialize_playlist_manifest,
 };
 use chrono::Utc;
 use tokio::sync::broadcast;
@@ -280,6 +286,142 @@ fn emit_progress(
     }
 }
 
+/// Uploads a playlist manifest (.json) and portable playlist (.m3u8) to the remote target,
+/// and updates aria-playlists-index.json at the target root.
+pub async fn upload_playlist(
+    backend: Arc<dyn RemoteStorageBackend>,
+    target: &RemoteTarget,
+    playlist: &Playlist,
+    playlist_tracks: &[RemotePlaylistTrack],
+    progress_tx: Option<broadcast::Sender<UploadProgressEvent>>,
+) -> Result<RemoteSyncedItem, RemoteStorageError> {
+    if let Some(ref tx) = progress_tx {
+        let _ = tx.send(UploadProgressEvent {
+            target_id: target.id.clone(),
+            album_id: playlist.id.clone(),
+            album_title: playlist.name.clone(),
+            current_file: "playlists/manifest".to_string(),
+            current_file_bytes: 0,
+            current_file_total_bytes: 0,
+            total_files: 3,
+            completed_files: 0,
+            total_bytes: 0,
+            completed_bytes: 0,
+            status: "uploading_playlist_manifest".to_string(),
+        });
+    }
+
+    // 1. Ensure playlists directory exists
+    backend.ensure_directory("playlists").await?;
+
+    // 2. Build RemotePlaylistManifest
+    let playlist_manifest = build_remote_playlist_manifest(playlist, playlist_tracks.to_vec());
+    let manifest_json = serialize_playlist_manifest(&playlist_manifest)
+        .map_err(|e| RemoteStorageError::Serialization(e.to_string()))?;
+    let manifest_remote_path = format!("playlists/{}.json", playlist.id);
+    backend
+        .write_bytes(&manifest_remote_path, manifest_json.as_bytes())
+        .await?;
+
+    if let Some(ref tx) = progress_tx {
+        let _ = tx.send(UploadProgressEvent {
+            target_id: target.id.clone(),
+            album_id: playlist.id.clone(),
+            album_title: playlist.name.clone(),
+            current_file: format!("playlists/{}.json", playlist.id),
+            current_file_bytes: manifest_json.len() as u64,
+            current_file_total_bytes: manifest_json.len() as u64,
+            total_files: 3,
+            completed_files: 1,
+            total_bytes: manifest_json.len() as u64,
+            completed_bytes: manifest_json.len() as u64,
+            status: "uploading_playlist_m3u8".to_string(),
+        });
+    }
+
+    // 3. Build and write M3U8
+    let m3u8_content = build_remote_playlist_m3u8(&playlist_manifest);
+    let clean_name = sanitize_path_segment(&playlist.name);
+    let m3u8_remote_path = format!("playlists/{clean_name}.m3u8");
+    backend
+        .write_bytes(&m3u8_remote_path, m3u8_content.as_bytes())
+        .await?;
+
+    if let Some(ref tx) = progress_tx {
+        let _ = tx.send(UploadProgressEvent {
+            target_id: target.id.clone(),
+            album_id: playlist.id.clone(),
+            album_title: playlist.name.clone(),
+            current_file: m3u8_remote_path.clone(),
+            current_file_bytes: m3u8_content.len() as u64,
+            current_file_total_bytes: m3u8_content.len() as u64,
+            total_files: 3,
+            completed_files: 2,
+            total_bytes: (manifest_json.len() + m3u8_content.len()) as u64,
+            completed_bytes: (manifest_json.len() + m3u8_content.len()) as u64,
+            status: "updating_playlist_index".to_string(),
+        });
+    }
+
+    // 4. Update aria-playlists-index.json at target root
+    let mut playlists_index = match backend.read_bytes("aria-playlists-index.json").await {
+        Ok(bytes) => {
+            let json = String::from_utf8_lossy(&bytes);
+            deserialize_master_playlist_index(&json)
+                .unwrap_or_else(|_| build_master_playlist_index(Vec::new()))
+        }
+        Err(_) => build_master_playlist_index(Vec::new()),
+    };
+
+    playlists_index.playlists.retain(|p| p.playlist_id != playlist.id);
+    playlists_index.playlists.push(RemotePlaylistSummary {
+        playlist_id: playlist.id.clone(),
+        name: playlist.name.clone(),
+        track_count: playlist_manifest.tracks.len(),
+        updated_at: playlist_manifest.updated_at.clone(),
+        relative_path: manifest_remote_path.clone(),
+        m3u_path: Some(m3u8_remote_path),
+    });
+    playlists_index.updated_at = Utc::now().to_rfc3339();
+
+    let index_json = serialize_master_playlist_index(&playlists_index)
+        .map_err(|e| RemoteStorageError::Serialization(e.to_string()))?;
+    backend
+        .write_bytes("aria-playlists-index.json", index_json.as_bytes())
+        .await?;
+
+    let now = Utc::now().to_rfc3339();
+    let synced_item = RemoteSyncedItem {
+        item_id: playlist.id.clone(),
+        remote_target_id: target.id.clone(),
+        item_type: "playlist".to_string(),
+        remote_path: manifest_remote_path,
+        remote_file_id: None,
+        size_bytes: manifest_json.len() as u64,
+        checksum: None,
+        sync_status: "synced".to_string(),
+        last_synced_at: now,
+    };
+
+    if let Some(ref tx) = progress_tx {
+        let _ = tx.send(UploadProgressEvent {
+            target_id: target.id.clone(),
+            album_id: playlist.id.clone(),
+            album_title: playlist.name.clone(),
+            current_file: "Done".to_string(),
+            current_file_bytes: 0,
+            current_file_total_bytes: 0,
+            total_files: 3,
+            completed_files: 3,
+            total_bytes: (manifest_json.len() + m3u8_content.len()) as u64,
+            completed_bytes: (manifest_json.len() + m3u8_content.len()) as u64,
+            status: "completed".to_string(),
+        });
+    }
+
+    Ok(synced_item)
+}
+
 #[derive(Debug, Clone)]
 pub struct SyncRemoteResult {
     pub target_id: String,
@@ -288,6 +430,13 @@ pub struct SyncRemoteResult {
     pub synced_items: Vec<RemoteSyncedItem>,
     pub new_albums_count: usize,
     pub new_tracks_count: usize,
+    pub master_index_updated_at: Option<String>,
+}
+
+struct FetchedAlbum {
+    manifest: AlbumManifest,
+    summary: MasterAlbumSummary,
+    local_art_path: Option<String>,
 }
 
 /// Discovers and synchronizes remote library albums and manifests from a target.
@@ -298,6 +447,8 @@ pub async fn sync_remote_library(
     target: &RemoteTarget,
     artwork_cache_dir: &Path,
     existing_remote_track_ids: &HashSet<String>,
+    target_last_synced_at: Option<&str>,
+    existing_album_sync_times: &HashMap<String, String>,
     progress_tx: Option<broadcast::Sender<RemoteSyncProgressEvent>>,
 ) -> Result<SyncRemoteResult, RemoteStorageError> {
     // 1. Read master library index from remote target root
@@ -315,6 +466,7 @@ pub async fn sync_remote_library(
                 synced_items: Vec::new(),
                 new_albums_count: 0,
                 new_tracks_count: 0,
+                master_index_updated_at: None,
             });
         }
         Err(err) => return Err(err),
@@ -325,74 +477,206 @@ pub async fn sync_remote_library(
         .map_err(|e| RemoteStorageError::Serialization(e.to_string()))?;
 
     let total_albums = master_index.albums.len();
-    let mut synced_tracks = Vec::new();
-    let mut synced_items = Vec::new();
-    let mut new_albums_count = 0;
-    let mut new_tracks_count = 0;
+
+    // Early exit: if the master index has not changed since our last sync and local tracks exist
+    if let Some(last_sync) = target_last_synced_at {
+        if last_sync == master_index.updated_at && !existing_remote_track_ids.is_empty() {
+            tracing::info!(
+                "Target '{}' master index unchanged since last sync ({}), early exiting.",
+                target.name,
+                last_sync
+            );
+            if let Some(ref tx) = progress_tx {
+                let _ = tx.send(RemoteSyncProgressEvent {
+                    target_id: target.id.clone(),
+                    target_name: target.name.clone(),
+                    current_album: String::new(),
+                    completed_albums: total_albums,
+                    total_albums,
+                    status: "completed".to_string(),
+                });
+            }
+            return Ok(SyncRemoteResult {
+                target_id: target.id.clone(),
+                target_name: target.name.clone(),
+                synced_tracks: Vec::new(),
+                synced_items: Vec::new(),
+                new_albums_count: 0,
+                new_tracks_count: 0,
+                master_index_updated_at: Some(master_index.updated_at.clone()),
+            });
+        }
+    }
 
     // Ensure artwork cache directory exists
     let _ = tokio::fs::create_dir_all(artwork_cache_dir).await;
 
-    for (idx, summary) in master_index.albums.iter().enumerate() {
+    // Delta filtering: find which albums need downloading
+    let mut albums_to_fetch = Vec::new();
+    let mut already_skipped_count = 0;
+
+    for summary in &master_index.albums {
+        let can_skip = if existing_remote_track_ids.is_empty() {
+            false
+        } else if let (Some(synced_at), Some(summary_updated_at)) = (
+            existing_album_sync_times.get(&summary.album_id),
+            summary.updated_at.as_deref(),
+        ) {
+            if synced_at.as_str() >= summary_updated_at {
+                if summary.artwork_file_name.is_some() {
+                    let clean_album_id: String = summary
+                        .album_id
+                        .chars()
+                        .map(|ch| if ch.is_alphanumeric() || ch == '-' || ch == '_' { ch } else { '_' })
+                        .collect();
+                    let target_art_file = artwork_cache_dir.join(format!("{clean_album_id}.jpg"));
+                    target_art_file.exists()
+                } else {
+                    true
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if can_skip {
+            already_skipped_count += 1;
+        } else {
+            albums_to_fetch.push(summary.clone());
+        }
+    }
+
+    if albums_to_fetch.is_empty() {
         if let Some(ref tx) = progress_tx {
             let _ = tx.send(RemoteSyncProgressEvent {
                 target_id: target.id.clone(),
                 target_name: target.name.clone(),
-                current_album: summary.title.clone(),
-                completed_albums: idx,
+                current_album: String::new(),
+                completed_albums: total_albums,
                 total_albums,
-                status: "reading_manifest".to_string(),
+                status: "completed".to_string(),
             });
         }
+        return Ok(SyncRemoteResult {
+            target_id: target.id.clone(),
+            target_name: target.name.clone(),
+            synced_tracks: Vec::new(),
+            synced_items: Vec::new(),
+            new_albums_count: 0,
+            new_tracks_count: 0,
+            master_index_updated_at: Some(master_index.updated_at.clone()),
+        });
+    }
 
-        let manifest_path = format!("{}/aria-manifest.json", summary.relative_folder);
-        let manifest_bytes = match backend.read_bytes(&manifest_path).await {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to read manifest for album '{}' from remote path '{manifest_path}': {e}",
-                    summary.title
-                );
-                continue;
-            }
-        };
+    let completed_counter = Arc::new(AtomicUsize::new(already_skipped_count));
+    const CONCURRENCY_LIMIT: usize = 8;
 
-        let manifest_str = String::from_utf8_lossy(&manifest_bytes);
-        let manifest: AlbumManifest = match deserialize_manifest(&manifest_str) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to parse manifest for album '{}': {e}",
-                    summary.title
-                );
-                continue;
-            }
-        };
+    let fetched_albums: Vec<Option<FetchedAlbum>> = stream::iter(albums_to_fetch)
+        .map(|summary| {
+            let backend = backend.clone();
+            let artwork_cache_dir = artwork_cache_dir.to_path_buf();
+            let target_id = target.id.clone();
+            let target_name = target.name.clone();
+            let progress_tx = progress_tx.clone();
+            let completed_counter = completed_counter.clone();
 
-        // Download and cache cover art locally if present
-        let mut local_art_path: Option<String> = None;
-        if let Some(ref art_file_name) = summary.artwork_file_name {
-            let clean_album_id: String = manifest
-                .album_id
-                .chars()
-                .map(|ch| if ch.is_alphanumeric() || ch == '-' || ch == '_' { ch } else { '_' })
-                .collect();
-            let target_art_file = artwork_cache_dir.join(format!("{clean_album_id}.jpg"));
+            async move {
+                if let Some(ref tx) = progress_tx {
+                    let completed = completed_counter.load(Ordering::Relaxed);
+                    let _ = tx.send(RemoteSyncProgressEvent {
+                        target_id: target_id.clone(),
+                        target_name: target_name.clone(),
+                        current_album: summary.title.clone(),
+                        completed_albums: completed,
+                        total_albums,
+                        status: "reading_manifest".to_string(),
+                    });
+                }
 
-            if target_art_file.exists() {
-                local_art_path = Some(target_art_file.to_string_lossy().to_string());
-            } else {
-                let remote_art_path = format!("{}/{}", summary.relative_folder, art_file_name);
-                if let Ok(art_bytes) = backend.read_bytes(&remote_art_path).await {
-                    if let Ok(()) = tokio::fs::write(&target_art_file, &art_bytes).await {
+                let manifest_path = format!("{}/aria-manifest.json", summary.relative_folder);
+                let manifest_bytes = match backend.read_bytes(&manifest_path).await {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to read manifest for album '{}' from remote path '{manifest_path}': {e}",
+                            summary.title
+                        );
+                        let _ = completed_counter.fetch_add(1, Ordering::Relaxed);
+                        return None;
+                    }
+                };
+
+                let manifest_str = String::from_utf8_lossy(&manifest_bytes);
+                let manifest: AlbumManifest = match deserialize_manifest(&manifest_str) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to parse manifest for album '{}': {e}",
+                            summary.title
+                        );
+                        let _ = completed_counter.fetch_add(1, Ordering::Relaxed);
+                        return None;
+                    }
+                };
+
+                // Download and cache cover art locally if present
+                let mut local_art_path: Option<String> = None;
+                if let Some(ref art_file_name) = summary.artwork_file_name {
+                    let clean_album_id: String = manifest
+                        .album_id
+                        .chars()
+                        .map(|ch| if ch.is_alphanumeric() || ch == '-' || ch == '_' { ch } else { '_' })
+                        .collect();
+                    let target_art_file = artwork_cache_dir.join(format!("{clean_album_id}.jpg"));
+
+                    if target_art_file.exists() {
                         local_art_path = Some(target_art_file.to_string_lossy().to_string());
+                    } else {
+                        let remote_art_path = format!("{}/{}", summary.relative_folder, art_file_name);
+                        if let Ok(art_bytes) = backend.read_bytes(&remote_art_path).await {
+                            if let Ok(()) = tokio::fs::write(&target_art_file, &art_bytes).await {
+                                local_art_path = Some(target_art_file.to_string_lossy().to_string());
+                            }
+                        }
                     }
                 }
-            }
-        }
 
+                let completed = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(ref tx) = progress_tx {
+                    let _ = tx.send(RemoteSyncProgressEvent {
+                        target_id,
+                        target_name,
+                        current_album: summary.title.clone(),
+                        completed_albums: completed,
+                        total_albums,
+                        status: "reading_manifest".to_string(),
+                    });
+                }
+
+                Some(FetchedAlbum {
+                    manifest,
+                    summary,
+                    local_art_path,
+                })
+            }
+        })
+        .buffer_unordered(CONCURRENCY_LIMIT)
+        .collect()
+        .await;
+
+    let mut synced_tracks = Vec::new();
+    let mut synced_items = Vec::new();
+    let mut new_albums_count = 0;
+    let mut new_tracks_count = 0;
+    let now = Utc::now().to_rfc3339();
+
+    for fetched in fetched_albums.into_iter().flatten() {
+        let manifest = fetched.manifest;
+        let summary = fetched.summary;
+        let local_art_path = fetched.local_art_path;
         let mut album_has_new = false;
-        let now = Utc::now().to_rfc3339();
 
         for track in &manifest.tracks {
             let is_new = !existing_remote_track_ids.contains(&track.track_id);
@@ -442,7 +726,7 @@ pub async fn sync_remote_library(
             size_bytes: summary.total_size_bytes,
             checksum: None,
             sync_status: "synced".to_string(),
-            last_synced_at: now,
+            last_synced_at: now.clone(),
         });
     }
 
@@ -464,5 +748,53 @@ pub async fn sync_remote_library(
         synced_items,
         new_albums_count,
         new_tracks_count,
+        master_index_updated_at: Some(master_index.updated_at),
     })
+}
+
+/// Discovers and synchronizes remote playlists from a target.
+/// Reads aria-playlists-index.json and each playlist manifest.
+pub async fn sync_remote_playlists(
+    backend: Arc<dyn RemoteStorageBackend>,
+    target: &RemoteTarget,
+) -> Result<Vec<RemotePlaylistManifest>, RemoteStorageError> {
+    let index_bytes = match backend.read_bytes("aria-playlists-index.json").await {
+        Ok(bytes) => bytes,
+        Err(RemoteStorageError::NotFound(_)) => {
+            return Ok(Vec::new());
+        }
+        Err(err) => return Err(err),
+    };
+
+    let index_str = String::from_utf8_lossy(&index_bytes);
+    let playlist_index = deserialize_master_playlist_index(&index_str)
+        .map_err(|e| RemoteStorageError::Serialization(e.to_string()))?;
+
+    let mut manifests = Vec::new();
+    for summary in &playlist_index.playlists {
+        match backend.read_bytes(&summary.relative_path).await {
+            Ok(bytes) => {
+                let manifest_str = String::from_utf8_lossy(&bytes);
+                match deserialize_playlist_manifest(&manifest_str) {
+                    Ok(m) => manifests.push(m),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to deserialize playlist manifest for '{}' from target '{}': {e}",
+                            summary.name,
+                            target.name
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to read playlist manifest '{}' from target '{}': {e}",
+                    summary.relative_path,
+                    target.name
+                );
+            }
+        }
+    }
+
+    Ok(manifests)
 }

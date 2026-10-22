@@ -20,6 +20,7 @@ import {
   normalizeFieldMappingFormat,
   type FieldMappingFormat,
 } from '../../lib/field-mapping-presets';
+import type { UiPreferences } from '../../lib/ui-preferences';
 
 type SettingsPaneProps = {
   library: LibrarySnapshot;
@@ -29,6 +30,8 @@ type SettingsPaneProps = {
   draftCatalogRules: CatalogRule[];
   selectedMappingFormat: FieldMappingFormat;
   settings: SettingsSnapshot;
+  uiPrefs: UiPreferences;
+  onUiPrefsChange: (prefs: UiPreferences) => void;
   remoteTargets: import('../../types/aria').RemoteTarget[];
   onRemoteTargetsChange: (targets: import('../../types/aria').RemoteTarget[]) => void;
   onAddDirectory: () => void;
@@ -60,6 +63,8 @@ export function SettingsPane({
   draftCatalogRules,
   selectedMappingFormat,
   settings,
+  uiPrefs,
+  onUiPrefsChange,
   remoteTargets,
   onRemoteTargetsChange,
   onAddDirectory,
@@ -172,7 +177,9 @@ export function SettingsPane({
 
         <SettingsPanel
           onThemeChange={onThemeChange}
+          onUiPrefsChange={onUiPrefsChange}
           settings={settings}
+          uiPrefs={uiPrefs}
         />
       </div>
 
