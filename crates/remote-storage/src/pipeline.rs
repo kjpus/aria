@@ -7,7 +7,7 @@ use futures_util::stream::{self, StreamExt};
 use aria_domain::{
     AlbumManifest, ManifestTrack, MasterAlbumSummary, Playlist, RemotePlaylistManifest,
     RemotePlaylistSummary, RemotePlaylistTrack, RemoteSyncProgressEvent, RemoteSyncedItem,
-    RemoteTarget, ScannedTrack, UploadProgressEvent,
+    RemoteTarget, ScannedTrack, UploadFailedItem, UploadProgressEvent,
 };
 use aria_library::manifest::{
     build_album_manifest, build_master_album_summary, build_master_library_index,
@@ -29,6 +29,14 @@ pub struct UploadOptions {
     pub current_target_usage_bytes: u64,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UploadAlbumResult {
+    pub synced_items: Vec<RemoteSyncedItem>,
+    pub failed_items: Vec<UploadFailedItem>,
+    pub new_tracks_uploaded: usize,
+    pub already_synced_tracks: usize,
+}
+
 /// Executes the full upload pipeline for an album to a remote target.
 pub async fn upload_album(
     backend: Arc<dyn RemoteStorageBackend>,
@@ -37,7 +45,7 @@ pub async fn upload_album(
     tracks: &[ScannedTrack],
     options: UploadOptions,
     progress_tx: Option<broadcast::Sender<UploadProgressEvent>>,
-) -> Result<Vec<RemoteSyncedItem>, RemoteStorageError> {
+) -> Result<UploadAlbumResult, RemoteStorageError> {
     if tracks.is_empty() {
         return Err(RemoteStorageError::ProviderError("No tracks in album".into()));
     }
@@ -68,6 +76,22 @@ pub async fn upload_album(
     .map_err(RemoteStorageError::Io)?;
 
     let relative_folder = derive_systematic_folder_name(&manifest);
+
+    // Emit initial progress event so UI immediately shows active upload
+    let initial_total_files = manifest.tracks.len() + if artwork_path.is_some() { 1 } else { 0 } + 1;
+    emit_progress(
+        progress_tx.as_ref(),
+        target,
+        &manifest,
+        "aria-manifest.json",
+        0,
+        0,
+        initial_total_files,
+        0,
+        0,
+        0,
+        "checking_remote",
+    );
 
     // 3. Check if album already exists on remote target
     let remote_manifest_path = format!("{relative_folder}/aria-manifest.json");
@@ -119,26 +143,23 @@ pub async fn upload_album(
                     || matching.audio.duration_ms == manifest_track.audio.duration_ms;
 
                 if size_matches && duration_matches {
-                    if let Some(ref remote_sha) = matching.audio_checksum_sha256 {
-                        let local_sha = if let Some(ref chk) = manifest_track.audio_checksum_sha256 {
-                            Some(chk.clone())
-                        } else if local_path.is_file() {
-                            compute_file_sha256(local_path).ok()
-                        } else {
-                            None
-                        };
-
-                        if let Some(ref l_sha) = local_sha {
-                            if l_sha.eq_ignore_ascii_case(remote_sha) {
-                                needs_upload = false;
+                    let sha_matches = match (&matching.audio_checksum_sha256, &manifest_track.audio_checksum_sha256) {
+                        (Some(remote_sha), Some(local_sha)) => local_sha.eq_ignore_ascii_case(remote_sha),
+                        (Some(remote_sha), None) if options.compute_checksums => {
+                            if local_path.is_file() {
+                                compute_file_sha256(local_path).map(|s| s.eq_ignore_ascii_case(remote_sha)).unwrap_or(false)
+                            } else {
+                                false
                             }
                         }
-                    } else {
-                        let audio_props_match = matching.audio.sample_rate == manifest_track.audio.sample_rate
-                            && matching.audio.channels == manifest_track.audio.channels;
-                        if audio_props_match {
-                            needs_upload = false;
-                        }
+                        _ => true,
+                    };
+
+                    let audio_props_match = matching.audio.sample_rate == manifest_track.audio.sample_rate
+                        && matching.audio.channels == manifest_track.audio.channels;
+
+                    if sha_matches && audio_props_match {
+                        needs_upload = false;
                     }
                 }
 
@@ -178,8 +199,96 @@ pub async fn upload_album(
     let mut completed_files = 0usize;
     let mut completed_bytes = 0u64;
 
+    // Fast-path: if all tracks and cover are already on remote and manifest is current, skip uploading
+    let any_new_tracks_for_manifest = match existing_manifest {
+        None => !manifest.tracks.is_empty(),
+        Some(ref ex) => manifest.tracks.iter().any(|mt| {
+            !ex.tracks.iter().any(|et| et.track_id == mt.track_id || et.relative_file_name == mt.relative_file_name)
+        }),
+    };
+
+    let all_already_synced = !cover_needs_upload
+        && tracks_need_upload.iter().all(|&needs| !needs)
+        && existing_manifest.is_some()
+        && !any_new_tracks_for_manifest;
+
+    if all_already_synced {
+        let now = Utc::now().to_rfc3339();
+        let mut synced_items = Vec::with_capacity(manifest.tracks.len() + 1);
+        for (idx, manifest_track) in manifest.tracks.iter().enumerate() {
+            let remote_file_path = format!("{relative_folder}/{}", manifest_track.relative_file_name);
+            let track_size = resolved_sizes[idx];
+            synced_items.push(RemoteSyncedItem {
+                item_id: manifest_track.track_id.clone(),
+                remote_target_id: target.id.clone(),
+                item_type: "track".to_string(),
+                remote_path: remote_file_path,
+                remote_file_id: None,
+                size_bytes: track_size,
+                checksum: manifest_track.audio_checksum_sha256.clone(),
+                sync_status: "synced".to_string(),
+                last_synced_at: now.clone(),
+            });
+        }
+        let total_album_size = manifest.tracks.iter().map(|t| t.file_size_bytes).sum();
+        synced_items.push(RemoteSyncedItem {
+            item_id: manifest.album_id.clone(),
+            remote_target_id: target.id.clone(),
+            item_type: "album".to_string(),
+            remote_path: relative_folder,
+            remote_file_id: None,
+            size_bytes: total_album_size,
+            checksum: None,
+            sync_status: "synced".to_string(),
+            last_synced_at: now,
+        });
+
+        emit_progress(
+            progress_tx.as_ref(),
+            target,
+            &manifest,
+            "Done",
+            total_bytes,
+            total_bytes,
+            total_files,
+            total_files,
+            total_bytes,
+            total_bytes,
+            "already_synced",
+        );
+
+        return Ok(UploadAlbumResult {
+            synced_items,
+            failed_items: Vec::new(),
+            new_tracks_uploaded: 0,
+            already_synced_tracks: tracks.len(),
+        });
+    }
+
     // 7. Ensure remote album directory exists
-    backend.ensure_directory(&relative_folder).await?;
+    if let Err(e) = backend.ensure_directory(&relative_folder).await {
+        let mut failed_items = Vec::new();
+        for track in tracks {
+            let title = track
+                .mapped_fields
+                .get("title")
+                .and_then(|t| t.first())
+                .cloned()
+                .unwrap_or_else(|| track.file_name.clone());
+            failed_items.push(UploadFailedItem {
+                item_id: Some(track.id.clone()),
+                title,
+                path: track.path.clone(),
+                error: format!("Failed to create folder '{}': {}", relative_folder, e),
+            });
+        }
+        return Ok(UploadAlbumResult {
+            synced_items: Vec::new(),
+            failed_items,
+            new_tracks_uploaded: 0,
+            already_synced_tracks: 0,
+        });
+    }
 
     // 8. Upload cover art if needed
     if let Some(art_path) = artwork_path {
@@ -199,13 +308,15 @@ pub async fn upload_album(
             );
             let remote_cover_path = format!("{relative_folder}/cover.jpg");
             let art_data = if let Some(cached) = art_data_cache {
-                cached
+                Some(cached)
             } else {
-                tokio::fs::read(&art_path)
-                    .await
-                    .map_err(RemoteStorageError::Io)?
+                tokio::fs::read(&art_path).await.ok()
             };
-            backend.write_bytes(&remote_cover_path, &art_data).await?;
+            if let Some(data) = art_data {
+                if let Err(e) = backend.write_bytes(&remote_cover_path, &data).await {
+                    eprintln!("Warning: failed to upload cover art: {e}");
+                }
+            }
         } else {
             emit_progress(
                 progress_tx.as_ref(),
@@ -224,8 +335,12 @@ pub async fn upload_album(
         completed_files += 1;
     }
 
-    // 9. Upload audio files (skipping unchanged tracks)
+    // 9. Upload audio files (skipping unchanged tracks, recording failures without aborting)
     let mut synced_items = Vec::new();
+    let mut failed_items = Vec::new();
+    let mut successful_manifest_track_ids = HashSet::new();
+    let mut new_tracks_uploaded = 0usize;
+    let mut already_synced_tracks = 0usize;
     let now = Utc::now().to_rfc3339();
 
     for (idx, (track, manifest_track)) in tracks.iter().zip(manifest.tracks.iter()).enumerate() {
@@ -251,31 +366,74 @@ pub async fn upload_album(
                 "uploading_track",
             );
 
-            let file_ref = backend
-                .upload_file(local_path, &remote_file_path, None)
-                .await?;
+            match backend.upload_file(local_path, &remote_file_path, None).await {
+                Ok(file_ref) => {
+                    remote_file_id = Some(file_ref.remote_id);
+                    completed_bytes += track_size;
+                    completed_files += 1;
+                    new_tracks_uploaded += 1;
 
-            remote_file_id = Some(file_ref.remote_id);
+                    emit_progress(
+                        progress_tx.as_ref(),
+                        target,
+                        &manifest,
+                        &manifest_track.relative_file_name,
+                        track_size,
+                        track_size,
+                        total_files,
+                        completed_files,
+                        total_bytes,
+                        completed_bytes,
+                        "track_uploaded",
+                    );
 
-            completed_bytes += track_size;
-            completed_files += 1;
+                    successful_manifest_track_ids.insert(manifest_track.track_id.clone());
+                    synced_items.push(RemoteSyncedItem {
+                        item_id: manifest_track.track_id.clone(),
+                        remote_target_id: target.id.clone(),
+                        item_type: "track".to_string(),
+                        remote_path: remote_file_path,
+                        remote_file_id,
+                        size_bytes: track_size,
+                        checksum: manifest_track.audio_checksum_sha256.clone(),
+                        sync_status: "synced".to_string(),
+                        last_synced_at: now.clone(),
+                    });
+                }
+                Err(e) => {
+                    completed_files += 1;
+                    let title = track
+                        .mapped_fields
+                        .get("title")
+                        .and_then(|t| t.first())
+                        .cloned()
+                        .unwrap_or_else(|| track.file_name.clone());
+                    failed_items.push(UploadFailedItem {
+                        item_id: Some(manifest_track.track_id.clone()),
+                        title,
+                        path: track.path.clone(),
+                        error: e.to_string(),
+                    });
 
-            emit_progress(
-                progress_tx.as_ref(),
-                target,
-                &manifest,
-                &manifest_track.relative_file_name,
-                track_size,
-                track_size,
-                total_files,
-                completed_files,
-                total_bytes,
-                completed_bytes,
-                "track_uploaded",
-            );
+                    emit_progress(
+                        progress_tx.as_ref(),
+                        target,
+                        &manifest,
+                        &manifest_track.relative_file_name,
+                        0,
+                        track_size,
+                        total_files,
+                        completed_files,
+                        total_bytes,
+                        completed_bytes,
+                        "track_failed",
+                    );
+                }
+            }
         } else {
             completed_bytes += track_size;
             completed_files += 1;
+            already_synced_tracks += 1;
 
             emit_progress(
                 progress_tx.as_ref(),
@@ -290,30 +448,37 @@ pub async fn upload_album(
                 completed_bytes,
                 "already_synced",
             );
-        }
 
-        synced_items.push(RemoteSyncedItem {
-            item_id: manifest_track.track_id.clone(),
-            remote_target_id: target.id.clone(),
-            item_type: "track".to_string(),
-            remote_path: remote_file_path,
-            remote_file_id,
-            size_bytes: track_size,
-            checksum: manifest_track.audio_checksum_sha256.clone(),
-            sync_status: "synced".to_string(),
-            last_synced_at: now.clone(),
-        });
+            successful_manifest_track_ids.insert(manifest_track.track_id.clone());
+            synced_items.push(RemoteSyncedItem {
+                item_id: manifest_track.track_id.clone(),
+                remote_target_id: target.id.clone(),
+                item_type: "track".to_string(),
+                remote_path: remote_file_path,
+                remote_file_id,
+                size_bytes: track_size,
+                checksum: manifest_track.audio_checksum_sha256.clone(),
+                sync_status: "synced".to_string(),
+                last_synced_at: now.clone(),
+            });
+        }
     }
+
+    // Only keep tracks in this run that actually succeeded or were already synced
+    manifest.tracks.retain(|t| successful_manifest_track_ids.contains(&t.track_id));
 
     // 10. Merge with existing remote manifest to preserve previously-uploaded tracks from other playlists/syncs
     let any_files_uploaded = cover_needs_upload || tracks_need_upload.iter().any(|&b| b);
     let any_new_tracks_for_manifest = match existing_manifest {
-        None => true,
+        None => !manifest.tracks.is_empty(),
         Some(ref ex) => manifest.tracks.iter().any(|mt| {
             !ex.tracks.iter().any(|et| et.track_id == mt.track_id || et.relative_file_name == mt.relative_file_name)
         }),
     };
-    let should_update_manifest = existing_manifest.is_none() || any_files_uploaded || any_new_tracks_for_manifest;
+    let any_tracks_remotely = !manifest.tracks.is_empty()
+        || existing_manifest.as_ref().map(|ex| !ex.tracks.is_empty()).unwrap_or(false);
+
+    let should_update_manifest = any_tracks_remotely && (existing_manifest.is_none() || any_files_uploaded || any_new_tracks_for_manifest);
 
     if let Some(ref ex) = existing_manifest {
         let mut merged_tracks = manifest.tracks.clone();
@@ -392,11 +557,19 @@ pub async fn upload_album(
             "writing_manifest",
         );
         manifest.updated_at = now.clone();
-        let manifest_json = serialize_manifest(&manifest)
-            .map_err(|e| RemoteStorageError::Serialization(e.to_string()))?;
-        backend
-            .write_bytes(&remote_manifest_path, manifest_json.as_bytes())
-            .await?;
+        if let Ok(manifest_json) = serialize_manifest(&manifest) {
+            if let Err(e) = backend
+                .write_bytes(&remote_manifest_path, manifest_json.as_bytes())
+                .await
+            {
+                failed_items.push(UploadFailedItem {
+                    item_id: Some(manifest.album_id.clone()),
+                    title: manifest.title.clone(),
+                    path: remote_manifest_path.clone(),
+                    error: format!("Failed to write manifest: {e}"),
+                });
+            }
+        }
 
         emit_progress(
             progress_tx.as_ref(),
@@ -424,26 +597,36 @@ pub async fn upload_album(
         master_index.albums.push(summary);
         master_index.updated_at = now.clone();
 
-        let master_json = serialize_master_index(&master_index)
-            .map_err(|e| RemoteStorageError::Serialization(e.to_string()))?;
-        backend
-            .write_bytes("aria-library-index.json", master_json.as_bytes())
-            .await?;
+        if let Ok(master_json) = serialize_master_index(&master_index) {
+            if let Err(e) = backend
+                .write_bytes("aria-library-index.json", master_json.as_bytes())
+                .await
+            {
+                failed_items.push(UploadFailedItem {
+                    item_id: None,
+                    title: "Master Library Index".to_string(),
+                    path: "aria-library-index.json".to_string(),
+                    error: format!("Failed to update master index: {e}"),
+                });
+            }
+        }
     }
 
-    // 11. Create album synced item
-    let total_album_size = manifest.tracks.iter().map(|t| t.file_size_bytes).sum();
-    synced_items.push(RemoteSyncedItem {
-        item_id: manifest.album_id.clone(),
-        remote_target_id: target.id.clone(),
-        item_type: "album".to_string(),
-        remote_path: relative_folder,
-        remote_file_id: None,
-        size_bytes: total_album_size,
-        checksum: None,
-        sync_status: "synced".to_string(),
-        last_synced_at: now,
-    });
+    // 11. Create album synced item if any tracks exist remotely
+    if any_tracks_remotely {
+        let total_album_size = manifest.tracks.iter().map(|t| t.file_size_bytes).sum();
+        synced_items.push(RemoteSyncedItem {
+            item_id: manifest.album_id.clone(),
+            remote_target_id: target.id.clone(),
+            item_type: "album".to_string(),
+            remote_path: relative_folder,
+            remote_file_id: None,
+            size_bytes: total_album_size,
+            checksum: None,
+            sync_status: "synced".to_string(),
+            last_synced_at: now,
+        });
+    }
 
     emit_progress(
         progress_tx.as_ref(),
@@ -459,7 +642,12 @@ pub async fn upload_album(
         "completed",
     );
 
-    Ok(synced_items)
+    Ok(UploadAlbumResult {
+        synced_items,
+        failed_items,
+        new_tracks_uploaded,
+        already_synced_tracks,
+    })
 }
 
 fn emit_progress(
@@ -966,10 +1154,10 @@ pub async fn sync_remote_library(
         let _ = tx.send(RemoteSyncProgressEvent {
             target_id: target.id.clone(),
             target_name: target.name.clone(),
-            current_album: String::new(),
+            current_album: "Processing albums...".to_string(),
             completed_albums: total_albums,
             total_albums,
-            status: "completed".to_string(),
+            status: "albums_fetched".to_string(),
         });
     }
 

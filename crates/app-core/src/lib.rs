@@ -3,9 +3,9 @@ use aria_domain::{
     LibrarySnapshot, OutputDeviceSnapshot, PlayTrackRequest, PlaybackEvent, PlaybackPreferences,
     PlaybackSessionSnapshot, PlaybackSnapshot, PlaybackStatus, Playlist, PlaylistEvent,
     PlaylistImportPreview, PlaylistSnapshot, PreviewTrack, RemoteBackendType, RemoteEvent,
-    RemotePlaylistTrack, RemoteSyncCompletedEvent, RemoteSyncedItem, RemoteTarget, ScannedTrack,
-    SettingsSnapshot, ThemePreference, TrackTableSettings, TrackTagEditRequest,
-    UploadCompletedEvent,
+    RemotePlaylistTrack, RemoteSyncCompletedEvent, RemoteSyncProgressEvent, RemoteSyncedItem,
+    RemoteTarget, ScannedTrack, SettingsSnapshot, ThemePreference, TrackTableSettings,
+    TrackTagEditRequest, UploadCompletedEvent, UploadFailedItem, UploadProgressEvent,
 };
 use aria_library::manifest::{build_album_manifest, derive_systematic_folder_name};
 use aria_library::{LibraryError, LibraryService};
@@ -1127,24 +1127,48 @@ impl AppCore {
             )
             .await
             {
-                Ok(synced_items) => {
-                    let _ = core.database.save_remote_synced_items_batch(&synced_items);
-                    let album_id = synced_items
+                Ok(result) => {
+                    let _ = core.database.save_remote_synced_items_batch(&result.synced_items);
+                    let album_id = result
+                        .synced_items
                         .iter()
                         .find(|i| i.item_type == "album")
                         .map(|i| i.item_id.clone())
                         .unwrap_or_default();
+                    let has_failures = !result.failed_items.is_empty();
                     let _ = core.events.send(AppEvent::Remote(RemoteEvent::UploadCompleted(
                         UploadCompletedEvent {
                             target_id: target.id.clone(),
                             album_id,
                             album_title: album_title.clone(),
-                            success: true,
-                            error_message: None,
+                            success: !has_failures,
+                            error_message: if has_failures {
+                                Some(format!("{} track(s) failed during upload", result.failed_items.len()))
+                            } else {
+                                None
+                            },
+                            failed_items: result.failed_items,
+                            new_tracks_count: result.new_tracks_uploaded,
+                            already_synced_tracks_count: result.already_synced_tracks,
                         },
                     )));
                 }
                 Err(e) => {
+                    let mut failed_items = Vec::new();
+                    for t in &album_tracks {
+                        let title = t
+                            .mapped_fields
+                            .get("title")
+                            .and_then(|v| v.first())
+                            .cloned()
+                            .unwrap_or_else(|| t.file_name.clone());
+                        failed_items.push(UploadFailedItem {
+                            item_id: Some(t.id.clone()),
+                            title,
+                            path: t.path.clone(),
+                            error: e.to_string(),
+                        });
+                    }
                     let _ = core.events.send(AppEvent::Remote(RemoteEvent::UploadCompleted(
                         UploadCompletedEvent {
                             target_id: target.id.clone(),
@@ -1152,6 +1176,9 @@ impl AppCore {
                             album_title: album_title.clone(),
                             success: false,
                             error_message: Some(e.to_string()),
+                            failed_items,
+                            new_tracks_count: 0,
+                            already_synced_tracks_count: 0,
                         },
                     )));
                 }
@@ -1231,11 +1258,15 @@ impl AppCore {
         let playlist_id_clone = playlist.id.clone();
 
         tokio::spawn(async move {
-            let mut any_failed = false;
+            let mut all_failed_items: Vec<UploadFailedItem> = Vec::new();
+            let mut successful_synced_track_ids: HashSet<String> = HashSet::new();
             let mut track_info_map: std::collections::HashMap<String, RemotePlaylistTrack> =
                 std::collections::HashMap::new();
+            let mut total_new_tracks_uploaded = 0usize;
+            let mut total_already_synced_tracks = 0usize;
 
-            for (album_title, tracks_to_upload) in album_groups {
+            let total_albums = album_groups.len();
+            for (album_idx, (album_title, tracks_to_upload)) in album_groups.into_iter().enumerate() {
                 let options = UploadOptions {
                     compute_checksums: false,
                     current_target_usage_bytes: current_usage,
@@ -1290,61 +1321,83 @@ impl AppCore {
                     }
                 }
 
+                // Tag progress events with overall playlist album progress
+                let (album_progress_tx, mut album_progress_rx) = broadcast::channel::<UploadProgressEvent>(64);
+                let playlist_progress_tx = progress_tx.clone();
+                let album_display_title = if total_albums > 1 {
+                    format!("Playlist \"{}\" ({}/{})", playlist_name, album_idx + 1, total_albums)
+                } else {
+                    format!("Playlist \"{}\"", playlist_name)
+                };
+                let album_display_clone = album_display_title.clone();
+                let album_title_clone = album_title.clone();
+
+                tokio::spawn(async move {
+                    while let Ok(mut progress) = album_progress_rx.recv().await {
+                        progress.album_title = album_display_clone.clone();
+                        if progress.current_file == "Done" || progress.current_file == "All tracks verified" {
+                            progress.current_file = album_title_clone.clone();
+                        }
+                        let _ = playlist_progress_tx.send(progress);
+                    }
+                });
+
                 match upload_album(
                     backend.clone(),
                     &target,
                     &album_title,
                     &tracks_to_upload,
                     options,
-                    Some(progress_tx.clone()),
+                    Some(album_progress_tx),
                 )
                 .await
                 {
-                    Ok(synced_items) => {
-                        let _ = core.database.save_remote_synced_items_batch(&synced_items);
+                    Ok(result) => {
+                        for item in &result.synced_items {
+                            if item.item_type == "track" {
+                                successful_synced_track_ids.insert(item.item_id.clone());
+                            }
+                        }
+                        let _ = core.database.save_remote_synced_items_batch(&result.synced_items);
                         if let Ok(usage) = core.database.get_total_synced_bytes_for_target(&target.id) {
                             current_usage = usage;
                         }
-                        let album_id = synced_items
-                            .iter()
-                            .find(|i| i.item_type == "album")
-                            .map(|i| i.item_id.clone())
-                            .unwrap_or_default();
-                        let _ = core.events.send(AppEvent::Remote(RemoteEvent::UploadCompleted(
-                            UploadCompletedEvent {
-                                target_id: target.id.clone(),
-                                album_id,
-                                album_title: album_title.clone(),
-                                success: true,
-                                error_message: None,
-                            },
-                        )));
+                        total_new_tracks_uploaded += result.new_tracks_uploaded;
+                        total_already_synced_tracks += result.already_synced_tracks;
+                        all_failed_items.extend(result.failed_items);
                     }
                     Err(e) => {
-                        any_failed = true;
-                        let _ = core.events.send(AppEvent::Remote(RemoteEvent::UploadCompleted(
-                            UploadCompletedEvent {
-                                target_id: target.id.clone(),
-                                album_id: String::new(),
-                                album_title: album_title.clone(),
-                                success: false,
-                                error_message: Some(e.to_string()),
-                            },
-                        )));
-                        break;
+                        for t in &tracks_to_upload {
+                            let title = t
+                                .mapped_fields
+                                .get("title")
+                                .and_then(|v| v.first())
+                                .cloned()
+                                .unwrap_or_else(|| t.file_name.clone());
+                            all_failed_items.push(UploadFailedItem {
+                                item_id: Some(t.id.clone()),
+                                title,
+                                path: t.path.clone(),
+                                error: e.to_string(),
+                            });
+                        }
                     }
                 }
             }
 
-            if !any_failed {
-                // Upload the playlist manifest (.json) and portable playlist (.m3u8) to remote
-                let mut playlist_remote_tracks = Vec::new();
-                for track_id in &playlist_clone.track_ids {
-                    if let Some(rpt) = track_info_map.get(track_id) {
+            // Upload the playlist manifest (.json) and portable playlist (.m3u8) to remote with available tracks
+            let mut playlist_remote_tracks = Vec::new();
+            for track_id in &playlist_clone.track_ids {
+                if let Some(rpt) = track_info_map.get(track_id) {
+                    if successful_synced_track_ids.contains(&rpt.track_id)
+                        || playlist_tracks.iter().any(|pt| pt.id == *track_id && pt.path.starts_with(&format!("remote://{}/", target.id)))
+                    {
                         playlist_remote_tracks.push(rpt.clone());
                     }
                 }
+            }
 
+            if !playlist_remote_tracks.is_empty() {
                 match upload_playlist(
                     backend.clone(),
                     &target,
@@ -1356,29 +1409,35 @@ impl AppCore {
                 {
                     Ok(synced_item) => {
                         let _ = core.database.save_remote_synced_item(&synced_item);
-                        let _ = core.events.send(AppEvent::Remote(RemoteEvent::UploadCompleted(
-                            UploadCompletedEvent {
-                                target_id: target.id.clone(),
-                                album_id: playlist_id_clone,
-                                album_title: format!("Playlist \"{}\"", playlist_name),
-                                success: true,
-                                error_message: None,
-                            },
-                        )));
                     }
                     Err(e) => {
-                        let _ = core.events.send(AppEvent::Remote(RemoteEvent::UploadCompleted(
-                            UploadCompletedEvent {
-                                target_id: target.id.clone(),
-                                album_id: playlist_id_clone,
-                                album_title: format!("Playlist \"{}\"", playlist_name),
-                                success: false,
-                                error_message: Some(format!("Failed to upload playlist manifest: {e}")),
-                            },
-                        )));
+                        all_failed_items.push(UploadFailedItem {
+                            item_id: Some(playlist_id_clone.clone()),
+                            title: format!("Playlist \"{}\"", playlist_name),
+                            path: format!("playlists/{}.json", playlist_id_clone),
+                            error: format!("Failed to upload playlist manifest: {e}"),
+                        });
                     }
                 }
             }
+
+            let has_failures = !all_failed_items.is_empty();
+            let _ = core.events.send(AppEvent::Remote(RemoteEvent::UploadCompleted(
+                UploadCompletedEvent {
+                    target_id: target.id.clone(),
+                    album_id: playlist_id_clone,
+                    album_title: format!("Playlist \"{}\"", playlist_name),
+                    success: !has_failures,
+                    error_message: if has_failures {
+                        Some(format!("{} track(s) failed during upload", all_failed_items.len()))
+                    } else {
+                        None
+                    },
+                    failed_items: all_failed_items,
+                    new_tracks_count: total_new_tracks_uploaded,
+                    already_synced_tracks_count: total_already_synced_tracks,
+                },
+            )));
         });
 
         Ok(())
@@ -1503,6 +1562,7 @@ impl AppCore {
         });
 
         let backend_for_playlists = backend.clone();
+        let sync_progress_tx = progress_tx.clone();
         match sync_remote_library(
             backend,
             &target,
@@ -1517,6 +1577,14 @@ impl AppCore {
             Ok(result) => {
                 // Save synced items to database in a single batch
                 if !result.synced_items.is_empty() {
+                    let _ = sync_progress_tx.send(RemoteSyncProgressEvent {
+                        target_id: target.id.clone(),
+                        target_name: target.name.clone(),
+                        current_album: "Saving to database...".to_string(),
+                        completed_albums: 0,
+                        total_albums: 0,
+                        status: "saving_database".to_string(),
+                    });
                     let _ = self
                         .database
                         .save_remote_synced_items_batch(&result.synced_items);
@@ -1531,6 +1599,14 @@ impl AppCore {
 
                 // Merge synced tracks into the library
                 if !result.synced_tracks.is_empty() {
+                    let _ = sync_progress_tx.send(RemoteSyncProgressEvent {
+                        target_id: target.id.clone(),
+                        target_name: target.name.clone(),
+                        current_album: "Updating local library...".to_string(),
+                        completed_albums: 0,
+                        total_albums: 0,
+                        status: "updating_library".to_string(),
+                    });
                     let updated_snapshot = self
                         .library
                         .merge_remote_tracks(result.synced_tracks)
@@ -1541,6 +1617,14 @@ impl AppCore {
                 }
 
                 // Sync playlists from remote target
+                let _ = sync_progress_tx.send(RemoteSyncProgressEvent {
+                    target_id: target.id.clone(),
+                    target_name: target.name.clone(),
+                    current_album: "Syncing playlists from remote...".to_string(),
+                    completed_albums: 0,
+                    total_albums: 0,
+                    status: "syncing_playlists".to_string(),
+                });
                 let mut new_playlists_count = 0;
                 if let Ok(remote_playlists) = sync_remote_playlists(backend_for_playlists, &target).await {
                     let library_snapshot = self.library.snapshot().await;
@@ -1624,6 +1708,15 @@ impl AppCore {
                         )));
                     }
                 }
+
+                let _ = sync_progress_tx.send(RemoteSyncProgressEvent {
+                    target_id: target.id.clone(),
+                    target_name: target.name.clone(),
+                    current_album: String::new(),
+                    completed_albums: 0,
+                    total_albums: 0,
+                    status: "completed".to_string(),
+                });
 
                 let completed = RemoteSyncCompletedEvent {
                     target_id: target.id.clone(),

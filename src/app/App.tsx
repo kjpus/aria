@@ -22,6 +22,7 @@ import { PlaylistImportDialog } from '../features/playlists/PlaylistImportDialog
 import { QueuePane } from '../features/queue/QueuePane';
 import { RemoteUploadDialog } from '../features/remote/RemoteUploadDialog';
 import { RemotePlaylistUploadDialog } from '../features/remote/RemotePlaylistUploadDialog';
+import { RemoteUploadFailureDialog } from '../features/remote/RemoteUploadFailureDialog';
 import { SettingsPane } from '../features/settings/SettingsPane';
 import { TrackPane } from '../features/tracks/TrackPane';
 import {
@@ -96,6 +97,7 @@ import type {
   ThemePreference,
   TrackTagEditUpdate,
   TrackTableSettings,
+  UploadFailedItem,
   UploadProgressEvent,
 } from '../types/aria';
 
@@ -187,6 +189,7 @@ export function App() {
   const [uploadPlaylist, setUploadPlaylist] = useState<Playlist | null>(null);
   const [activeUploadProgress, setActiveUploadProgress] = useState<UploadProgressEvent | null>(null);
   const [uploadStatusMessage, setUploadStatusMessage] = useState<string | null>(null);
+  const [uploadFailedItems, setUploadFailedItems] = useState<UploadFailedItem[] | null>(null);
   const [isSyncingRemote, setIsSyncingRemote] = useState(false);
   const [activeSyncProgress, setActiveSyncProgress] = useState<RemoteSyncProgressEvent | null>(null);
   const [syncStatusMessage, setSyncStatusMessage] = useState<string | null>(null);
@@ -247,18 +250,35 @@ export function App() {
 
       if (event.topic === 'remote') {
         if (event.payload.kind === 'upload_progress') {
+          setActiveSyncProgress(null);
           setActiveUploadProgress(event.payload.payload);
         } else if (event.payload.kind === 'upload_completed') {
           setActiveUploadProgress(null);
           const completed = event.payload.payload;
-          if (completed.success) {
-            setUploadStatusMessage(`Uploaded "${completed.albumTitle}" successfully!`);
+          if (completed.failedItems && completed.failedItems.length > 0) {
+            setUploadFailedItems(completed.failedItems);
+            if (completed.success) {
+              setUploadStatusMessage(`Uploaded "${completed.albumTitle}" with ${completed.failedItems.length} failure(s)`);
+              setTimeout(() => setUploadStatusMessage(null), 5000);
+            } else {
+              setError(`Upload incomplete: ${completed.failedItems.length} track(s) failed`);
+            }
+          } else if (completed.success) {
+            if (completed.newTracksCount === 0 && (completed.alreadySyncedTracksCount ?? 0) > 0) {
+              setUploadStatusMessage(`${completed.albumTitle} is up to date (all ${completed.alreadySyncedTracksCount} tracks already on remote).`);
+            } else {
+              setUploadStatusMessage(`Uploaded "${completed.albumTitle}" successfully!`);
+            }
             setTimeout(() => setUploadStatusMessage(null), 5000);
           } else {
             setError(`Upload error: ${completed.errorMessage ?? 'Unknown failure'}`);
           }
         } else if (event.payload.kind === 'sync_progress') {
-          setActiveSyncProgress(event.payload.payload);
+          if (event.payload.payload.status === 'completed') {
+            setActiveSyncProgress(null);
+          } else {
+            setActiveSyncProgress(event.payload.payload);
+          }
         } else if (event.payload.kind === 'sync_completed') {
           setActiveSyncProgress(null);
           const completed = event.payload.payload;
@@ -1584,8 +1604,41 @@ export function App() {
                   className="device-chip workspace__status-chip workspace__status-chip--active"
                   title={`Uploading: ${activeUploadProgress.albumTitle} (${activeUploadProgress.currentFile})`}
                 >
+                  <RefreshIcon className="aria-spinning" />
                   <span>
-                    {Math.min(activeUploadProgress.completedFiles, activeUploadProgress.totalFiles)}/{activeUploadProgress.totalFiles} tracks uploaded
+                    {(() => {
+                      const completed = Math.min(activeUploadProgress.completedFiles, activeUploadProgress.totalFiles);
+                      const total = activeUploadProgress.totalFiles;
+                      if (activeUploadProgress.status === 'checking_remote') {
+                        return `${activeUploadProgress.albumTitle}: Checking remote...`;
+                      }
+                      if (activeUploadProgress.status === 'already_synced') {
+                        return `${activeUploadProgress.albumTitle}: Already synced`;
+                      }
+                      if (activeUploadProgress.status === 'uploading_art') {
+                        return `${activeUploadProgress.albumTitle}: Uploading cover art`;
+                      }
+                      if (activeUploadProgress.status === 'writing_manifest') {
+                        return `${activeUploadProgress.albumTitle}: Writing manifest`;
+                      }
+                      if (activeUploadProgress.status === 'updating_master_index') {
+                        return `${activeUploadProgress.albumTitle}: Updating remote index`;
+                      }
+                      if (
+                        activeUploadProgress.status === 'uploading_playlist_manifest' ||
+                        activeUploadProgress.status === 'uploading_playlist_m3u8' ||
+                        activeUploadProgress.status === 'updating_playlist_index'
+                      ) {
+                        return `Saving remote playlist files...`;
+                      }
+                      if (activeUploadProgress.status === 'uploading_track') {
+                        return `${activeUploadProgress.albumTitle}: Uploading (${completed}/${total})`;
+                      }
+                      if (activeUploadProgress.status === 'track_uploaded') {
+                        return `${activeUploadProgress.albumTitle}: Uploaded ${completed}/${total}`;
+                      }
+                      return `${activeUploadProgress.albumTitle}: ${completed}/${total}`;
+                    })()}
                   </span>
                 </div>
               ) : activeSyncProgress ? (
@@ -1595,7 +1648,31 @@ export function App() {
                 >
                   <RefreshIcon className="aria-spinning" />
                   <span>
-                    {activeSyncProgress.completedAlbums}/{activeSyncProgress.totalAlbums} albums synced
+                    {(() => {
+                      const { status, completedAlbums, totalAlbums, currentAlbum } = activeSyncProgress;
+                      if (status === 'checking_index') {
+                        return 'Checking remote library index...';
+                      }
+                      if (status === 'saving_database') {
+                        return currentAlbum || 'Saving to database...';
+                      }
+                      if (status === 'updating_library') {
+                        return currentAlbum || 'Updating local library catalog...';
+                      }
+                      if (status === 'syncing_playlists') {
+                        return currentAlbum || 'Syncing remote playlists...';
+                      }
+                      if (status === 'albums_fetched') {
+                        return currentAlbum || 'Processing synced albums...';
+                      }
+                      if (totalAlbums > 0 && completedAlbums < totalAlbums) {
+                        return `Syncing: ${completedAlbums}/${totalAlbums} albums`;
+                      }
+                      if (currentAlbum) {
+                        return `Syncing: ${currentAlbum}`;
+                      }
+                      return totalAlbums > 0 ? `Syncing: ${totalAlbums} albums` : 'Syncing remote storage...';
+                    })()}
                   </span>
                 </div>
               ) : uploadStatusMessage ? (
@@ -1798,6 +1875,7 @@ export function App() {
           onClose={() => setUploadAlbumTitle(null)}
           onUploadStarted={(targetName, title) => {
             setError(null);
+            setActiveSyncProgress(null);
             setActiveUploadProgress(null);
             setUploadStatusMessage(`Starting upload of "${title}" to ${targetName}...`);
             setTimeout(() => setUploadStatusMessage(null), 4000);
@@ -1810,6 +1888,7 @@ export function App() {
           onClose={() => setUploadPlaylist(null)}
           onUploadStarted={(targetName, playlistName) => {
             setError(null);
+            setActiveSyncProgress(null);
             setActiveUploadProgress(null);
             setUploadStatusMessage(`Starting upload of playlist "${playlistName}" to ${targetName}...`);
             setTimeout(() => setUploadStatusMessage(null), 4000);
@@ -1817,6 +1896,13 @@ export function App() {
           playlist={uploadPlaylist}
           targets={bootstrap.remoteTargets ?? []}
           tracks={bootstrap.library.tracks}
+        />
+      ) : null}
+
+      {uploadFailedItems && uploadFailedItems.length > 0 ? (
+        <RemoteUploadFailureDialog
+          failedItems={uploadFailedItems}
+          onClose={() => setUploadFailedItems(null)}
         />
       ) : null}
     </main>

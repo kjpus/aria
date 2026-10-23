@@ -8,7 +8,7 @@ pub mod settings;
 pub use events::{
     AppEvent, CachePrefetchEvent, GoogleAuthCompletedEvent, LibraryEvent, PlaybackEvent,
     PlaylistEvent, RemoteEvent, RemoteSyncCompletedEvent, RemoteSyncProgressEvent,
-    UploadCompletedEvent, UploadProgressEvent,
+    UploadCompletedEvent, UploadFailedItem, UploadProgressEvent,
 };
 pub use remote::{
     AlbumManifest, ManifestTrack, MasterAlbumSummary, MasterLibraryIndex, MasterPlaylistIndex,

@@ -213,12 +213,22 @@ export type UploadProgressEvent = {
   status: string;
 };
 
+export type UploadFailedItem = {
+  itemId?: string | null;
+  title: string;
+  path: string;
+  error: string;
+};
+
 export type UploadCompletedEvent = {
   targetId: string;
   albumId: string;
   albumTitle: string;
   success: boolean;
   errorMessage: string | null;
+  failedItems?: UploadFailedItem[];
+  newTracksCount?: number;
+  alreadySyncedTracksCount?: number;
 };
 
 export type RemoteCacheStatus = {

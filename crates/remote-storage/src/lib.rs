@@ -14,7 +14,7 @@ pub use prefetcher::{PlaybackPrefetcher, PrefetchCandidate, PrefetchCommand, Pat
 pub use factory::{create_backend_for_target, FilesystemConfig, GoogleDriveStoredConfig};
 pub use pipeline::{
     sync_remote_library, sync_remote_playlists, upload_album, upload_playlist, SyncRemoteResult,
-    UploadOptions,
+    UploadAlbumResult, UploadOptions,
 };
 
 pub use backends::{

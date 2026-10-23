@@ -73,12 +73,27 @@ pub struct UploadProgressEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct UploadFailedItem {
+    pub item_id: Option<String>,
+    pub title: String,
+    pub path: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct UploadCompletedEvent {
     pub target_id: String,
     pub album_id: String,
     pub album_title: String,
     pub success: bool,
     pub error_message: Option<String>,
+    #[serde(default)]
+    pub failed_items: Vec<UploadFailedItem>,
+    #[serde(default)]
+    pub new_tracks_count: usize,
+    #[serde(default)]
+    pub already_synced_tracks_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

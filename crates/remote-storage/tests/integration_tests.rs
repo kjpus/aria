@@ -192,7 +192,7 @@ async fn test_sync_remote_library_full_pipeline() {
     )
     .await
     .expect("upload album");
-    assert!(!upload_res.is_empty());
+    assert!(!upload_res.synced_items.is_empty());
 
     // 3. Now simulate computer 2 syncing the remote library
     let mut known_tracks = HashSet::new();
@@ -418,7 +418,7 @@ async fn test_deduplication_and_skip_unchanged_tracks_and_playlists() {
     )
     .await
     .expect("upload track 1");
-    assert_eq!(upload_res_1.len(), 2); // 1 track + 1 album item
+    assert_eq!(upload_res_1.synced_items.len(), 2); // 1 track + 1 album item
 
     // Verify remote manifest has 1 track
     let manifest_bytes = backend
@@ -448,7 +448,7 @@ async fn test_deduplication_and_skip_unchanged_tracks_and_playlists() {
     )
     .await
     .expect("upload track 1 and 2");
-    assert_eq!(upload_res_2.len(), 3); // 2 tracks + 1 album item
+    assert_eq!(upload_res_2.synced_items.len(), 3); // 2 tracks + 1 album item
 
     let manifest_bytes_2 = backend
         .read_bytes("Johannes Brahms/Piano Concerto No. 1 in D minor, Op. 15/aria-manifest.json")
@@ -476,7 +476,7 @@ async fn test_deduplication_and_skip_unchanged_tracks_and_playlists() {
     )
     .await
     .expect("upload unchanged album near quota limit should succeed");
-    assert_eq!(upload_res_3.len(), 3);
+    assert_eq!(upload_res_3.synced_items.len(), 3);
 
     // 5. Test playlist upload deduplication
     let playlist = Playlist {
@@ -528,6 +528,122 @@ async fn test_deduplication_and_skip_unchanged_tracks_and_playlists() {
     .await
     .expect("upload playlist 2nd time");
     assert_eq!(p_item_2.item_id, "playlist_brahms");
+
+    // Cleanup
+    let _ = tokio::fs::remove_dir_all(&temp_root).await;
+}
+
+#[tokio::test]
+async fn test_upload_album_continues_on_track_failure() {
+    use std::sync::Arc;
+    use chrono::Utc;
+    use aria_domain::{RemoteBackendType, RemoteTarget};
+    use aria_remote_storage::{upload_album, UploadOptions};
+
+    let temp_root = std::env::temp_dir().join(format!("aria_test_failure_{}", Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+    let local_dir = temp_root.join("local");
+    let remote_dir = temp_root.join("remote");
+    tokio::fs::create_dir_all(&local_dir).await.unwrap();
+    tokio::fs::create_dir_all(&remote_dir).await.unwrap();
+
+    let backend: Arc<dyn RemoteStorageBackend> = Arc::new(FilesystemBackend::new(&remote_dir));
+    let target = RemoteTarget {
+        id: "target_fail_test".to_string(),
+        name: "Test Target".to_string(),
+        backend_type: RemoteBackendType::Filesystem,
+        storage_limit_bytes: Some(10_000_000),
+        is_enabled: true,
+        config_json: String::new(),
+    };
+
+    // Track 1 exists on disk
+    let valid_track_path = local_dir.join("01 - Valid.flac");
+    tokio::fs::write(&valid_track_path, b"valid flac audio bytes").await.unwrap();
+
+    // Track 2 does NOT exist on disk
+    let missing_track_path = local_dir.join("02 - Missing.flac");
+
+    let mut mapped1 = BTreeMap::new();
+    mapped1.insert("title".to_string(), vec!["Valid Movement".to_string()]);
+    mapped1.insert("composer".to_string(), vec!["Franz Schubert".to_string()]);
+    mapped1.insert("album".to_string(), vec!["Winterreise, D. 911".to_string()]);
+    mapped1.insert("track_number".to_string(), vec!["1".to_string()]);
+
+    let mut mapped2 = BTreeMap::new();
+    mapped2.insert("title".to_string(), vec!["Missing Movement".to_string()]);
+    mapped2.insert("composer".to_string(), vec!["Franz Schubert".to_string()]);
+    mapped2.insert("album".to_string(), vec!["Winterreise, D. 911".to_string()]);
+    mapped2.insert("track_number".to_string(), vec!["2".to_string()]);
+
+    let track1 = ScannedTrack {
+        id: "track_valid".to_string(),
+        path: valid_track_path.to_string_lossy().to_string(),
+        file_name: "01 - Valid.flac".to_string(),
+        album_art_path: None,
+        audio: AudioPropertiesSnapshot {
+            duration_ms: 180_000,
+            sample_rate: Some(44100),
+            bit_depth: Some(16),
+            channels: Some(2),
+            format: "FLAC".to_string(),
+        },
+        raw_tags: BTreeMap::new(),
+        mapped_fields: mapped1,
+    };
+
+    let track2 = ScannedTrack {
+        id: "track_missing".to_string(),
+        path: missing_track_path.to_string_lossy().to_string(),
+        file_name: "02 - Missing.flac".to_string(),
+        album_art_path: None,
+        audio: AudioPropertiesSnapshot {
+            duration_ms: 200_000,
+            sample_rate: Some(44100),
+            bit_depth: Some(16),
+            channels: Some(2),
+            format: "FLAC".to_string(),
+        },
+        raw_tags: BTreeMap::new(),
+        mapped_fields: mapped2,
+    };
+
+    let upload_options = UploadOptions {
+        compute_checksums: false,
+        current_target_usage_bytes: 0,
+    };
+
+    let result = upload_album(
+        backend.clone(),
+        &target,
+        "Winterreise, D. 911",
+        &[track1, track2],
+        upload_options,
+        None,
+    )
+    .await
+    .expect("upload album should succeed even if individual tracks fail");
+
+    // Track 2 should be in failed_items
+    assert_eq!(result.failed_items.len(), 1);
+    assert_eq!(result.failed_items[0].title, "Missing Movement");
+    assert_eq!(result.failed_items[0].path, missing_track_path.to_string_lossy().to_string());
+    assert!(!result.failed_items[0].error.is_empty());
+
+    // Track 1 should be in synced_items
+    assert!(result.synced_items.iter().any(|i| i.item_type == "track"));
+    // Album synced item should be present
+    assert!(result.synced_items.iter().any(|i| i.item_type == "album"));
+
+    // Verify remote manifest only contains the valid track
+    let manifest_bytes = backend
+        .read_bytes("Franz Schubert/Winterreise, D. 911/aria-manifest.json")
+        .await
+        .expect("read manifest");
+    let manifest: aria_domain::AlbumManifest =
+        deserialize_manifest(&String::from_utf8_lossy(&manifest_bytes)).expect("deserialize manifest");
+    assert_eq!(manifest.tracks.len(), 1);
+    assert_eq!(manifest.tracks[0].relative_file_name, "01 - Valid Movement.flac");
+    assert_eq!(result.synced_items[0].item_id, manifest.tracks[0].track_id);
 
     // Cleanup
     let _ = tokio::fs::remove_dir_all(&temp_root).await;
