@@ -328,3 +328,207 @@ async fn test_sync_remote_library_full_pipeline() {
     // 8. Cleanup
     let _ = tokio::fs::remove_dir_all(&temp_root).await;
 }
+
+#[tokio::test]
+async fn test_deduplication_and_skip_unchanged_tracks_and_playlists() {
+    use std::sync::Arc;
+    use aria_domain::{Playlist, RemoteBackendType, RemotePlaylistTrack, RemoteTarget};
+    use aria_library::manifest::deserialize_manifest;
+    use aria_remote_storage::{upload_album, upload_playlist, UploadOptions};
+
+    let temp_root = std::env::temp_dir().join(format!("aria_dedup_test_{}", std::process::id()));
+    let dummy_audio_dir = temp_root.join("source_music");
+    tokio::fs::create_dir_all(&dummy_audio_dir).await.expect("create audio dir");
+
+    let backend = Arc::new(FilesystemBackend::new(&temp_root.join("remote_store")));
+
+    let target = RemoteTarget {
+        id: "target_dedup_1".to_string(),
+        name: "Dedup Remote Store".to_string(),
+        backend_type: RemoteBackendType::Filesystem,
+        storage_limit_bytes: Some(1_000_000),
+        is_enabled: true,
+        config_json: String::new(),
+    };
+
+    // 1. Prepare dummy audio tracks and cover
+    let dummy_audio_file1 = dummy_audio_dir.join("track1.flac");
+    tokio::fs::write(&dummy_audio_file1, b"AUDIO_DATA_FOR_TRACK_1").await.expect("write track 1");
+    let dummy_audio_file2 = dummy_audio_dir.join("track2.flac");
+    tokio::fs::write(&dummy_audio_file2, b"AUDIO_DATA_FOR_TRACK_2").await.expect("write track 2");
+    let dummy_cover_file = dummy_audio_dir.join("cover.jpg");
+    tokio::fs::write(&dummy_cover_file, b"COVER_ART_JPEG").await.expect("write cover");
+
+    let mut mapped1 = BTreeMap::new();
+    mapped1.insert("composer".to_string(), vec!["Johannes Brahms".to_string()]);
+    mapped1.insert("album".to_string(), vec!["Piano Concerto No. 1 in D minor, Op. 15".to_string()]);
+    mapped1.insert("title".to_string(), vec!["I. Maestoso".to_string()]);
+    mapped1.insert("track_number".to_string(), vec!["1".to_string()]);
+
+    let track1 = ScannedTrack {
+        id: "track_brahms_1_1".to_string(),
+        path: dummy_audio_file1.to_string_lossy().to_string(),
+        file_name: "track1.flac".to_string(),
+        album_art_path: Some(dummy_cover_file.to_string_lossy().to_string()),
+        audio: AudioPropertiesSnapshot {
+            format: "FLAC".to_string(),
+            duration_ms: 600_000,
+            sample_rate: Some(44100),
+            bit_depth: Some(16),
+            channels: Some(2),
+        },
+        raw_tags: BTreeMap::new(),
+        mapped_fields: mapped1,
+    };
+
+    let mut mapped2 = BTreeMap::new();
+    mapped2.insert("composer".to_string(), vec!["Johannes Brahms".to_string()]);
+    mapped2.insert("album".to_string(), vec!["Piano Concerto No. 1 in D minor, Op. 15".to_string()]);
+    mapped2.insert("title".to_string(), vec!["II. Adagio".to_string()]);
+    mapped2.insert("track_number".to_string(), vec!["2".to_string()]);
+
+    let track2 = ScannedTrack {
+        id: "track_brahms_1_2".to_string(),
+        path: dummy_audio_file2.to_string_lossy().to_string(),
+        file_name: "track2.flac".to_string(),
+        album_art_path: Some(dummy_cover_file.to_string_lossy().to_string()),
+        audio: AudioPropertiesSnapshot {
+            format: "FLAC".to_string(),
+            duration_ms: 700_000,
+            sample_rate: Some(44100),
+            bit_depth: Some(16),
+            channels: Some(2),
+        },
+        raw_tags: BTreeMap::new(),
+        mapped_fields: mapped2,
+    };
+
+    // 2. Upload only Track 1 first (simulating a playlist upload containing only 1 track of an album)
+    let upload_options = UploadOptions {
+        compute_checksums: false,
+        current_target_usage_bytes: 0,
+    };
+    let upload_res_1 = upload_album(
+        backend.clone(),
+        &target,
+        "Piano Concerto No. 1 in D minor, Op. 15",
+        &[track1.clone()],
+        upload_options,
+        None,
+    )
+    .await
+    .expect("upload track 1");
+    assert_eq!(upload_res_1.len(), 2); // 1 track + 1 album item
+
+    // Verify remote manifest has 1 track
+    let manifest_bytes = backend
+        .read_bytes("Johannes Brahms/Piano Concerto No. 1 in D minor, Op. 15/aria-manifest.json")
+        .await
+        .expect("read manifest");
+    let manifest: aria_domain::AlbumManifest =
+        deserialize_manifest(&String::from_utf8_lossy(&manifest_bytes)).expect("deserialize manifest");
+    assert_eq!(manifest.tracks.len(), 1);
+    assert_eq!(manifest.tracks[0].relative_file_name, "01 - I. Maestoso.flac");
+
+    // 3. Now upload Track 1 and Track 2 together
+    // Track 1 should be recognized as already uploaded with identical content and skipped.
+    // Track 2 should be uploaded.
+    // The remote manifest should now contain BOTH tracks (merged).
+    let upload_options_2 = UploadOptions {
+        compute_checksums: false,
+        current_target_usage_bytes: 50_000,
+    };
+    let upload_res_2 = upload_album(
+        backend.clone(),
+        &target,
+        "Piano Concerto No. 1 in D minor, Op. 15",
+        &[track1.clone(), track2.clone()],
+        upload_options_2,
+        None,
+    )
+    .await
+    .expect("upload track 1 and 2");
+    assert_eq!(upload_res_2.len(), 3); // 2 tracks + 1 album item
+
+    let manifest_bytes_2 = backend
+        .read_bytes("Johannes Brahms/Piano Concerto No. 1 in D minor, Op. 15/aria-manifest.json")
+        .await
+        .expect("read manifest 2");
+    let manifest_2: aria_domain::AlbumManifest =
+        deserialize_manifest(&String::from_utf8_lossy(&manifest_bytes_2)).expect("deserialize manifest 2");
+    assert_eq!(manifest_2.tracks.len(), 2);
+    assert_eq!(manifest_2.tracks[0].relative_file_name, "01 - I. Maestoso.flac");
+    assert_eq!(manifest_2.tracks[1].relative_file_name, "02 - II. Adagio.flac");
+
+    // 4. Test uploading again when ALL tracks are already uploaded and unchanged
+    // Even if storage usage is near quota limit, pre-flight check should pass because 0 new bytes are uploaded
+    let near_limit_options = UploadOptions {
+        compute_checksums: false,
+        current_target_usage_bytes: 999_900, // Near 1MB limit; new bytes would exceed it
+    };
+    let upload_res_3 = upload_album(
+        backend.clone(),
+        &target,
+        "Piano Concerto No. 1 in D minor, Op. 15",
+        &[track1.clone(), track2.clone()],
+        near_limit_options,
+        None,
+    )
+    .await
+    .expect("upload unchanged album near quota limit should succeed");
+    assert_eq!(upload_res_3.len(), 3);
+
+    // 5. Test playlist upload deduplication
+    let playlist = Playlist {
+        id: "playlist_brahms".to_string(),
+        name: "Brahms Favorites".to_string(),
+        collage_seed: 42,
+        track_ids: vec![track1.id.clone(), track2.id.clone()],
+        created_at: Some("2026-10-22T10:00:00Z".to_string()),
+    };
+
+    let playlist_tracks = vec![
+        RemotePlaylistTrack {
+            track_id: track1.id.clone(),
+            relative_path: "Johannes Brahms/Piano Concerto No. 1 in D minor, Op. 15/01 - I. Maestoso.flac".to_string(),
+            title: "I. Maestoso".to_string(),
+            composer: Some("Johannes Brahms".to_string()),
+            album: Some("Piano Concerto No. 1 in D minor, Op. 15".to_string()),
+            duration_ms: 600_000,
+        },
+        RemotePlaylistTrack {
+            track_id: track2.id.clone(),
+            relative_path: "Johannes Brahms/Piano Concerto No. 1 in D minor, Op. 15/02 - II. Adagio.flac".to_string(),
+            title: "II. Adagio".to_string(),
+            composer: Some("Johannes Brahms".to_string()),
+            album: Some("Piano Concerto No. 1 in D minor, Op. 15".to_string()),
+            duration_ms: 700_000,
+        },
+    ];
+
+    let p_item_1 = upload_playlist(
+        backend.clone(),
+        &target,
+        &playlist,
+        &playlist_tracks,
+        None,
+    )
+    .await
+    .expect("upload playlist 1st time");
+    assert_eq!(p_item_1.item_id, "playlist_brahms");
+
+    // Upload identical playlist second time: succeeds and skips rewriting
+    let p_item_2 = upload_playlist(
+        backend.clone(),
+        &target,
+        &playlist,
+        &playlist_tracks,
+        None,
+    )
+    .await
+    .expect("upload playlist 2nd time");
+    assert_eq!(p_item_2.item_id, "playlist_brahms");
+
+    // Cleanup
+    let _ = tokio::fs::remove_dir_all(&temp_root).await;
+}
