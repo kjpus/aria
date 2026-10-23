@@ -50,6 +50,8 @@ import {
   renamePlaylist,
   removeLibraryRoot,
   removeTracksFromPlaylist,
+  reorderPlaylistTracks,
+  reorderPlaylists,
   restoreQueueOrder,
   seek,
   setCatalogRules,
@@ -1433,6 +1435,30 @@ export function App() {
     }
   }
 
+  async function handleReorderPlaylistTracks(
+    playlistId: string,
+    trackIds: string[],
+  ) {
+    try {
+      const playlists = await reorderPlaylistTracks(playlistId, trackIds);
+      setBootstrap((current) => (current ? { ...current, playlists } : current));
+      setSelectedPlaylistId(playlistId);
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function handleReorderPlaylists(playlistIds: string[]) {
+    try {
+      const playlists = await reorderPlaylists(playlistIds);
+      setBootstrap((current) => (current ? { ...current, playlists } : current));
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   if (!bootstrap) {
     return (
       <main className="app-shell app-shell--loading">
@@ -1774,6 +1800,8 @@ export function App() {
                 onPlayTracks={handlePlayTracks}
                 onRegeneratePlaylistIcon={handleRegeneratePlaylistIcon}
                 onRemoveTracks={handleRemoveTracksFromPlaylist}
+                onReorderTracks={handleReorderPlaylistTracks}
+                onReorderPlaylists={handleReorderPlaylists}
                 onRenamePlaylist={handleRenamePlaylist}
                 onSelectPlaylist={setSelectedPlaylistId}
                 onShufflePlayPlaylist={handleShufflePlayPlaylist}

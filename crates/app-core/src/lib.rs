@@ -347,6 +347,29 @@ impl AppCore {
         Ok(snapshot)
     }
 
+    pub async fn reorder_playlist_tracks(
+        &self,
+        playlist_id: String,
+        track_ids: Vec<String>,
+    ) -> Result<PlaylistSnapshot, AppCoreError> {
+        let snapshot = self.playlists.reorder_tracks(playlist_id, track_ids).await?;
+        self.emit(AppEvent::Playlists(PlaylistEvent::SnapshotChanged(
+            snapshot.clone(),
+        )));
+        Ok(snapshot)
+    }
+
+    pub async fn reorder_playlists(
+        &self,
+        playlist_ids: Vec<String>,
+    ) -> Result<PlaylistSnapshot, AppCoreError> {
+        let snapshot = self.playlists.reorder_playlists(playlist_ids).await?;
+        self.emit(AppEvent::Playlists(PlaylistEvent::SnapshotChanged(
+            snapshot.clone(),
+        )));
+        Ok(snapshot)
+    }
+
     pub async fn set_field_mappings(&self, mappings: Vec<LibraryFieldMapping>) -> LibrarySnapshot {
         let snapshot = self.library.set_field_mappings(mappings).await;
         self.emit(AppEvent::Library(LibraryEvent::SnapshotChanged(

@@ -10,6 +10,7 @@ import {
   GridLargeIcon,
   GridMediumIcon,
   GridSmallIcon,
+  GripVerticalIcon,
 } from '../../components/Icons';
 import { SectionCard } from '../../components/SectionCard';
 import { toLocalImageSrc } from '../../lib/runtime';
@@ -60,6 +61,8 @@ type PlaylistPaneProps = {
   onShufflePlayPlaylist: (playlistId: string) => void | Promise<void>;
   onPlayTracks: (tracks: ScannedTrack[]) => void | Promise<void>;
   onRemoveTracks: (playlistId: string, trackIds: string[]) => void | Promise<void>;
+  onReorderTracks: (playlistId: string, trackIds: string[]) => void | Promise<void>;
+  onReorderPlaylists?: (playlistIds: string[]) => void | Promise<void>;
   onOpenAlbum: (albumId: string) => void;
   onImportPlaylist: () => void | Promise<void>;
   onUploadPlaylist?: (playlist: Playlist) => void;
@@ -104,6 +107,8 @@ export function PlaylistPane({
   onShufflePlayPlaylist,
   onPlayTracks,
   onRemoveTracks,
+  onReorderTracks,
+  onReorderPlaylists,
   onImportPlaylist,
   onUploadPlaylist,
 }: PlaylistPaneProps) {
@@ -116,6 +121,16 @@ export function PlaylistPane({
   const [renameValue, setRenameValue] = useState('');
   const [selectedTrackIds, setSelectedTrackIds] = useState<string[]>([]);
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
+  const [draggedTrackIds, setDraggedTrackIds] = useState<string[] | null>(null);
+  const [dragOverTrackState, setDragOverTrackState] = useState<{
+    trackId: string;
+    position: 'before' | 'after';
+  } | null>(null);
+  const [draggedPlaylistId, setDraggedPlaylistId] = useState<string | null>(null);
+  const [dragOverPlaylistState, setDragOverPlaylistState] = useState<{
+    playlistId: string;
+    position: 'before' | 'after';
+  } | null>(null);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   const [resizingColumn, setResizingColumn] = useState<string | null>(null);
   const [hasHydrated, setHasHydrated] = useState(false);
@@ -467,6 +482,249 @@ export function PlaylistPane({
     setRenamePlaylistId(null);
   }
 
+  useEffect(() => {
+    if (!selectedPlaylist || selectedTrackIds.length === 0) {
+      return undefined;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.altKey &&
+        (event.key === 'ArrowUp' || event.key === 'ArrowDown')
+      ) {
+        event.preventDefault();
+        const direction = event.key === 'ArrowUp' ? 'up' : 'down';
+        const nextTrackIds = moveTrackIds(
+          selectedPlaylist.trackIds,
+          selectedTrackIds,
+          direction,
+        );
+        if (nextTrackIds) {
+          void onReorderTracks(selectedPlaylist.id, nextTrackIds);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onReorderTracks, selectedPlaylist, selectedTrackIds]);
+
+  const isSelectionAtTop = useMemo(() => {
+    if (!selectedPlaylist || !trackContextMenu) return true;
+    const indices = trackContextMenu.trackIds.map((id) =>
+      selectedPlaylist.trackIds.indexOf(id),
+    );
+    return indices.includes(0);
+  }, [selectedPlaylist, trackContextMenu]);
+
+  const isSelectionAtBottom = useMemo(() => {
+    if (!selectedPlaylist || !trackContextMenu) return true;
+    const maxIdx = selectedPlaylist.trackIds.length - 1;
+    const indices = trackContextMenu.trackIds.map((id) =>
+      selectedPlaylist.trackIds.indexOf(id),
+    );
+    return indices.includes(maxIdx);
+  }, [selectedPlaylist, trackContextMenu]);
+
+  function handlePlaylistDragStart(
+    event: React.DragEvent<HTMLButtonElement>,
+    playlistId: string,
+  ) {
+    setDraggedPlaylistId(playlistId);
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', playlistId);
+  }
+
+  function handlePlaylistDragOver(
+    event: React.DragEvent<HTMLButtonElement>,
+    playlistId: string,
+  ) {
+    if (!draggedPlaylistId || draggedPlaylistId === playlistId) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const position = event.clientX > rect.left + rect.width / 2 ? 'after' : 'before';
+
+    if (
+      !dragOverPlaylistState ||
+      dragOverPlaylistState.playlistId !== playlistId ||
+      dragOverPlaylistState.position !== position
+    ) {
+      setDragOverPlaylistState({ playlistId, position });
+    }
+  }
+
+  function handlePlaylistDragLeave(
+    event: React.DragEvent<HTMLButtonElement>,
+    playlistId: string,
+  ) {
+    const related = event.relatedTarget as Node | null;
+    if (!event.currentTarget.contains(related)) {
+      if (dragOverPlaylistState?.playlistId === playlistId) {
+        setDragOverPlaylistState(null);
+      }
+    }
+  }
+
+  function handlePlaylistDrop(
+    event: React.DragEvent<HTMLButtonElement>,
+    playlistId: string,
+  ) {
+    event.preventDefault();
+    if (!draggedPlaylistId || !onReorderPlaylists) {
+      setDraggedPlaylistId(null);
+      setDragOverPlaylistState(null);
+      return;
+    }
+
+    const position = dragOverPlaylistState?.position ?? 'before';
+    const allPlaylistIds = playlists.map((p) => p.id);
+    const nextIds = reorderPlaylistIdsOnDrop(
+      allPlaylistIds,
+      draggedPlaylistId,
+      playlistId,
+      position,
+    );
+
+    setDraggedPlaylistId(null);
+    setDragOverPlaylistState(null);
+
+    if (nextIds) {
+      void onReorderPlaylists(nextIds);
+    }
+  }
+
+  function handlePlaylistDragEnd() {
+    setDraggedPlaylistId(null);
+    setDragOverPlaylistState(null);
+  }
+
+  function handleTrackDragStart(
+    event: React.DragEvent<HTMLTableRowElement>,
+    trackId: string,
+  ) {
+    if (resizingColumn) {
+      event.preventDefault();
+      return;
+    }
+
+    if ((event.target as HTMLElement).closest('button, input, select, textarea, a')) {
+      event.preventDefault();
+      return;
+    }
+
+    let idsToDrag = selectedTrackIds;
+    if (!selectedTrackSet.has(trackId)) {
+      idsToDrag = [trackId];
+      setSelectedTrackIds([trackId]);
+      setSelectionAnchorId(trackId);
+    } else {
+      idsToDrag = selectTrackIdsInOrder(playlistTracks, selectedTrackIds);
+    }
+
+    setDraggedTrackIds(idsToDrag);
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', trackId);
+  }
+
+  function handleTrackDragOver(
+    event: React.DragEvent<HTMLTableRowElement>,
+    trackId: string,
+  ) {
+    if (!draggedTrackIds || draggedTrackIds.length === 0) {
+      return;
+    }
+    if (draggedTrackIds.includes(trackId)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const position = event.clientY > rect.top + rect.height / 2 ? 'after' : 'before';
+
+    if (
+      !dragOverTrackState ||
+      dragOverTrackState.trackId !== trackId ||
+      dragOverTrackState.position !== position
+    ) {
+      setDragOverTrackState({ trackId, position });
+    }
+  }
+
+  function handleTrackDragLeave(
+    event: React.DragEvent<HTMLTableRowElement>,
+    trackId: string,
+  ) {
+    const related = event.relatedTarget as Node | null;
+    if (!event.currentTarget.contains(related)) {
+      if (dragOverTrackState?.trackId === trackId) {
+        setDragOverTrackState(null);
+      }
+    }
+  }
+
+  function handleTrackDrop(
+    event: React.DragEvent<HTMLTableRowElement>,
+    trackId: string,
+  ) {
+    event.preventDefault();
+    if (!draggedTrackIds || !selectedPlaylist) {
+      setDraggedTrackIds(null);
+      setDragOverTrackState(null);
+      return;
+    }
+
+    const position = dragOverTrackState?.position ?? 'before';
+    const nextTrackIds = reorderTrackIdsOnDrop(
+      selectedPlaylist.trackIds,
+      draggedTrackIds,
+      trackId,
+      position,
+    );
+
+    setDraggedTrackIds(null);
+    setDragOverTrackState(null);
+
+    if (nextTrackIds) {
+      void onReorderTracks(selectedPlaylist.id, nextTrackIds);
+    }
+  }
+
+  function handleTrackDragEnd() {
+    setDraggedTrackIds(null);
+    setDragOverTrackState(null);
+  }
+
+  function handleTableBodyDragOver(event: React.DragEvent<HTMLTableSectionElement>) {
+    if (!draggedTrackIds || draggedTrackIds.length === 0) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  }
+
+  function handleTableBodyDrop(event: React.DragEvent<HTMLTableSectionElement>) {
+    if (!draggedTrackIds || !selectedPlaylist || playlistRows.length === 0) return;
+    if ((event.target as HTMLElement).tagName === 'TBODY') {
+      event.preventDefault();
+      const lastTrack = playlistRows[playlistRows.length - 1].track;
+      const nextTrackIds = reorderTrackIdsOnDrop(
+        selectedPlaylist.trackIds,
+        draggedTrackIds,
+        lastTrack.id,
+        'after',
+      );
+      setDraggedTrackIds(null);
+      setDragOverTrackState(null);
+      if (nextTrackIds) {
+        void onReorderTracks(selectedPlaylist.id, nextTrackIds);
+      }
+    }
+  }
+
   return (
     <div className="pane-stack">
       <SectionCard hideHeader>
@@ -545,10 +803,25 @@ export function PlaylistPane({
                     className={[
                       'playlist-card',
                       selected ? 'playlist-card--selected' : '',
+                      draggedPlaylistId === playlist.id ? 'playlist-card--dragging' : '',
+                      dragOverPlaylistState?.playlistId === playlist.id &&
+                      dragOverPlaylistState.position === 'before'
+                        ? 'playlist-card--drop-before'
+                        : '',
+                      dragOverPlaylistState?.playlistId === playlist.id &&
+                      dragOverPlaylistState.position === 'after'
+                        ? 'playlist-card--drop-after'
+                        : '',
                     ]
                       .filter(Boolean)
                       .join(' ')}
                     key={playlist.id}
+                    draggable={Boolean(onReorderPlaylists)}
+                    onDragStart={(event) => handlePlaylistDragStart(event, playlist.id)}
+                    onDragOver={(event) => handlePlaylistDragOver(event, playlist.id)}
+                    onDragLeave={(event) => handlePlaylistDragLeave(event, playlist.id)}
+                    onDrop={(event) => handlePlaylistDrop(event, playlist.id)}
+                    onDragEnd={handlePlaylistDragEnd}
                     onClick={() => onSelectPlaylist(playlist.id)}
                     onContextMenu={(event) => openContextMenu(event, playlist.id)}
                     onDoubleClick={() => void onPlayPlaylist(playlist.id)}
@@ -662,7 +935,10 @@ export function PlaylistPane({
                         })}
                       </tr>
                     </thead>
-                    <tbody>
+                    <tbody
+                      onDragOver={handleTableBodyDragOver}
+                      onDrop={handleTableBodyDrop}
+                    >
                       {playlistRows.length === 0 ? (
                         <tr>
                           <td className="empty-state" colSpan={Math.max(visibleColumns.length, 1)}>
@@ -677,10 +953,27 @@ export function PlaylistPane({
                               selectedTrackSet.has(track.id)
                                 ? 'track-table__row--selected'
                                 : '',
+                              draggedTrackIds?.includes(track.id)
+                                ? 'track-table__row--dragging'
+                                : '',
+                              dragOverTrackState?.trackId === track.id &&
+                              dragOverTrackState.position === 'before'
+                                ? 'track-table__row--drop-before'
+                                : '',
+                              dragOverTrackState?.trackId === track.id &&
+                              dragOverTrackState.position === 'after'
+                                ? 'track-table__row--drop-after'
+                                : '',
                             ]
                               .filter(Boolean)
                               .join(' ')}
                             key={track.id}
+                            draggable={true}
+                            onDragStart={(event) => handleTrackDragStart(event, track.id)}
+                            onDragOver={(event) => handleTrackDragOver(event, track.id)}
+                            onDragLeave={(event) => handleTrackDragLeave(event, track.id)}
+                            onDrop={(event) => handleTrackDrop(event, track.id)}
+                            onDragEnd={handleTrackDragEnd}
                             onClick={(event) => handleTrackClick(event, track.id)}
                             onContextMenu={(event) => handleTrackContextMenu(event, track)}
                             onDoubleClick={() => void onPlayTracks([track])}
@@ -700,7 +993,20 @@ export function PlaylistPane({
                                   .join(' ')}
                                 key={`${track.id}-${key}`}
                               >
-                                {key === 'playlist_order' || key === 'duration' ? (
+                                {key === 'playlist_order' ? (
+                                  <div
+                                    className="track-table__drag-handle"
+                                    title="Drag to reorder"
+                                  >
+                                    <GripVerticalIcon
+                                      className="track-table__grip-icon"
+                                      size={13}
+                                    />
+                                    <span className="track-table__order-num">
+                                      {order}
+                                    </span>
+                                  </div>
+                                ) : key === 'duration' ? (
                                   <span className="track-table__cell-text track-table__cell-text--static">
                                     {getPlaylistColumnValue(track, key, order)}
                                   </span>
@@ -767,6 +1073,38 @@ export function PlaylistPane({
                 ref={menuRef}
                 style={{ left: `${trackContextMenu.x}px`, top: `${trackContextMenu.y}px` }}
               >
+                <button
+                  disabled={isSelectionAtTop}
+                  onClick={() => {
+                    if (!selectedPlaylist) return;
+                    const next = moveTrackIds(
+                      selectedPlaylist.trackIds,
+                      trackContextMenu.trackIds,
+                      'up',
+                    );
+                    setTrackContextMenu(null);
+                    if (next) void onReorderTracks(selectedPlaylist.id, next);
+                  }}
+                  type="button"
+                >
+                  Move up
+                </button>
+                <button
+                  disabled={isSelectionAtBottom}
+                  onClick={() => {
+                    if (!selectedPlaylist) return;
+                    const next = moveTrackIds(
+                      selectedPlaylist.trackIds,
+                      trackContextMenu.trackIds,
+                      'down',
+                    );
+                    setTrackContextMenu(null);
+                    if (next) void onReorderTracks(selectedPlaylist.id, next);
+                  }}
+                  type="button"
+                >
+                  Move down
+                </button>
                 <button
                   onClick={() => void runTrackContextAction(onRemoveTracks)}
                   type="button"
@@ -878,6 +1216,94 @@ function selectTrackIdsInOrder(
   return orderedTracks
     .filter((track) => selectedTrackSet.has(track.id))
     .map((track) => track.id);
+}
+
+function moveTrackIds(
+  allIds: string[],
+  targetIds: string[],
+  direction: 'up' | 'down',
+): string[] | null {
+  const targetSet = new Set(targetIds);
+  if (targetSet.size === 0) return null;
+
+  const indices = allIds
+    .map((id, index) => (targetSet.has(id) ? index : -1))
+    .filter((index) => index !== -1);
+
+  if (indices.length === 0) return null;
+
+  if (direction === 'up') {
+    if (indices[0] === 0) return null;
+    const next = [...allIds];
+    for (const idx of indices) {
+      const prev = idx - 1;
+      const temp = next[prev];
+      next[prev] = next[idx];
+      next[idx] = temp;
+    }
+    return next;
+  }
+
+  if (indices[indices.length - 1] === allIds.length - 1) return null;
+  const next = [...allIds];
+  for (let i = indices.length - 1; i >= 0; i -= 1) {
+    const idx = indices[i];
+    const after = idx + 1;
+    const temp = next[after];
+    next[after] = next[idx];
+    next[idx] = temp;
+  }
+  return next;
+}
+
+function reorderTrackIdsOnDrop(
+  allIds: string[],
+  draggedIds: string[],
+  targetId: string,
+  position: 'before' | 'after',
+): string[] | null {
+  const draggedSet = new Set(draggedIds);
+  if (draggedSet.has(targetId)) return null;
+
+  const remaining = allIds.filter((id) => !draggedSet.has(id));
+  const targetIndex = remaining.indexOf(targetId);
+  if (targetIndex === -1) return null;
+
+  const insertIndex = position === 'after' ? targetIndex + 1 : targetIndex;
+  const orderedDragged = allIds.filter((id) => draggedSet.has(id));
+  const result = [
+    ...remaining.slice(0, insertIndex),
+    ...orderedDragged,
+    ...remaining.slice(insertIndex),
+  ];
+
+  const unchanged =
+    result.length === allIds.length && result.every((id, idx) => id === allIds[idx]);
+  return unchanged ? null : result;
+}
+
+function reorderPlaylistIdsOnDrop(
+  allIds: string[],
+  draggedId: string,
+  targetId: string,
+  position: 'before' | 'after',
+): string[] | null {
+  if (draggedId === targetId) return null;
+
+  const remaining = allIds.filter((id) => id !== draggedId);
+  const targetIndex = remaining.indexOf(targetId);
+  if (targetIndex === -1) return null;
+
+  const insertIndex = position === 'after' ? targetIndex + 1 : targetIndex;
+  const result = [
+    ...remaining.slice(0, insertIndex),
+    draggedId,
+    ...remaining.slice(insertIndex),
+  ];
+
+  const unchanged =
+    result.length === allIds.length && result.every((id, idx) => id === allIds[idx]);
+  return unchanged ? null : result;
 }
 
 function buildColumnWeight(

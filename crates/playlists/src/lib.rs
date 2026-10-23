@@ -172,6 +172,50 @@ impl PlaylistService {
         Ok(state.clone())
     }
 
+    pub async fn reorder_tracks(
+        &self,
+        playlist_id: String,
+        track_ids: Vec<String>,
+    ) -> Result<PlaylistSnapshot, PlaylistError> {
+        let mut state = self.state.write().await;
+        let playlist = state
+            .playlists
+            .iter_mut()
+            .find(|playlist| playlist.id == playlist_id)
+            .ok_or(PlaylistError::PlaylistNotFound)?;
+
+        let mut new_track_ids = Vec::with_capacity(playlist.track_ids.len());
+        for id in track_ids {
+            if playlist.track_ids.contains(&id) && !new_track_ids.contains(&id) {
+                new_track_ids.push(id);
+            }
+        }
+        for id in &playlist.track_ids {
+            if !new_track_ids.contains(id) {
+                new_track_ids.push(id.clone());
+            }
+        }
+        playlist.track_ids = new_track_ids;
+        Ok(state.clone())
+    }
+
+    pub async fn reorder_playlists(
+        &self,
+        playlist_ids: Vec<String>,
+    ) -> Result<PlaylistSnapshot, PlaylistError> {
+        let mut state = self.state.write().await;
+        let mut reordered = Vec::with_capacity(state.playlists.len());
+        for id in playlist_ids {
+            if let Some(pos) = state.playlists.iter().position(|p| p.id == id) {
+                let pl = state.playlists.remove(pos);
+                reordered.push(pl);
+            }
+        }
+        reordered.append(&mut state.playlists);
+        state.playlists = reordered;
+        Ok(state.clone())
+    }
+
     pub async fn import_synced_playlist(&self, playlist: Playlist) -> PlaylistSnapshot {
         let mut state = self.state.write().await;
         if let Some(existing) = state.playlists.iter_mut().find(|p| p.id == playlist.id) {
@@ -327,5 +371,64 @@ mod tests {
         assert_eq!(updated2.playlists.len(), 2);
         let imported2 = updated2.playlists.iter().find(|p| p.id == "remote-pl-1").unwrap();
         assert_eq!(imported2.track_ids.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_reorder_tracks() {
+        let mut snapshot = PlaylistSnapshot::default();
+        snapshot.playlists.push(Playlist {
+            id: "pl-1".to_string(),
+            name: "My Playlist".to_string(),
+            collage_seed: 0,
+            track_ids: vec!["t1".to_string(), "t2".to_string(), "t3".to_string(), "t4".to_string()],
+            created_at: None,
+        });
+
+        let service = PlaylistService::with_snapshot(snapshot);
+
+        // Reorder tracks: move t3 and t4 before t1
+        let updated = service
+            .reorder_tracks(
+                "pl-1".to_string(),
+                vec!["t3".to_string(), "t4".to_string(), "t1".to_string()],
+            )
+            .await
+            .expect("reorder succeeds");
+
+        let pl = updated.playlists.iter().find(|p| p.id == "pl-1").unwrap();
+        // Unmentioned t2 should be preserved at the end
+        assert_eq!(
+            pl.track_ids,
+            vec!["t3".to_string(), "t4".to_string(), "t1".to_string(), "t2".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reorder_playlists() {
+        let mut snapshot = PlaylistSnapshot::default();
+        snapshot.playlists.push(Playlist {
+            id: "pl-1".to_string(),
+            name: "Playlist 1".to_string(),
+            collage_seed: 0,
+            track_ids: vec![],
+            created_at: None,
+        });
+        snapshot.playlists.push(Playlist {
+            id: "pl-2".to_string(),
+            name: "Playlist 2".to_string(),
+            collage_seed: 0,
+            track_ids: vec![],
+            created_at: None,
+        });
+
+        let service = PlaylistService::with_snapshot(snapshot);
+        let updated = service
+            .reorder_playlists(vec!["pl-2".to_string(), "favorites".to_string()])
+            .await
+            .expect("reorder playlists succeeds");
+
+        let ids: Vec<_> = updated.playlists.iter().map(|p| p.id.as_str()).collect();
+        // pl-2 first, then favorites, then unmentioned pl-1
+        assert_eq!(ids, vec!["pl-2", "favorites", "pl-1"]);
     }
 }

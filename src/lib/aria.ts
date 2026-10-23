@@ -12,6 +12,7 @@ import type {
   OutputDeviceSnapshot,
   PlaybackPreferences,
   PlayTrackRequest,
+  Playlist,
   PlaylistSnapshot,
   PreviewTrack,
   PlaylistImportPreview,
@@ -547,6 +548,54 @@ export async function removeTracksFromPlaylist(
     return previewBootstrap.playlists;
   }
   return invoke<PlaylistSnapshot>('remove_tracks_from_playlist', { playlistId, trackIds });
+}
+
+export async function reorderPlaylistTracks(
+  playlistId: string,
+  trackIds: string[],
+): Promise<PlaylistSnapshot> {
+  if (!isTauriRuntime) {
+    previewBootstrap = {
+      ...previewBootstrap,
+      playlists: {
+        playlists: previewBootstrap.playlists.playlists.map((playlist) =>
+          playlist.id === playlistId
+            ? {
+                ...playlist,
+                trackIds,
+              }
+            : playlist,
+        ),
+      },
+    };
+    return previewBootstrap.playlists;
+  }
+  return invoke<PlaylistSnapshot>('reorder_playlist_tracks', { playlistId, trackIds });
+}
+
+export async function reorderPlaylists(
+  playlistIds: string[],
+): Promise<PlaylistSnapshot> {
+  if (!isTauriRuntime) {
+    const map = new Map(previewBootstrap.playlists.playlists.map((p) => [p.id, p]));
+    const reordered: Playlist[] = [];
+    for (const id of playlistIds) {
+      const pl = map.get(id);
+      if (pl) {
+        reordered.push(pl);
+        map.delete(id);
+      }
+    }
+    for (const pl of map.values()) {
+      reordered.push(pl);
+    }
+    previewBootstrap = {
+      ...previewBootstrap,
+      playlists: { playlists: reordered },
+    };
+    return previewBootstrap.playlists;
+  }
+  return invoke<PlaylistSnapshot>('reorder_playlists', { playlistIds });
 }
 
 export async function pickDirectory(): Promise<string | null> {

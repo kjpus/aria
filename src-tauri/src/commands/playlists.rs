@@ -95,6 +95,29 @@ pub async fn remove_tracks_from_playlist(
 }
 
 #[tauri::command]
+pub async fn reorder_playlist_tracks(
+    state: State<'_, AppState>,
+    playlist_id: String,
+    track_ids: Vec<String>,
+) -> Result<PlaylistSnapshot, CommandError> {
+    Ok(state
+        .core
+        .reorder_playlist_tracks(playlist_id, track_ids)
+        .await?)
+}
+
+#[tauri::command]
+pub async fn reorder_playlists(
+    state: State<'_, AppState>,
+    playlist_ids: Vec<String>,
+) -> Result<PlaylistSnapshot, CommandError> {
+    Ok(state
+        .core
+        .reorder_playlists(playlist_ids)
+        .await?)
+}
+
+#[tauri::command]
 pub async fn pick_playlist_file() -> Result<Option<String>, CommandError> {
     #[cfg(target_os = "windows")]
     {

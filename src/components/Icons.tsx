@@ -430,3 +430,25 @@ export function EmptyArtPlaceholder({ className }: { className?: string }) {
     </div>
   );
 }
+
+export function GripVerticalIcon({ size = 14, className, ...props }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className}
+      fill="currentColor"
+      height={size}
+      viewBox="0 0 16 16"
+      width={size}
+      xmlns="http://www.w3.org/2000/svg"
+      {...props}
+    >
+      <circle cx="5.5" cy="3.5" r="1.25" />
+      <circle cx="10.5" cy="3.5" r="1.25" />
+      <circle cx="5.5" cy="8" r="1.25" />
+      <circle cx="10.5" cy="8" r="1.25" />
+      <circle cx="5.5" cy="12.5" r="1.25" />
+      <circle cx="10.5" cy="12.5" r="1.25" />
+    </svg>
+  );
+}

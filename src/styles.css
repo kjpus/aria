@@ -2162,6 +2162,87 @@ button:disabled {
   white-space: nowrap;
 }
 
+.track-table__drag-handle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  cursor: grab;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  color: var(--muted);
+}
+
+.track-table__drag-handle:active {
+  cursor: grabbing;
+}
+
+.track-table__grip-icon {
+  opacity: 0.35;
+  transition: opacity 120ms ease, color 120ms ease;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.track-table__row--playable:hover .track-table__grip-icon,
+.track-table__drag-handle:hover .track-table__grip-icon {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.track-table__order-num {
+  font-variant-numeric: tabular-nums;
+}
+
+.track-table__row--dragging td {
+  opacity: 0.35;
+  background: rgba(255, 255, 255, 0.02) !important;
+}
+
+.track-table__row--drop-before td {
+  box-shadow: inset 0 2.5px 0 0 var(--accent) !important;
+}
+
+.track-table__row--drop-after td {
+  box-shadow: inset 0 -2.5px 0 0 var(--accent) !important;
+}
+
+.playlist-card--dragging {
+  opacity: 0.35;
+}
+
+.playlist-card--drop-before {
+  position: relative;
+}
+
+.playlist-card--drop-before::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -0.45rem;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--accent);
+  z-index: 5;
+}
+
+.playlist-card--drop-after {
+  position: relative;
+}
+
+.playlist-card--drop-after::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -0.45rem;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--accent);
+  z-index: 5;
+}
+
 .track-table__cell--duration {
   text-align: right;
 }

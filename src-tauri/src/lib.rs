@@ -67,6 +67,8 @@ pub fn run() {
             commands::playlists::get_playlist_import_preview,
             commands::playlists::commit_playlist_import,
             commands::playlists::remove_tracks_from_playlist,
+            commands::playlists::reorder_playlist_tracks,
+            commands::playlists::reorder_playlists,
             commands::settings::update_theme,
             commands::settings::update_track_table_settings,
             commands::settings::update_album_track_table_settings,
