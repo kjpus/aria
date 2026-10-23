@@ -40,6 +40,8 @@ use windows::{
 use super::PlaybackError;
 
 const COMMAND_POLL_MS: u32 = 20;
+const TARGET_BUFFER_DURATION_HNS: i64 = 500_000; // 50 milliseconds target for glitch-free playback
+const LOOKAHEAD_QUEUE_CAPACITY: usize = 64; // ~1.5 to 2 seconds of decoded audio packets
 
 pub struct ExclusivePlayer {
     state: Arc<ExclusiveState>,
@@ -62,7 +64,7 @@ enum ExclusiveCommand {
 }
 
 struct ExclusiveInit {
-    decoder: ExclusiveDecoder,
+    consumer: ExclusiveAudioConsumer,
     audio_client: Audio::IAudioClient,
     render_client: Audio::IAudioRenderClient,
     render_event: Foundation::HANDLE,
@@ -79,8 +81,19 @@ struct ExclusiveDecoder {
     decoder: Box<dyn SymphoniaDecoder>,
     track_id: u32,
     stream_spec: DecodedStreamSpec,
-    pending_bytes: Vec<u8>,
-    pending_cursor: usize,
+}
+
+enum DecodedChunk {
+    Data(Vec<u8>),
+    EndOfStream,
+}
+
+struct ExclusiveAudioConsumer {
+    rx: Option<Receiver<Result<DecodedChunk, PlaybackError>>>,
+    decode_thread: Option<JoinHandle<()>>,
+    stop_flag: Arc<AtomicBool>,
+    current_chunk: Option<Vec<u8>>,
+    current_cursor: usize,
     exhausted: bool,
 }
 
@@ -266,106 +279,221 @@ impl ExclusiveDecoder {
             decoder,
             track_id: track.id,
             stream_spec,
-            pending_bytes: Vec::new(),
-            pending_cursor: 0,
-            exhausted: false,
         })
     }
 
     fn stream_spec(&self) -> DecodedStreamSpec {
         self.stream_spec
     }
+}
 
-    fn is_exhausted(&self) -> bool {
-        self.exhausted && self.pending_cursor >= self.pending_bytes.len()
+impl ExclusiveAudioConsumer {
+    fn new(
+        decode_thread: JoinHandle<()>,
+        rx: Receiver<Result<DecodedChunk, PlaybackError>>,
+        stop_flag: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            rx: Some(rx),
+            decode_thread: Some(decode_thread),
+            stop_flag,
+            current_chunk: None,
+            current_cursor: 0,
+            exhausted: false,
+        }
     }
 
-    fn copy_next_bytes_into(
-        &mut self,
-        destination: &mut [u8],
-        output_format: WasapiPcmFormat,
-        volume: f32,
-    ) -> Result<usize, PlaybackError> {
+    fn prefill_lookahead(&mut self, timeout: Duration) {
+        let deadline = std::time::Instant::now() + timeout;
+        let Some(rx) = &self.rx else {
+            return;
+        };
+
+        if self.current_chunk.is_none() && !self.exhausted {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if let Ok(result) = rx.recv_timeout(remaining) {
+                match result {
+                    Ok(DecodedChunk::Data(data)) => {
+                        self.current_chunk = Some(data);
+                        self.current_cursor = 0;
+                    }
+                    Ok(DecodedChunk::EndOfStream) => {
+                        self.exhausted = true;
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.exhausted
+            && self
+                .current_chunk
+                .as_ref()
+                .map_or(true, |c| self.current_cursor >= c.len())
+    }
+
+    fn copy_next_bytes_into(&mut self, destination: &mut [u8]) -> Result<usize, PlaybackError> {
         let mut copied = 0usize;
 
         while copied < destination.len() {
-            if self.pending_cursor >= self.pending_bytes.len() {
-                if self.exhausted {
-                    break;
-                }
+            if let Some(chunk) = &self.current_chunk {
+                if self.current_cursor < chunk.len() {
+                    let remaining = chunk.len() - self.current_cursor;
+                    let to_copy = remaining.min(destination.len() - copied);
+                    destination[copied..copied + to_copy]
+                        .copy_from_slice(&chunk[self.current_cursor..self.current_cursor + to_copy]);
+                    self.current_cursor += to_copy;
+                    copied += to_copy;
 
-                self.refill_pending_bytes(output_format, volume)?;
-                if self.pending_cursor >= self.pending_bytes.len() {
-                    break;
+                    if self.current_cursor >= chunk.len() {
+                        self.current_chunk = None;
+                        self.current_cursor = 0;
+                    }
+                    continue;
+                } else {
+                    self.current_chunk = None;
+                    self.current_cursor = 0;
                 }
             }
 
-            let remaining = self.pending_bytes.len() - self.pending_cursor;
-            let copy_len = remaining.min(destination.len() - copied);
-            destination[copied..copied + copy_len].copy_from_slice(
-                &self.pending_bytes[self.pending_cursor..self.pending_cursor + copy_len],
-            );
-            self.pending_cursor += copy_len;
-            copied += copy_len;
+            if self.exhausted {
+                break;
+            }
+
+            let Some(rx) = &self.rx else {
+                self.exhausted = true;
+                break;
+            };
+
+            // Using a 50ms timeout ensures the audio render thread never deadlocks if the decoder thread errors
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(Ok(DecodedChunk::Data(data))) => {
+                    self.current_chunk = Some(data);
+                    self.current_cursor = 0;
+                }
+                Ok(Ok(DecodedChunk::EndOfStream)) => {
+                    self.exhausted = true;
+                    break;
+                }
+                Ok(Err(err)) => return Err(err),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // Momentary decode starvation: break so the caller can pad remainder with silence
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.exhausted = true;
+                    break;
+                }
+            }
         }
 
         Ok(copied)
     }
+}
 
-    fn refill_pending_bytes(
-        &mut self,
-        output_format: WasapiPcmFormat,
-        volume: f32,
-    ) -> Result<(), PlaybackError> {
-        self.pending_bytes.clear();
-        self.pending_cursor = 0;
-
-        loop {
-            let packet = match self.format.next_packet() {
-                Ok(packet) => packet,
-                Err(SymphoniaError::IoError(error)) if error.kind() == ErrorKind::UnexpectedEof => {
-                    self.exhausted = true;
-                    return Ok(());
-                }
-                Err(SymphoniaError::ResetRequired) => {
-                    return Err(PlaybackError::Output(
-                        "Symphonia requested a decoder reset during exclusive playback".into(),
-                    ));
-                }
-                Err(error) => return Err(PlaybackError::Output(error.to_string())),
-            };
-
-            if packet.track_id() != self.track_id {
-                continue;
-            }
-
-            match self.decoder.decode(&packet) {
-                Ok(audio_buffer) => {
-                    write_audio_buffer_bytes(
-                        &mut self.pending_bytes,
-                        audio_buffer,
-                        output_format,
-                        volume,
-                    )?;
-                    if self.pending_bytes.is_empty() {
-                        continue;
-                    }
-                    return Ok(());
-                }
-                Err(SymphoniaError::DecodeError(_)) => continue,
-                Err(SymphoniaError::IoError(error)) if error.kind() == ErrorKind::UnexpectedEof => {
-                    self.exhausted = true;
-                    return Ok(());
-                }
-                Err(SymphoniaError::ResetRequired) => {
-                    return Err(PlaybackError::Output(
-                        "Symphonia requested a decoder reset during exclusive playback".into(),
-                    ));
-                }
-                Err(error) => return Err(PlaybackError::Output(error.to_string())),
-            }
+impl Drop for ExclusiveAudioConsumer {
+    fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+        drop(self.rx.take());
+        if let Some(thread) = self.decode_thread.take() {
+            let _ = thread.join();
         }
     }
+}
+
+fn spawn_decode_worker(
+    mut decoder: ExclusiveDecoder,
+    output_format: WasapiPcmFormat,
+    stop_flag: Arc<AtomicBool>,
+) -> (
+    JoinHandle<()>,
+    Receiver<Result<DecodedChunk, PlaybackError>>,
+) {
+    let (tx, rx) =
+        mpsc::sync_channel::<Result<DecodedChunk, PlaybackError>>(LOOKAHEAD_QUEUE_CAPACITY);
+
+    let handle = thread::Builder::new()
+        .name("aria-wasapi-decode".into())
+        .spawn(move || {
+            let mut pending_buffer = Vec::new();
+
+            loop {
+                if stop_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let packet = match decoder.format.next_packet() {
+                    Ok(packet) => packet,
+                    Err(SymphoniaError::IoError(error))
+                        if error.kind() == ErrorKind::UnexpectedEof =>
+                    {
+                        let _ = tx.send(Ok(DecodedChunk::EndOfStream));
+                        break;
+                    }
+                    Err(SymphoniaError::ResetRequired) => {
+                        let _ = tx.send(Err(PlaybackError::Output(
+                            "Symphonia requested a decoder reset during exclusive playback".into(),
+                        )));
+                        break;
+                    }
+                    Err(error) => {
+                        let _ = tx.send(Err(PlaybackError::Output(error.to_string())));
+                        break;
+                    }
+                };
+
+                if packet.track_id() != decoder.track_id {
+                    continue;
+                }
+
+                match decoder.decoder.decode(&packet) {
+                    Ok(audio_buffer) => {
+                        if let Err(error) = write_audio_buffer_bytes(
+                            &mut pending_buffer,
+                            audio_buffer,
+                            output_format,
+                        ) {
+                            let _ = tx.send(Err(error));
+                            break;
+                        }
+
+                        if pending_buffer.is_empty() {
+                            continue;
+                        }
+
+                        let chunk = std::mem::take(&mut pending_buffer);
+                        if tx.send(Ok(DecodedChunk::Data(chunk))).is_err() {
+                            break;
+                        }
+                    }
+                    Err(SymphoniaError::DecodeError(warning)) => {
+                        eprintln!("exclusive decoder warning: {warning}");
+                        continue;
+                    }
+                    Err(SymphoniaError::IoError(error))
+                        if error.kind() == ErrorKind::UnexpectedEof =>
+                    {
+                        let _ = tx.send(Ok(DecodedChunk::EndOfStream));
+                        break;
+                    }
+                    Err(SymphoniaError::ResetRequired) => {
+                        let _ = tx.send(Err(PlaybackError::Output(
+                            "Symphonia requested a decoder reset during exclusive playback".into(),
+                        )));
+                        break;
+                    }
+                    Err(error) => {
+                        let _ = tx.send(Err(PlaybackError::Output(error.to_string())));
+                        break;
+                    }
+                }
+            }
+        })
+        .expect("failed to spawn exclusive decoder thread");
+
+    (handle, rx)
 }
 
 impl WasapiPcmFormat {
@@ -448,7 +576,7 @@ fn run_exclusive_thread(
             &init.render_client,
             init.buffer_frames,
             init.output_format,
-            &mut init.decoder,
+            &mut init.consumer,
             &state,
             &mut frames_rendered,
         ) {
@@ -529,7 +657,7 @@ fn run_exclusive_thread(
                     &init.render_client,
                     init.buffer_frames,
                     init.output_format,
-                    &mut init.decoder,
+                    &mut init.consumer,
                     &state,
                     &mut frames_rendered,
                 ) {
@@ -560,7 +688,7 @@ fn initialize_exclusive_output(
     path: &str,
     start_position: Duration,
 ) -> Result<ExclusiveInit, PlaybackError> {
-    let mut decoder = ExclusiveDecoder::open(path, start_position)?;
+    let decoder = ExclusiveDecoder::open(path, start_position)?;
     let stream_spec = decoder.stream_spec();
 
     let enumerator = unsafe {
@@ -598,11 +726,18 @@ fn initialize_exclusive_output(
             .GetDevicePeriod(Some(&mut default_period), Some(&mut minimum_period))
             .map_err(|error| PlaybackError::Output(error.to_string()))?;
     }
-    let requested_period = if minimum_period > 0 {
-        minimum_period
-    } else {
-        default_period
-    };
+
+    // Target a robust 50ms buffer to absorb DPC latency spikes and OS scheduling jitter.
+    // Fall back to default_period, and only as an absolute last resort to minimum_period.
+    let target_period = default_period.max(TARGET_BUFFER_DURATION_HNS);
+    let mut candidate_periods = Vec::new();
+    candidate_periods.push(target_period);
+    if default_period > 0 && !candidate_periods.contains(&default_period) {
+        candidate_periods.push(default_period);
+    }
+    if minimum_period > 0 && !candidate_periods.contains(&minimum_period) {
+        candidate_periods.push(minimum_period);
+    }
 
     let render_event = unsafe {
         Threading::CreateEventA(None, false, false, windows::core::PCSTR(ptr::null()))
@@ -612,7 +747,7 @@ fn initialize_exclusive_output(
     initialize_audio_client_exclusive(
         &device,
         &mut audio_client,
-        requested_period,
+        &candidate_periods,
         output_format,
         &wave_format,
     )?;
@@ -635,12 +770,15 @@ fn initialize_exclusive_output(
             .map_err(|error| PlaybackError::Output(error.to_string()))?
     };
 
-    decoder
-        .pending_bytes
-        .reserve(buffer_frames as usize * output_format.block_align() as usize);
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let (decode_thread, chunk_rx) =
+        spawn_decode_worker(decoder, output_format, stop_flag.clone());
+
+    let mut consumer = ExclusiveAudioConsumer::new(decode_thread, chunk_rx, stop_flag);
+    consumer.prefill_lookahead(Duration::from_millis(500));
 
     Ok(ExclusiveInit {
-        decoder,
+        consumer,
         audio_client,
         render_client,
         render_event,
@@ -660,45 +798,82 @@ fn activate_audio_client(device: &Audio::IMMDevice) -> Result<Audio::IAudioClien
 fn initialize_audio_client_exclusive(
     device: &Audio::IMMDevice,
     audio_client: &mut Audio::IAudioClient,
-    requested_period: i64,
+    candidate_periods: &[i64],
     output_format: WasapiPcmFormat,
     wave_format: &Audio::WAVEFORMATEXTENSIBLE,
 ) -> Result<(), PlaybackError> {
-    let initialize = |client: &Audio::IAudioClient, period: i64| unsafe {
-        client.Initialize(
-            Audio::AUDCLNT_SHAREMODE_EXCLUSIVE,
-            Audio::AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-            period,
-            period,
-            &wave_format.Format,
-            None,
-        )
-    };
+    let mut last_error = None;
 
-    match initialize(audio_client, requested_period) {
-        Ok(()) => Ok(()),
-        Err(error) if error.code() == Audio::AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED => {
-            let aligned_frames = unsafe {
-                audio_client
-                    .GetBufferSize()
-                    .map_err(|buffer_error| PlaybackError::Output(buffer_error.to_string()))?
-            };
-            let aligned_period =
-                frames_to_reference_time(aligned_frames, output_format.sample_rate);
-
-            *audio_client = activate_audio_client(device)?;
-            initialize(audio_client, aligned_period)
-                .map_err(|retry_error| PlaybackError::Output(retry_error.to_string()))
+    for &period in candidate_periods {
+        if period <= 0 {
+            continue;
         }
-        Err(error) => Err(PlaybackError::Output(error.to_string())),
+
+        let initialize = |client: &Audio::IAudioClient, p: i64| unsafe {
+            client.Initialize(
+                Audio::AUDCLNT_SHAREMODE_EXCLUSIVE,
+                Audio::AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                p,
+                p,
+                &wave_format.Format,
+                None,
+            )
+        };
+
+        match initialize(audio_client, period) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.code() == Audio::AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED => {
+                let aligned_frames = match unsafe { audio_client.GetBufferSize() } {
+                    Ok(frames) => frames,
+                    Err(buffer_err) => {
+                        last_error = Some(PlaybackError::Output(buffer_err.to_string()));
+                        match activate_audio_client(device) {
+                            Ok(new_client) => *audio_client = new_client,
+                            Err(activate_err) => return Err(activate_err),
+                        }
+                        continue;
+                    }
+                };
+
+                let aligned_period =
+                    frames_to_reference_time(aligned_frames, output_format.sample_rate);
+
+                match activate_audio_client(device) {
+                    Ok(new_client) => *audio_client = new_client,
+                    Err(activate_err) => return Err(activate_err),
+                }
+
+                match initialize(audio_client, aligned_period) {
+                    Ok(()) => return Ok(()),
+                    Err(retry_err) => {
+                        last_error = Some(PlaybackError::Output(retry_err.to_string()));
+                        match activate_audio_client(device) {
+                            Ok(new_client) => *audio_client = new_client,
+                            Err(activate_err) => return Err(activate_err),
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                last_error = Some(PlaybackError::Output(error.to_string()));
+                match activate_audio_client(device) {
+                    Ok(new_client) => *audio_client = new_client,
+                    Err(activate_err) => return Err(activate_err),
+                }
+            }
+        }
     }
+
+    Err(last_error.unwrap_or_else(|| {
+        PlaybackError::Output("No valid device period supported by WASAPI exclusive".into())
+    }))
 }
 
 fn fill_render_buffer(
     render_client: &Audio::IAudioRenderClient,
     frames_available: u32,
     output_format: WasapiPcmFormat,
-    decoder: &mut ExclusiveDecoder,
+    consumer: &mut ExclusiveAudioConsumer,
     state: &ExclusiveState,
     frames_rendered: &mut u64,
 ) -> Result<bool, PlaybackError> {
@@ -710,10 +885,14 @@ fn fill_render_buffer(
     };
     let bytes = unsafe { std::slice::from_raw_parts_mut(buffer as *mut u8, byte_count) };
 
-    let bytes_written =
-        decoder.copy_next_bytes_into(bytes, output_format, current_volume(state))?;
+    let bytes_written = consumer.copy_next_bytes_into(bytes)?;
     if bytes_written < byte_count {
         bytes[bytes_written..].fill(0);
+    }
+
+    let volume = current_volume(state);
+    if bytes_written > 0 && volume < 0.999_9 {
+        apply_volume_to_bytes(&mut bytes[..bytes_written], output_format, volume);
     }
 
     unsafe {
@@ -729,7 +908,7 @@ fn fill_render_buffer(
         Ordering::Relaxed,
     );
 
-    Ok(bytes_written < byte_count && decoder.is_exhausted())
+    Ok(bytes_written < byte_count && consumer.is_exhausted())
 }
 
 fn decoded_stream_spec(codec_params: &CodecParameters) -> Option<DecodedStreamSpec> {
@@ -850,7 +1029,6 @@ fn write_audio_buffer_bytes(
     destination: &mut Vec<u8>,
     audio_buffer: AudioBufferRef<'_>,
     output_format: WasapiPcmFormat,
-    volume: f32,
 ) -> Result<(), PlaybackError> {
     destination.clear();
 
@@ -859,21 +1037,18 @@ fn write_audio_buffer_bytes(
             let mut buffer =
                 SampleBuffer::<i16>::new(audio_buffer.frames() as u64, *audio_buffer.spec());
             buffer.copy_interleaved_ref(audio_buffer);
-            apply_i16_volume(buffer.samples_mut(), volume);
             destination.extend_from_slice(as_bytes(buffer.samples()));
         }
         WasapiSampleKind::I32 => {
             let mut buffer =
                 SampleBuffer::<i32>::new(audio_buffer.frames() as u64, *audio_buffer.spec());
             buffer.copy_interleaved_ref(audio_buffer);
-            apply_i32_volume(buffer.samples_mut(), volume);
             destination.extend_from_slice(as_bytes(buffer.samples()));
         }
         WasapiSampleKind::F32 => {
             let mut buffer =
                 SampleBuffer::<f32>::new(audio_buffer.frames() as u64, *audio_buffer.spec());
             buffer.copy_interleaved_ref(audio_buffer);
-            apply_f32_volume(buffer.samples_mut(), volume);
             destination.extend_from_slice(as_bytes(buffer.samples()));
         }
     }
@@ -886,6 +1061,41 @@ fn write_audio_buffer_bytes(
     }
 
     Ok(())
+}
+
+fn apply_volume_to_bytes(bytes: &mut [u8], format: WasapiPcmFormat, volume: f32) {
+    if volume >= 0.999_9 {
+        return;
+    }
+
+    if volume <= 0.000_1 {
+        bytes.fill(0);
+        return;
+    }
+
+    match format.kind {
+        WasapiSampleKind::I16 => {
+            let sample_count = bytes.len() / 2;
+            let samples = unsafe {
+                std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut i16, sample_count)
+            };
+            apply_i16_volume(samples, volume);
+        }
+        WasapiSampleKind::I32 => {
+            let sample_count = bytes.len() / 4;
+            let samples = unsafe {
+                std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut i32, sample_count)
+            };
+            apply_i32_volume(samples, volume);
+        }
+        WasapiSampleKind::F32 => {
+            let sample_count = bytes.len() / 4;
+            let samples = unsafe {
+                std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut f32, sample_count)
+            };
+            apply_f32_volume(samples, volume);
+        }
+    }
 }
 
 fn current_padding(audio_client: &Audio::IAudioClient) -> Result<u32, PlaybackError> {
@@ -907,7 +1117,7 @@ fn cleanup_exclusive_output(
     drop(init.render_client);
     drop(init.audio_client);
     let _ = unsafe { Foundation::CloseHandle(render_event) };
-    drop(init.decoder);
+    drop(init.consumer);
     drop(mmcss);
 
     if com_initialized {
