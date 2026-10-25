@@ -40,6 +40,8 @@ pub struct OutputDeviceSnapshot {
     pub exclusive_capable: bool,
     #[serde(default)]
     pub is_default: bool,
+    #[serde(default)]
+    pub is_usb: bool,
 }
 
 impl Default for OutputDeviceSnapshot {
@@ -50,6 +52,7 @@ impl Default for OutputDeviceSnapshot {
             backend: "placeholder".into(),
             exclusive_capable: false,
             is_default: true,
+            is_usb: false,
         }
     }
 }

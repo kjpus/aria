@@ -141,6 +141,7 @@ export type OutputDeviceSnapshot = {
   backend: string;
   exclusiveCapable: boolean;
   isDefault: boolean;
+  isUsb?: boolean;
 };
 
 export type PlaybackStatus = 'stopped' | 'paused' | 'playing' | 'buffering';

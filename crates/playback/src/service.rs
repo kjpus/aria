@@ -263,9 +263,22 @@ impl PlaybackService {
                 .as_ref()
                 .is_some_and(|device_id| !device_exists(devices, device_id));
 
-            if selected_device_missing || (backend.active.is_some() && !active_device_available) {
+            #[cfg(target_os = "android")]
+            let usb_newly_available = backend.preferences.output_device_id.is_none()
+                && devices.iter().any(|device| device.is_usb)
+                && !backend.output_device.is_usb;
+
+            #[cfg(not(target_os = "android"))]
+            let usb_newly_available = false;
+
+            if selected_device_missing
+                || (backend.active.is_some() && !active_device_available)
+                || usb_newly_available
+            {
                 let mut fallback_preferences = backend.preferences.clone();
-                fallback_preferences.output_device_id = None;
+                if selected_device_missing {
+                    fallback_preferences.output_device_id = None;
+                }
                 if fallback_preferences != previous_preferences {
                     updated_preferences = Some(fallback_preferences.clone());
                 }
@@ -951,6 +964,21 @@ fn resolve_output_target(
         }
     }
 
+    // Approach 3: If no specific device is selected (or requested device is missing in non-strict mode),
+    // and an external USB DAC is present, automatically route to the USB device.
+    #[cfg(target_os = "android")]
+    if let Some(usb_device) = find_usb_output_device(&host) {
+        let snapshot = output_device_snapshot(
+            &usb_device,
+            default_device_id.as_deref(),
+            preferences.exclusive_mode,
+        )?;
+        return Ok(OutputTarget {
+            device: usb_device,
+            snapshot,
+        });
+    }
+
     let device = host
         .default_output_device()
         .ok_or(PlaybackError::NoOutputDevice)?;
@@ -968,6 +996,46 @@ fn output_device_by_id(host: &cpal::Host, id: &str) -> Option<cpal::Device> {
         .and_then(|device_id| host.device_by_id(&device_id))
 }
 
+fn is_usb_device_description(desc: &DeviceDescription) -> bool {
+    if desc.interface_type() == cpal::InterfaceType::Usb {
+        return true;
+    }
+
+    let name = desc.name().to_lowercase();
+    if name.contains("usb") || name.contains("dac") {
+        return true;
+    }
+
+    for candidate in desc.extended() {
+        let lower = candidate.to_lowercase();
+        if lower.contains("usb") || lower.contains("dac") {
+            return true;
+        }
+    }
+
+    if let Some(driver) = desc.driver() {
+        let lower = driver.to_lowercase();
+        if lower.contains("usb") || lower.contains("dac") {
+            return true;
+        }
+    }
+
+    false
+}
+
+#[allow(dead_code)]
+fn find_usb_output_device(host: &cpal::Host) -> Option<cpal::Device> {
+    let devices = host.output_devices().ok()?;
+    for device in devices {
+        if let Ok(desc) = device.description() {
+            if is_usb_device_description(&desc) {
+                return Some(device);
+            }
+        }
+    }
+    None
+}
+
 fn output_device_snapshot(
     device: &cpal::Device,
     default_device_id: Option<&str>,
@@ -981,12 +1049,16 @@ fn output_device_snapshot(
         .map_err(|error| PlaybackError::Output(error.to_string()))?
         .to_string();
 
+    let is_usb = is_usb_device_description(&description);
+    let exclusive_capable = is_exclusive_capable_device(&id, is_usb);
+
     Ok(OutputDeviceSnapshot {
-        is_default: default_device_id.is_some_and(|default_id| default_id == id),
+        is_default: default_device_id.as_deref() == Some(&id),
         id: id.clone(),
         name: preferred_output_device_name(&description),
-        backend: output_backend_label(exclusive_mode),
-        exclusive_capable: is_exclusive_capable_device_id(&id),
+        backend: output_backend_label(exclusive_mode, is_usb),
+        exclusive_capable,
+        is_usb,
     })
 }
 
@@ -1021,7 +1093,41 @@ fn exclusive_capable_for_preferences(preferences: &PlaybackPreferences) -> bool 
 
     match preferences.output_device_id.as_deref() {
         Some(device_id) => is_exclusive_capable_device_id(device_id),
-        None => cfg!(target_os = "windows"),
+        None => {
+            #[cfg(target_os = "windows")]
+            {
+                true
+            }
+            #[cfg(target_os = "android")]
+            {
+                let host = cpal::default_host();
+                find_usb_output_device(&host).is_some()
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "android")))]
+            {
+                false
+            }
+        }
+    }
+}
+
+fn is_exclusive_capable_device(device_id: &str, is_usb: bool) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = is_usb;
+        is_wasapi_device_id(device_id)
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        let _ = device_id;
+        is_usb
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "android")))]
+    {
+        let _ = (device_id, is_usb);
+        false
     }
 }
 
@@ -1031,19 +1137,38 @@ fn is_exclusive_capable_device_id(device_id: &str) -> bool {
         is_wasapi_device_id(device_id)
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "android")]
+    {
+        let host = cpal::default_host();
+        if let Some(device) = output_device_by_id(&host, device_id) {
+            if let Ok(desc) = device.description() {
+                return is_usb_device_description(&desc);
+            }
+        }
+        false
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "android")))]
     {
         let _ = device_id;
         false
     }
 }
 
-fn output_backend_label(exclusive_mode: bool) -> String {
+fn output_backend_label(exclusive_mode: bool, is_usb: bool) -> String {
     if cfg!(target_os = "windows") {
         if exclusive_mode {
             "WASAPI exclusive".into()
         } else {
             "rodio / WASAPI shared".into()
+        }
+    } else if cfg!(target_os = "android") {
+        if exclusive_mode {
+            "Android bit-perfect direct".into()
+        } else if is_usb {
+            "rodio / AAudio shared (USB)".into()
+        } else {
+            "rodio / AAudio shared".into()
         }
     } else {
         "rodio".into()
@@ -1051,11 +1176,12 @@ fn output_backend_label(exclusive_mode: bool) -> String {
 }
 
 fn backend_backend_label(backend: &PlaybackBackend) -> String {
+    let is_usb = backend.output_device.is_usb;
     match backend.active {
         #[cfg(target_os = "windows")]
-        Some(ActivePlayback::Exclusive { .. }) => output_backend_label(true),
-        Some(ActivePlayback::Shared { .. }) => output_backend_label(false),
-        None => output_backend_label(backend.preferences.exclusive_mode),
+        Some(ActivePlayback::Exclusive { .. }) => output_backend_label(true, is_usb),
+        Some(ActivePlayback::Shared { .. }) => output_backend_label(false, is_usb),
+        None => output_backend_label(backend.preferences.exclusive_mode, is_usb),
     }
 }
 
@@ -1178,5 +1304,38 @@ mod tests {
         assert!(res.is_err());
         let backend = service.backend.lock().unwrap();
         assert_eq!(backend.current_queue_index, Some(1));
+    }
+
+    #[test]
+    fn test_is_usb_device_description_matches_usb_interface_and_name() {
+        let desc = rodio::cpal::DeviceDescriptionBuilder::new("AudioQuest DragonFly")
+            .interface_type(cpal::InterfaceType::Usb)
+            .build();
+        assert!(is_usb_device_description(&desc));
+
+        let desc_by_name = rodio::cpal::DeviceDescriptionBuilder::new("FiiO KA3 USB DAC")
+            .interface_type(cpal::InterfaceType::Unknown)
+            .build();
+        assert!(is_usb_device_description(&desc_by_name));
+
+        let desc_speaker = rodio::cpal::DeviceDescriptionBuilder::new("Speaker")
+            .interface_type(cpal::InterfaceType::BuiltIn)
+            .build();
+        assert!(!is_usb_device_description(&desc_speaker));
+    }
+
+    #[test]
+    fn test_output_device_snapshot_includes_is_usb() {
+        let snapshot = OutputDeviceSnapshot {
+            id: "usb-1".into(),
+            name: "DragonFly Red".into(),
+            backend: "rodio / AAudio shared (USB)".into(),
+            exclusive_capable: true,
+            is_default: false,
+            is_usb: true,
+        };
+        assert!(snapshot.is_usb);
+        assert_eq!(snapshot.id, "usb-1");
+        assert_eq!(snapshot.backend, "rodio / AAudio shared (USB)");
     }
 }

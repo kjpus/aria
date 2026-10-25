@@ -1037,6 +1037,13 @@ export async function listOutputDevices(): Promise<OutputDeviceSnapshot[]> {
   return invoke<OutputDeviceSnapshot[]>('list_output_devices');
 }
 
+export async function refreshOutputDevices(): Promise<OutputDeviceSnapshot[]> {
+  if (!isTauriRuntime) {
+    return previewOutputDevices;
+  }
+  return invoke<OutputDeviceSnapshot[]>('refresh_output_devices');
+}
+
 export async function updatePlaybackPreferences(
   playback: PlaybackPreferences,
 ): Promise<SettingsSnapshot> {
@@ -1263,6 +1270,7 @@ declare global {
     AriaAndroid?: {
       openUrl: (url: string) => boolean;
       copyText: (text: string) => boolean;
+      hasUsbAudioDevice?: () => boolean;
     };
   }
 }

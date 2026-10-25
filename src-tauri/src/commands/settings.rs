@@ -52,6 +52,13 @@ pub fn list_output_devices(
 }
 
 #[tauri::command]
+pub async fn refresh_output_devices(
+    state: State<'_, AppState>,
+) -> Result<Vec<OutputDeviceSnapshot>, CommandError> {
+    Ok(state.core.refresh_output_devices().await?)
+}
+
+#[tauri::command]
 pub async fn update_playback_preferences(
     state: State<'_, AppState>,
     playback: PlaybackPreferences,

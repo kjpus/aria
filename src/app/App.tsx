@@ -37,6 +37,7 @@ import {
   exportFieldToTag,
   exportPlaylistM3u,
   listOutputDevices,
+  refreshOutputDevices,
   listenToAppEvents,
   nextTrack,
   openDirectory,
@@ -244,6 +245,18 @@ export function App() {
         }
       });
 
+    const handleAudioDevicesChanged = () => {
+      void refreshOutputDevices()
+        .then((devices) => {
+          if (active) {
+            setOutputDevices(devices);
+          }
+        })
+        .catch(console.error);
+    };
+
+    window.addEventListener('aria-audio-devices-changed', handleAudioDevicesChanged);
+
     const unlistenPromise = listenToAppEvents((event) => {
       if (
         event.topic === 'playback' &&
@@ -307,6 +320,7 @@ export function App() {
 
     return () => {
       active = false;
+      window.removeEventListener('aria-audio-devices-changed', handleAudioDevicesChanged);
       void unlistenPromise.then((unlisten) => unlisten());
     };
   }, []);

@@ -787,6 +787,26 @@ impl AppCore {
         Ok(self.playback.list_output_devices()?)
     }
 
+    pub async fn refresh_output_devices(&self) -> Result<Vec<OutputDeviceSnapshot>, AppCoreError> {
+        let devices = self.playback.list_output_devices()?;
+        self.emit(AppEvent::Playback(PlaybackEvent::OutputDevicesChanged(
+            devices.clone(),
+        )));
+
+        if let Some(refresh) = self.playback.handle_output_device_change(&devices).await? {
+            self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
+                refresh.playback_snapshot,
+            )));
+
+            if let Some(updated_preferences) = refresh.updated_preferences {
+                let settings_snapshot = self.settings.update_playback(updated_preferences).await;
+                self.emit(AppEvent::Settings(settings_snapshot));
+            }
+        }
+
+        Ok(devices)
+    }
+
     pub async fn update_theme(&self, theme: ThemePreference) -> SettingsSnapshot {
         let snapshot = self.settings.update_theme(theme).await;
         self.emit(AppEvent::Settings(snapshot.clone()));

@@ -50,6 +50,7 @@ export function PlaybackSettingsPanel({
           {outputDevices.map((device) => (
             <option key={device.id} value={device.id}>
               {device.name}
+              {device.isUsb ? ' (USB DAC)' : ''}
               {device.isDefault ? ' (default)' : ''}
             </option>
           ))}
@@ -82,8 +83,8 @@ export function PlaybackSettingsPanel({
 
       <p className="dialog-section__note">
         {exclusiveSupported
-          ? 'Aria will use a WASAPI-exclusive output stream on Windows for the selected device and prefer track-native PCM layouts first. If exclusive playback cannot be opened, Aria will not fall back to shared mode while this setting is enabled. The player-strip volume control is software attenuation, so leave it at 100% if you want an unchanged digital stream.'
-          : 'Exclusive WASAPI is only available for Windows output endpoints that Aria can address directly. Aria also refreshes output-device availability automatically when Windows audio devices change.'}
+          ? 'Aria will use a dedicated bit-accurate path for the selected device (WASAPI exclusive on Windows, or direct bit-perfect routing on Android) and prefer track-native PCM layouts first. If exclusive playback cannot be opened, Aria will not fall back to shared mode while this setting is enabled. The player-strip volume control is software attenuation, so leave it at 100% if you want an unchanged digital stream.'
+          : 'Exclusive mode / bit-accurate path is available for supported endpoints that Aria can address directly (such as external USB DACs on Android or WASAPI devices on Windows).'}
       </p>
     </SectionCard>
   );
