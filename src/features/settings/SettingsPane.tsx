@@ -53,6 +53,7 @@ type SettingsPaneProps = {
   onSaveCatalogRules: () => void;
   onThemeChange: (theme: ThemePreference) => void;
   onPlaybackPreferencesChange: (playback: PlaybackPreferences) => void;
+  onAutoSyncOnStartupChange?: (enabled: boolean) => void;
 };
 
 export function SettingsPane({
@@ -82,6 +83,7 @@ export function SettingsPane({
   onSaveCatalogRules,
   onThemeChange,
   onPlaybackPreferencesChange,
+  onAutoSyncOnStartupChange,
 }: SettingsPaneProps) {
   const [isMappingsDialogOpen, setIsMappingsDialogOpen] = useState(false);
   const [isCatalogRulesDialogOpen, setIsCatalogRulesDialogOpen] = useState(false);
@@ -186,6 +188,8 @@ export function SettingsPane({
       <RemoteSettingsPanel
         targets={remoteTargets}
         onTargetsChange={onRemoteTargetsChange}
+        autoSyncOnStartup={settings.autoSyncOnStartup ?? false}
+        onAutoSyncOnStartupChange={onAutoSyncOnStartupChange}
       />
 
       {isMappingsDialogOpen ? (

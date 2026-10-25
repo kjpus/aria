@@ -58,4 +58,10 @@ impl SettingsStore {
         state.playback = playback;
         state.clone()
     }
+
+    pub async fn update_auto_sync_on_startup(&self, enabled: bool) -> SettingsSnapshot {
+        let mut state = self.state.write().await;
+        state.auto_sync_on_startup = enabled;
+        state.clone()
+    }
 }

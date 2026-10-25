@@ -77,6 +77,7 @@ pub fn run() {
             commands::settings::list_output_devices,
             commands::settings::refresh_output_devices,
             commands::settings::update_playback_preferences,
+            commands::settings::update_auto_sync_on_startup,
             commands::remote::get_remote_targets,
             commands::remote::save_remote_target,
             commands::remote::delete_remote_target,

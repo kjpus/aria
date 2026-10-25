@@ -167,6 +167,8 @@ pub struct SettingsSnapshot {
     pub playlist_track_table: TrackTableSettings,
     #[serde(default)]
     pub playback: PlaybackPreferences,
+    #[serde(default)]
+    pub auto_sync_on_startup: bool,
 }
 
 impl Default for SettingsSnapshot {
@@ -178,6 +180,7 @@ impl Default for SettingsSnapshot {
             album_track_table: default_album_track_table_settings(),
             playlist_track_table: default_playlist_track_table_settings(),
             playback: PlaybackPreferences::default(),
+            auto_sync_on_startup: false,
         }
     }
 }

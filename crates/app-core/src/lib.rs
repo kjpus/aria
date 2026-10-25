@@ -859,6 +859,12 @@ impl AppCore {
         Ok(settings_snapshot)
     }
 
+    pub async fn update_auto_sync_on_startup(&self, enabled: bool) -> SettingsSnapshot {
+        let snapshot = self.settings.update_auto_sync_on_startup(enabled).await;
+        self.emit(AppEvent::Settings(snapshot.clone()));
+        snapshot
+    }
+
     fn emit(&self, event: AppEvent) {
         let _ = self.events.send(event);
     }
@@ -911,7 +917,8 @@ impl AppCore {
         let core = self.clone();
         let worker = async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
-            if let Err(e) = core.sync_all_remote_targets().await {
+            let auto_sync = core.settings.snapshot().await.auto_sync_on_startup;
+            if let Err(e) = core.sync_startup_remote_targets(auto_sync).await {
                 tracing::warn!("Automatic remote targets startup sync encountered error: {e}");
             }
         };
@@ -1883,6 +1890,53 @@ impl AppCore {
                             error_message: Some(e.to_string()),
                         });
                     }
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    pub async fn sync_startup_remote_targets(
+        &self,
+        force_auto_sync: bool,
+    ) -> Result<Vec<RemoteSyncCompletedEvent>, AppCoreError> {
+        let targets = self.database.load_remote_targets()?;
+        let mut results = Vec::new();
+        for target in targets {
+            if !target.is_enabled {
+                continue;
+            }
+
+            let has_synced_previously = self
+                .database
+                .get_remote_target_last_sync(&target.id)?
+                .is_some()
+                || !self
+                    .database
+                    .load_remote_synced_items_for_target(&target.id)?
+                    .is_empty();
+
+            if has_synced_previously && !force_auto_sync {
+                tracing::info!(
+                    "Skipping startup sync for target '{}' because it was already synced previously.",
+                    target.name
+                );
+                continue;
+            }
+
+            match self.sync_remote_target(&target.id).await {
+                Ok(event) => results.push(event),
+                Err(e) => {
+                    tracing::warn!("Failed to sync remote target '{}': {e}", target.name);
+                    results.push(RemoteSyncCompletedEvent {
+                        target_id: target.id.clone(),
+                        target_name: target.name.clone(),
+                        new_albums_count: 0,
+                        new_tracks_count: 0,
+                        new_playlists_count: 0,
+                        success: false,
+                        error_message: Some(e.to_string()),
+                    });
                 }
             }
         }

@@ -1070,6 +1070,22 @@ export async function updatePlaybackPreferences(
   });
 }
 
+export async function updateAutoSyncOnStartup(
+  enabled: boolean,
+): Promise<SettingsSnapshot> {
+  if (!isTauriRuntime) {
+    previewBootstrap = {
+      ...previewBootstrap,
+      settings: {
+        ...previewBootstrap.settings,
+        autoSyncOnStartup: enabled,
+      },
+    };
+    return previewBootstrap.settings;
+  }
+  return invoke<SettingsSnapshot>('update_auto_sync_on_startup', { enabled });
+}
+
 export async function listenToAppEvents(
   handler: (event: AppEvent) => void,
 ): Promise<() => void> {

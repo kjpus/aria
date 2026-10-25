@@ -2,6 +2,10 @@
 #[path = "exclusive_wasapi.rs"]
 mod exclusive_wasapi;
 
+#[cfg(target_os = "android")]
+#[path = "exclusive_android.rs"]
+mod exclusive_android;
+
 use std::{
     fs::File,
     io::BufReader,
@@ -24,6 +28,9 @@ use tokio::sync::RwLock;
 
 #[cfg(target_os = "windows")]
 use self::exclusive_wasapi::{is_wasapi_device_id, ExclusivePlayer};
+
+#[cfg(target_os = "android")]
+use self::exclusive_android::ExclusivePlayer;
 
 #[derive(Debug, Error)]
 pub enum PlaybackError {
@@ -74,7 +81,7 @@ enum ActivePlayback {
         player: Player,
         request: PlayTrackRequest,
     },
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "android"))]
     Exclusive {
         player: ExclusivePlayer,
         request: PlayTrackRequest,
@@ -96,7 +103,7 @@ impl ActivePlayback {
     fn play(&self) {
         match self {
             Self::Shared { player, .. } => player.play(),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "android"))]
             Self::Exclusive { player, .. } => player.play(),
         }
     }
@@ -105,7 +112,7 @@ impl ActivePlayback {
     fn pause(&self) {
         match self {
             Self::Shared { player, .. } => player.pause(),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "android"))]
             Self::Exclusive { player, .. } => player.pause(),
         }
     }
@@ -113,7 +120,7 @@ impl ActivePlayback {
     fn is_paused(&self) -> bool {
         match self {
             Self::Shared { player, .. } => player.is_paused(),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "android"))]
             Self::Exclusive { player, .. } => player.is_paused(),
         }
     }
@@ -121,7 +128,7 @@ impl ActivePlayback {
     fn get_pos(&self) -> Duration {
         match self {
             Self::Shared { player, .. } => player.get_pos(),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "android"))]
             Self::Exclusive { player, .. } => player.get_pos(),
         }
     }
@@ -129,7 +136,7 @@ impl ActivePlayback {
     fn empty(&self) -> bool {
         match self {
             Self::Shared { player, .. } => player.empty(),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "android"))]
             Self::Exclusive { player, .. } => player.empty(),
         }
     }
@@ -137,7 +144,7 @@ impl ActivePlayback {
     fn request(&self) -> &PlayTrackRequest {
         match self {
             Self::Shared { request, .. } => request,
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "android"))]
             Self::Exclusive { request, .. } => request,
         }
     }
@@ -698,7 +705,7 @@ fn start_request(
     backend.saved_position = None;
 
     if backend.preferences.exclusive_mode {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "android"))]
         {
             match resolve_output_target(&backend.preferences, false).and_then(|target| {
                 ExclusivePlayer::open(
@@ -732,7 +739,7 @@ fn start_request(
             }
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "android")))]
         {
             eprintln!(
                 "exclusive playback requested for '{}', but this platform does not support it",
@@ -873,7 +880,7 @@ fn apply_active_volume(backend: &PlaybackBackend) {
 
     match backend.active.as_ref() {
         Some(ActivePlayback::Shared { player, .. }) => player.set_volume(volume),
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "android"))]
         Some(ActivePlayback::Exclusive { player, .. }) => player.set_volume(volume),
         None => {}
     }
@@ -1178,7 +1185,7 @@ fn output_backend_label(exclusive_mode: bool, is_usb: bool) -> String {
 fn backend_backend_label(backend: &PlaybackBackend) -> String {
     let is_usb = backend.output_device.is_usb;
     match backend.active {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "android"))]
         Some(ActivePlayback::Exclusive { .. }) => output_backend_label(true, is_usb),
         Some(ActivePlayback::Shared { .. }) => output_backend_label(false, is_usb),
         None => output_backend_label(backend.preferences.exclusive_mode, is_usb),

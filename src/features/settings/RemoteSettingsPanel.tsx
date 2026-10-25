@@ -19,11 +19,15 @@ import {
 type RemoteSettingsPanelProps = {
   targets: RemoteTarget[];
   onTargetsChange: (targets: RemoteTarget[]) => void;
+  autoSyncOnStartup?: boolean;
+  onAutoSyncOnStartupChange?: (enabled: boolean) => void;
 };
 
 export function RemoteSettingsPanel({
   targets,
   onTargetsChange,
+  autoSyncOnStartup = false,
+  onAutoSyncOnStartupChange,
 }: RemoteSettingsPanelProps) {
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [editingTarget, setEditingTarget] = useState<RemoteTarget | null>(null);
@@ -411,6 +415,20 @@ export function RemoteSettingsPanel({
             }}
           />
         ) : null}
+
+        <div style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', cursor: 'pointer', fontWeight: 500 }}>
+            <input
+              type="checkbox"
+              checked={autoSyncOnStartup}
+              onChange={(e) => onAutoSyncOnStartupChange?.(e.target.checked)}
+            />
+            <span>Automatically sync remote storage on startup</span>
+          </label>
+          <p className="dialog-section__note" style={{ marginTop: '0.35rem', marginLeft: '1.6rem' }}>
+            When disabled (recommended), Aria loads your library instantly from the local database on startup and only syncs when you click &quot;Refresh from Remote&quot;. Newly added targets will still perform their first initial sync.
+          </p>
+        </div>
       </SectionCard>
 
       <SectionCard

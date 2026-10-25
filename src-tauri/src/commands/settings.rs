@@ -65,3 +65,11 @@ pub async fn update_playback_preferences(
 ) -> Result<SettingsSnapshot, CommandError> {
     Ok(state.core.update_playback_preferences(playback).await?)
 }
+
+#[tauri::command]
+pub async fn update_auto_sync_on_startup(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<SettingsSnapshot, CommandError> {
+    Ok(state.core.update_auto_sync_on_startup(enabled).await)
+}

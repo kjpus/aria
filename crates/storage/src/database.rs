@@ -1022,6 +1022,7 @@ mod tests {
                 exclusive_mode: false,
                 volume: 1.0,
             },
+            auto_sync_on_startup: false,
         };
         let playback = PlaybackSessionSnapshot {
             queue: vec![PlayTrackRequest {

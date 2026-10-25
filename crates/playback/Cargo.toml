@@ -21,3 +21,7 @@ windows = { version = "0.61", features = [
   "Win32_System_Com",
   "Win32_System_Threading",
 ] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"

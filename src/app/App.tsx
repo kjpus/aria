@@ -66,6 +66,7 @@ import {
   updatePlaylistTrackTableSettings,
   updateTheme,
   updatePlaybackPreferences,
+  updateAutoSyncOnStartup,
   updateTrackTableSettings,
   pickPlaylistFile,
   syncAllRemoteTargets,
@@ -1016,6 +1017,16 @@ export function App() {
     }
   }
 
+  async function handleAutoSyncOnStartupChange(enabled: boolean) {
+    try {
+      const settings = await updateAutoSyncOnStartup(enabled);
+      setBootstrap((current) => (current ? { ...current, settings } : current));
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   function handleVolumeChange(volume: number) {
     if (!bootstrap) {
       return;
@@ -1890,6 +1901,7 @@ export function App() {
                 onAddField={handleAddField}
                 onClearLibrary={handleClearLibrary}
                 onPlaybackPreferencesChange={handlePlaybackPreferencesChange}
+                onAutoSyncOnStartupChange={handleAutoSyncOnStartupChange}
                 onRemoveCatalogRule={handleRemoveCatalogRule}
                 onRemoveField={handleRemoveField}
                 onRemoveRoot={handleRemoveRoot}

@@ -163,6 +163,7 @@ export type SettingsSnapshot = {
   albumTrackTable: TrackTableSettings;
   playlistTrackTable: TrackTableSettings;
   playback: PlaybackPreferences;
+  autoSyncOnStartup?: boolean;
 };
 
 export type RemoteBackendType = 'google_drive' | 'filesystem' | 'web_dav' | 'smb';
