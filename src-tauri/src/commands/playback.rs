@@ -44,6 +44,14 @@ pub async fn next_track(state: State<'_, AppState>) -> Result<PlaybackSnapshot, 
 }
 
 #[tauri::command]
+pub async fn play_queue_index(
+    state: State<'_, AppState>,
+    index: usize,
+) -> Result<PlaybackSnapshot, CommandError> {
+    Ok(state.core.play_queue_index(index).await?)
+}
+
+#[tauri::command]
 pub async fn shuffle_queue(state: State<'_, AppState>) -> Result<PlaybackSnapshot, CommandError> {
     Ok(state.core.shuffle_queue().await)
 }

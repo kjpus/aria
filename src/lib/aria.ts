@@ -769,6 +769,24 @@ export async function nextTrack(): Promise<PlaybackSnapshot> {
   return invoke<PlaybackSnapshot>('next_track');
 }
 
+export async function playQueueIndex(index: number): Promise<PlaybackSnapshot> {
+  if (!isTauriRuntime) {
+    const track = previewBootstrap.playback.queue[index];
+    previewBootstrap = {
+      ...previewBootstrap,
+      playback: {
+        ...previewBootstrap.playback,
+        status: track ? 'playing' : 'stopped',
+        currentTrack: track ?? null,
+        currentQueueIndex: track ? index : null,
+        positionMs: 0,
+      },
+    };
+    return previewBootstrap.playback;
+  }
+  return invoke<PlaybackSnapshot>('play_queue_index', { index });
+}
+
 export async function shuffleQueue(): Promise<PlaybackSnapshot> {
   if (!isTauriRuntime) {
     const currentIndex = previewBootstrap.playback.currentQueueIndex ?? -1;

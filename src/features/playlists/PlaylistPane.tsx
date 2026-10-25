@@ -121,15 +121,43 @@ export function PlaylistPane({
   const [renameValue, setRenameValue] = useState('');
   const [selectedTrackIds, setSelectedTrackIds] = useState<string[]>([]);
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
-  const [draggedTrackIds, setDraggedTrackIds] = useState<string[] | null>(null);
-  const [dragOverTrackState, setDragOverTrackState] = useState<{
+  const pointerDragRef = useRef<{
+    type: 'track';
     trackId: string;
-    position: 'before' | 'after';
-  } | null>(null);
-  const [draggedPlaylistId, setDraggedPlaylistId] = useState<string | null>(null);
-  const [dragOverPlaylistState, setDragOverPlaylistState] = useState<{
+    idsToDrag: string[];
+    previewTitle: string;
+    startX: number;
+    startY: number;
+    isDragging: boolean;
+    targetTrackId: string | null;
+    targetPosition: 'before' | 'after' | null;
+  } | {
+    type: 'playlist';
     playlistId: string;
-    position: 'before' | 'after';
+    previewTitle: string;
+    startX: number;
+    startY: number;
+    isDragging: boolean;
+    targetPlaylistId: string | null;
+    targetPosition: 'before' | 'after' | null;
+  } | null>(null);
+  const justFinishedDragRef = useRef(false);
+  const [activeDrag, setActiveDrag] = useState<{
+    type: 'track';
+    draggedIds: string[];
+    previewTitle: string;
+    x: number;
+    y: number;
+    targetId: string | null;
+    position: 'before' | 'after' | null;
+  } | {
+    type: 'playlist';
+    playlistId: string;
+    previewTitle: string;
+    x: number;
+    y: number;
+    targetId: string | null;
+    position: 'before' | 'after' | null;
   } | null>(null);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   const [resizingColumn, setResizingColumn] = useState<string | null>(null);
@@ -376,6 +404,10 @@ export function PlaylistPane({
     event: ReactMouseEvent<HTMLTableRowElement>,
     trackId: string,
   ) {
+    if (justFinishedDragRef.current) {
+      return;
+    }
+
     const orderedIds = playlistTracks.map((track) => track.id);
 
     if (event.shiftKey && selectionAnchorId) {
@@ -526,204 +558,226 @@ export function PlaylistPane({
     return indices.includes(maxIdx);
   }, [selectedPlaylist, trackContextMenu]);
 
-  function handlePlaylistDragStart(
-    event: React.DragEvent<HTMLButtonElement>,
-    playlistId: string,
-  ) {
-    setDraggedPlaylistId(playlistId);
-    event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData('text/plain', playlistId);
-  }
+  const handleGlobalPointerMove = (event: PointerEvent) => {
+    const drag = pointerDragRef.current;
+    if (!drag) return;
 
-  function handlePlaylistDragOver(
-    event: React.DragEvent<HTMLButtonElement>,
-    playlistId: string,
-  ) {
-    if (!draggedPlaylistId || draggedPlaylistId === playlistId) {
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    const distance = Math.hypot(dx, dy);
+
+    if (!drag.isDragging) {
+      if (distance < 5) return;
+      drag.isDragging = true;
+      document.body.style.cursor = 'grabbing';
+      document.body.style.userSelect = 'none';
+    }
+
+    if (drag.type === 'track') {
+      const element = document.elementFromPoint(event.clientX, event.clientY);
+      const targetRow = element?.closest<HTMLTableRowElement>('tr[data-track-id]');
+
+      let targetTrackId: string | null = null;
+      let targetPosition: 'before' | 'after' | null = null;
+
+      if (targetRow) {
+        const candidateId = targetRow.getAttribute('data-track-id');
+        if (candidateId && !drag.idsToDrag.includes(candidateId)) {
+          targetTrackId = candidateId;
+          const rect = targetRow.getBoundingClientRect();
+          targetPosition = event.clientY > rect.top + rect.height / 2 ? 'after' : 'before';
+        }
+      } else {
+        const tbody = element?.closest<HTMLTableSectionElement>('tbody');
+        if (tbody && playlistRows.length > 0) {
+          const lastTrack = playlistRows[playlistRows.length - 1]?.track;
+          if (lastTrack && !drag.idsToDrag.includes(lastTrack.id)) {
+            targetTrackId = lastTrack.id;
+            targetPosition = 'after';
+          }
+        }
+      }
+
+      drag.targetTrackId = targetTrackId;
+      drag.targetPosition = targetPosition;
+
+      setActiveDrag({
+        type: 'track',
+        draggedIds: drag.idsToDrag,
+        previewTitle: drag.previewTitle,
+        x: event.clientX,
+        y: event.clientY,
+        targetId: targetTrackId,
+        position: targetPosition,
+      });
+    } else if (drag.type === 'playlist') {
+      const element = document.elementFromPoint(event.clientX, event.clientY);
+      const targetCard = element?.closest<HTMLElement>('[data-playlist-id]');
+
+      let targetPlaylistId: string | null = null;
+      let targetPosition: 'before' | 'after' | null = null;
+
+      if (targetCard) {
+        const candidateId = targetCard.getAttribute('data-playlist-id');
+        if (candidateId && candidateId !== drag.playlistId) {
+          targetPlaylistId = candidateId;
+          const rect = targetCard.getBoundingClientRect();
+          targetPosition = event.clientX > rect.left + rect.width / 2 ? 'after' : 'before';
+        }
+      }
+
+      drag.targetPlaylistId = targetPlaylistId;
+      drag.targetPosition = targetPosition;
+
+      setActiveDrag({
+        type: 'playlist',
+        playlistId: drag.playlistId,
+        previewTitle: drag.previewTitle,
+        x: event.clientX,
+        y: event.clientY,
+        targetId: targetPlaylistId,
+        position: targetPosition,
+      });
+    }
+  };
+
+  const handleGlobalPointerUp = () => {
+    window.removeEventListener('pointermove', handleGlobalPointerMove);
+    window.removeEventListener('pointerup', handleGlobalPointerUp);
+    window.removeEventListener('pointercancel', handleGlobalPointerCancel);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+
+    const drag = pointerDragRef.current;
+    pointerDragRef.current = null;
+    setActiveDrag(null);
+
+    if (!drag || !drag.isDragging) {
       return;
     }
-    event.preventDefault();
-    event.dataTransfer.dropEffect = 'move';
 
-    const rect = event.currentTarget.getBoundingClientRect();
-    const position = event.clientX > rect.left + rect.width / 2 ? 'after' : 'before';
+    justFinishedDragRef.current = true;
+    window.setTimeout(() => {
+      justFinishedDragRef.current = false;
+    }, 100);
 
-    if (
-      !dragOverPlaylistState ||
-      dragOverPlaylistState.playlistId !== playlistId ||
-      dragOverPlaylistState.position !== position
-    ) {
-      setDragOverPlaylistState({ playlistId, position });
-    }
-  }
-
-  function handlePlaylistDragLeave(
-    event: React.DragEvent<HTMLButtonElement>,
-    playlistId: string,
-  ) {
-    const related = event.relatedTarget as Node | null;
-    if (!event.currentTarget.contains(related)) {
-      if (dragOverPlaylistState?.playlistId === playlistId) {
-        setDragOverPlaylistState(null);
+    if (drag.type === 'track') {
+      if (drag.targetTrackId && drag.targetPosition && selectedPlaylist) {
+        const nextTrackIds = reorderTrackIdsOnDrop(
+          selectedPlaylist.trackIds,
+          drag.idsToDrag,
+          drag.targetTrackId,
+          drag.targetPosition,
+        );
+        if (nextTrackIds) {
+          void onReorderTracks(selectedPlaylist.id, nextTrackIds);
+        }
+      }
+    } else if (drag.type === 'playlist') {
+      if (drag.targetPlaylistId && drag.targetPosition && onReorderPlaylists) {
+        const allPlaylistIds = playlists.map((p) => p.id);
+        const nextIds = reorderPlaylistIdsOnDrop(
+          allPlaylistIds,
+          drag.playlistId,
+          drag.targetPlaylistId,
+          drag.targetPosition,
+        );
+        if (nextIds) {
+          void onReorderPlaylists(nextIds);
+        }
       }
     }
-  }
+  };
 
-  function handlePlaylistDrop(
-    event: React.DragEvent<HTMLButtonElement>,
-    playlistId: string,
+  const handleGlobalPointerCancel = () => {
+    window.removeEventListener('pointermove', handleGlobalPointerMove);
+    window.removeEventListener('pointerup', handleGlobalPointerUp);
+    window.removeEventListener('pointercancel', handleGlobalPointerCancel);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    pointerDragRef.current = null;
+    setActiveDrag(null);
+  };
+
+  function handlePlaylistPointerDown(
+    event: React.PointerEvent<HTMLElement>,
+    playlist: Playlist,
   ) {
-    event.preventDefault();
-    if (!draggedPlaylistId || !onReorderPlaylists) {
-      setDraggedPlaylistId(null);
-      setDragOverPlaylistState(null);
+    if (event.button !== 0) return;
+    if (!onReorderPlaylists) return;
+    if ((event.target as HTMLElement).closest('button:not(.playlist-card), input, select, textarea, a')) {
       return;
     }
 
-    const position = dragOverPlaylistState?.position ?? 'before';
-    const allPlaylistIds = playlists.map((p) => p.id);
-    const nextIds = reorderPlaylistIdsOnDrop(
-      allPlaylistIds,
-      draggedPlaylistId,
-      playlistId,
-      position,
-    );
+    pointerDragRef.current = {
+      type: 'playlist',
+      playlistId: playlist.id,
+      previewTitle: playlist.name,
+      startX: event.clientX,
+      startY: event.clientY,
+      isDragging: false,
+      targetPlaylistId: null,
+      targetPosition: null,
+    };
 
-    setDraggedPlaylistId(null);
-    setDragOverPlaylistState(null);
-
-    if (nextIds) {
-      void onReorderPlaylists(nextIds);
-    }
+    window.addEventListener('pointermove', handleGlobalPointerMove);
+    window.addEventListener('pointerup', handleGlobalPointerUp);
+    window.addEventListener('pointercancel', handleGlobalPointerCancel);
   }
 
-  function handlePlaylistDragEnd() {
-    setDraggedPlaylistId(null);
-    setDragOverPlaylistState(null);
-  }
-
-  function handleTrackDragStart(
-    event: React.DragEvent<HTMLTableRowElement>,
-    trackId: string,
+  function handleTrackPointerDown(
+    event: React.PointerEvent<HTMLTableRowElement>,
+    track: ScannedTrack,
   ) {
-    if (resizingColumn) {
-      event.preventDefault();
+    if (event.button !== 0) return;
+    if (resizingColumn) return;
+    if ((event.target as HTMLElement).closest('button, input, select, textarea, a, .track-table__resize-handle')) {
       return;
     }
 
-    if ((event.target as HTMLElement).closest('button, input, select, textarea, a')) {
-      event.preventDefault();
-      return;
-    }
+    const idsToDrag = selectedTrackSet.has(track.id)
+      ? selectTrackIdsInOrder(playlistTracks, selectedTrackIds)
+      : [track.id];
 
-    let idsToDrag = selectedTrackIds;
-    if (!selectedTrackSet.has(trackId)) {
-      idsToDrag = [trackId];
-      setSelectedTrackIds([trackId]);
-      setSelectionAnchorId(trackId);
-    } else {
-      idsToDrag = selectTrackIdsInOrder(playlistTracks, selectedTrackIds);
-    }
+    const title = firstField(track, 'title') || track.fileName;
+    const previewTitle = idsToDrag.length > 1
+      ? `${title} (+${idsToDrag.length - 1} more)`
+      : title;
 
-    setDraggedTrackIds(idsToDrag);
-    event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData('text/plain', trackId);
+    pointerDragRef.current = {
+      type: 'track',
+      trackId: track.id,
+      idsToDrag,
+      previewTitle,
+      startX: event.clientX,
+      startY: event.clientY,
+      isDragging: false,
+      targetTrackId: null,
+      targetPosition: null,
+    };
+
+    window.addEventListener('pointermove', handleGlobalPointerMove);
+    window.addEventListener('pointerup', handleGlobalPointerUp);
+    window.addEventListener('pointercancel', handleGlobalPointerCancel);
   }
 
-  function handleTrackDragOver(
-    event: React.DragEvent<HTMLTableRowElement>,
-    trackId: string,
-  ) {
-    if (!draggedTrackIds || draggedTrackIds.length === 0) {
-      return;
-    }
-    if (draggedTrackIds.includes(trackId)) {
-      return;
-    }
-
-    event.preventDefault();
-    event.dataTransfer.dropEffect = 'move';
-
-    const rect = event.currentTarget.getBoundingClientRect();
-    const position = event.clientY > rect.top + rect.height / 2 ? 'after' : 'before';
-
-    if (
-      !dragOverTrackState ||
-      dragOverTrackState.trackId !== trackId ||
-      dragOverTrackState.position !== position
-    ) {
-      setDragOverTrackState({ trackId, position });
-    }
-  }
-
-  function handleTrackDragLeave(
-    event: React.DragEvent<HTMLTableRowElement>,
-    trackId: string,
-  ) {
-    const related = event.relatedTarget as Node | null;
-    if (!event.currentTarget.contains(related)) {
-      if (dragOverTrackState?.trackId === trackId) {
-        setDragOverTrackState(null);
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && pointerDragRef.current?.isDragging) {
+        event.preventDefault();
+        handleGlobalPointerCancel();
       }
-    }
-  }
-
-  function handleTrackDrop(
-    event: React.DragEvent<HTMLTableRowElement>,
-    trackId: string,
-  ) {
-    event.preventDefault();
-    if (!draggedTrackIds || !selectedPlaylist) {
-      setDraggedTrackIds(null);
-      setDragOverTrackState(null);
-      return;
-    }
-
-    const position = dragOverTrackState?.position ?? 'before';
-    const nextTrackIds = reorderTrackIdsOnDrop(
-      selectedPlaylist.trackIds,
-      draggedTrackIds,
-      trackId,
-      position,
-    );
-
-    setDraggedTrackIds(null);
-    setDragOverTrackState(null);
-
-    if (nextTrackIds) {
-      void onReorderTracks(selectedPlaylist.id, nextTrackIds);
-    }
-  }
-
-  function handleTrackDragEnd() {
-    setDraggedTrackIds(null);
-    setDragOverTrackState(null);
-  }
-
-  function handleTableBodyDragOver(event: React.DragEvent<HTMLTableSectionElement>) {
-    if (!draggedTrackIds || draggedTrackIds.length === 0) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = 'move';
-  }
-
-  function handleTableBodyDrop(event: React.DragEvent<HTMLTableSectionElement>) {
-    if (!draggedTrackIds || !selectedPlaylist || playlistRows.length === 0) return;
-    if ((event.target as HTMLElement).tagName === 'TBODY') {
-      event.preventDefault();
-      const lastTrack = playlistRows[playlistRows.length - 1].track;
-      const nextTrackIds = reorderTrackIdsOnDrop(
-        selectedPlaylist.trackIds,
-        draggedTrackIds,
-        lastTrack.id,
-        'after',
-      );
-      setDraggedTrackIds(null);
-      setDragOverTrackState(null);
-      if (nextTrackIds) {
-        void onReorderTracks(selectedPlaylist.id, nextTrackIds);
-      }
-    }
-  }
+    };
+    window.addEventListener('keydown', handleEscape);
+    return () => {
+      window.removeEventListener('keydown', handleEscape);
+      window.removeEventListener('pointermove', handleGlobalPointerMove);
+      window.removeEventListener('pointerup', handleGlobalPointerUp);
+      window.removeEventListener('pointercancel', handleGlobalPointerCancel);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, []);
 
   return (
     <div className="pane-stack">
@@ -797,34 +851,37 @@ export function PlaylistPane({
                 const playlistTracks = tracksForPlaylist(tracks, playlist);
                 const collageArts = buildPlaylistCollage(playlist, playlistTracks);
                 const selected = selectedPlaylist?.id === playlist.id;
+                const isPlaylistBeingDragged =
+                  activeDrag?.type === 'playlist' && activeDrag.playlistId === playlist.id;
+                const isCardDropBefore =
+                  activeDrag?.type === 'playlist' &&
+                  activeDrag.targetId === playlist.id &&
+                  activeDrag.position === 'before';
+                const isCardDropAfter =
+                  activeDrag?.type === 'playlist' &&
+                  activeDrag.targetId === playlist.id &&
+                  activeDrag.position === 'after';
 
                 return (
                   <button
                     className={[
                       'playlist-card',
                       selected ? 'playlist-card--selected' : '',
-                      draggedPlaylistId === playlist.id ? 'playlist-card--dragging' : '',
-                      dragOverPlaylistState?.playlistId === playlist.id &&
-                      dragOverPlaylistState.position === 'before'
-                        ? 'playlist-card--drop-before'
-                        : '',
-                      dragOverPlaylistState?.playlistId === playlist.id &&
-                      dragOverPlaylistState.position === 'after'
-                        ? 'playlist-card--drop-after'
-                        : '',
+                      isPlaylistBeingDragged ? 'playlist-card--dragging' : '',
+                      isCardDropBefore ? 'playlist-card--drop-before' : '',
+                      isCardDropAfter ? 'playlist-card--drop-after' : '',
                     ]
                       .filter(Boolean)
                       .join(' ')}
+                    data-playlist-id={playlist.id}
                     key={playlist.id}
-                    draggable={Boolean(onReorderPlaylists)}
-                    onDragStart={(event) => handlePlaylistDragStart(event, playlist.id)}
-                    onDragOver={(event) => handlePlaylistDragOver(event, playlist.id)}
-                    onDragLeave={(event) => handlePlaylistDragLeave(event, playlist.id)}
-                    onDrop={(event) => handlePlaylistDrop(event, playlist.id)}
-                    onDragEnd={handlePlaylistDragEnd}
-                    onClick={() => onSelectPlaylist(playlist.id)}
+                    onClick={() => {
+                      if (justFinishedDragRef.current) return;
+                      onSelectPlaylist(playlist.id);
+                    }}
                     onContextMenu={(event) => openContextMenu(event, playlist.id)}
                     onDoubleClick={() => void onPlayPlaylist(playlist.id)}
+                    onPointerDown={(event) => handlePlaylistPointerDown(event, playlist)}
                     type="button"
                   >
                     <div className="playlist-card__collage">
@@ -935,10 +992,7 @@ export function PlaylistPane({
                         })}
                       </tr>
                     </thead>
-                    <tbody
-                      onDragOver={handleTableBodyDragOver}
-                      onDrop={handleTableBodyDrop}
-                    >
+                    <tbody>
                       {playlistRows.length === 0 ? (
                         <tr>
                           <td className="empty-state" colSpan={Math.max(visibleColumns.length, 1)}>
@@ -946,38 +1000,44 @@ export function PlaylistPane({
                           </td>
                         </tr>
                       ) : (
-                        playlistRows.map(({ track, order }) => (
-                          <tr
-                            className={[
-                              'track-table__row--playable',
-                              selectedTrackSet.has(track.id)
-                                ? 'track-table__row--selected'
-                                : '',
-                              draggedTrackIds?.includes(track.id)
-                                ? 'track-table__row--dragging'
-                                : '',
-                              dragOverTrackState?.trackId === track.id &&
-                              dragOverTrackState.position === 'before'
-                                ? 'track-table__row--drop-before'
-                                : '',
-                              dragOverTrackState?.trackId === track.id &&
-                              dragOverTrackState.position === 'after'
-                                ? 'track-table__row--drop-after'
-                                : '',
-                            ]
-                              .filter(Boolean)
-                              .join(' ')}
-                            key={track.id}
-                            draggable={true}
-                            onDragStart={(event) => handleTrackDragStart(event, track.id)}
-                            onDragOver={(event) => handleTrackDragOver(event, track.id)}
-                            onDragLeave={(event) => handleTrackDragLeave(event, track.id)}
-                            onDrop={(event) => handleTrackDrop(event, track.id)}
-                            onDragEnd={handleTrackDragEnd}
-                            onClick={(event) => handleTrackClick(event, track.id)}
-                            onContextMenu={(event) => handleTrackContextMenu(event, track)}
-                            onDoubleClick={() => void onPlayTracks([track])}
-                          >
+                        playlistRows.map(({ track, order }) => {
+                          const isTrackBeingDragged =
+                            activeDrag?.type === 'track' && activeDrag.draggedIds.includes(track.id);
+                          const isDropTargetBefore =
+                            activeDrag?.type === 'track' &&
+                            activeDrag.targetId === track.id &&
+                            activeDrag.position === 'before';
+                          const isDropTargetAfter =
+                            activeDrag?.type === 'track' &&
+                            activeDrag.targetId === track.id &&
+                            activeDrag.position === 'after';
+
+                          return (
+                            <tr
+                              className={[
+                                'track-table__row--playable',
+                                selectedTrackSet.has(track.id)
+                                  ? 'track-table__row--selected'
+                                  : '',
+                                isTrackBeingDragged
+                                  ? 'track-table__row--dragging'
+                                  : '',
+                                isDropTargetBefore
+                                  ? 'track-table__row--drop-before'
+                                  : '',
+                                isDropTargetAfter
+                                  ? 'track-table__row--drop-after'
+                                  : '',
+                              ]
+                                .filter(Boolean)
+                                .join(' ')}
+                              data-track-id={track.id}
+                              key={track.id}
+                              onClick={(event) => handleTrackClick(event, track.id)}
+                              onContextMenu={(event) => handleTrackContextMenu(event, track)}
+                              onDoubleClick={() => void onPlayTracks([track])}
+                              onPointerDown={(event) => handleTrackPointerDown(event, track)}
+                            >
                             {visibleColumns.map((key) => (
                               <td
                                 className={[
@@ -1020,7 +1080,8 @@ export function PlaylistPane({
                               </td>
                             ))}
                           </tr>
-                        ))
+                        );
+                      })
                       )}
                     </tbody>
                   </table>
@@ -1172,6 +1233,19 @@ export function PlaylistPane({
           </div>
         </div>
       ) : null}
+
+      {activeDrag && (
+        <div
+          className="drag-floating-badge"
+          style={{
+            left: `${activeDrag.x + 14}px`,
+            top: `${activeDrag.y + 14}px`,
+          }}
+        >
+          <GripVerticalIcon size={13} />
+          <span>{activeDrag.previewTitle}</span>
+        </div>
+      )}
     </div>
   );
 }

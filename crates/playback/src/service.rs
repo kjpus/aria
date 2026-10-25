@@ -447,6 +447,19 @@ impl PlaybackService {
         Ok(state.clone())
     }
 
+    pub async fn play_queue_index(&self, index: usize) -> Result<PlaybackSnapshot, PlaybackError> {
+        {
+            let mut backend = self.backend.lock().expect("playback backend poisoned");
+            if index < backend.queue.len() {
+                jump_to_queue_index(&mut backend, index, false)?;
+            }
+        }
+
+        let mut state = self.state.write().await;
+        self.refresh_state(&mut state);
+        Ok(state.clone())
+    }
+
     pub async fn shuffle_queue(&self) -> PlaybackSnapshot {
         {
             let mut backend = self.backend.lock().expect("playback backend poisoned");
@@ -492,6 +505,11 @@ impl PlaybackService {
         for req in backend.ordered_queue.iter_mut() {
             if req.queue_item.id == track_id {
                 req.path = new_path.clone();
+            }
+        }
+        if let Some(ref mut req) = backend.last_request {
+            if req.queue_item.id == track_id {
+                req.path = new_path;
             }
         }
     }
@@ -722,7 +740,7 @@ fn start_request(
         source,
     })?;
     let decoder =
-        Decoder::try_from(BufReader::new(file)).map_err(|_| PlaybackError::DecodeTrack {
+        Decoder::try_from(BufReader::with_capacity(1024 * 1024, file)).map_err(|_| PlaybackError::DecodeTrack {
             path: request.path.clone(),
         })?;
 
@@ -853,8 +871,18 @@ fn open_shared_output(
     strict_selected: bool,
 ) -> Result<(MixerDeviceSink, OutputDeviceSnapshot), PlaybackError> {
     let target = resolve_output_target(&shared_mode_preferences(preferences), strict_selected)?;
-    let mut output = DeviceSinkBuilder::from_device(target.device)
-        .map_err(|error| PlaybackError::Output(error.to_string()))?
+    #[allow(unused_mut)]
+    let mut builder = DeviceSinkBuilder::from_device(target.device)
+        .map_err(|error| PlaybackError::Output(error.to_string()))?;
+
+    #[cfg(target_os = "android")]
+    {
+        // 50ms default is too small on Android and causes buffer underruns (xruns).
+        // 4096 frames (~90-100ms) provides reliable stability for media playback.
+        builder = builder.with_buffer_size(cpal::BufferSize::Fixed(4096));
+    }
+
+    let mut output = builder
         .open_sink_or_fallback()
         .map_err(|error| PlaybackError::Output(error.to_string()))?;
     output.log_on_drop(false);
@@ -1110,5 +1138,45 @@ mod tests {
         let stopped_snapshot = service.stop().await;
         assert_eq!(stopped_snapshot.status, PlaybackStatus::Stopped);
         assert_eq!(stopped_snapshot.position_ms, 45_000);
+    }
+
+    #[tokio::test]
+    async fn test_play_queue_index_updates_current_index() {
+        let q1 = QueueItem {
+            id: "track-1".into(),
+            title: "Track 1".into(),
+            subtitle: "".into(),
+            duration_ms: 100_000,
+        };
+        let q2 = QueueItem {
+            id: "track-2".into(),
+            title: "Track 2".into(),
+            subtitle: "".into(),
+            duration_ms: 200_000,
+        };
+        let r1 = PlayTrackRequest {
+            path: "nonexistent1.flac".into(),
+            queue_item: q1.clone(),
+        };
+        let r2 = PlayTrackRequest {
+            path: "nonexistent2.flac".into(),
+            queue_item: q2.clone(),
+        };
+
+        let session = PlaybackSessionSnapshot {
+            queue: vec![r1.clone(), r2.clone()],
+            ordered_queue: vec![r1.clone(), r2.clone()],
+            current_queue_index: Some(0),
+        };
+
+        let service = PlaybackService::with_session(PlaybackPreferences::default(), session);
+        let snapshot = service.snapshot().await;
+        assert_eq!(snapshot.current_queue_index, Some(0));
+
+        let res = service.play_queue_index(1).await;
+        // Nonexistent file fails to open, but backend.current_queue_index is updated to 1
+        assert!(res.is_err());
+        let backend = service.backend.lock().unwrap();
+        assert_eq!(backend.current_queue_index, Some(1));
     }
 }

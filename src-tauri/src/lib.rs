@@ -52,6 +52,7 @@ pub fn run() {
             commands::playback::replace_queue,
             commands::playback::previous_track,
             commands::playback::next_track,
+            commands::playback::play_queue_index,
             commands::playback::shuffle_queue,
             commands::playback::restore_queue_order,
             commands::playback::pause,

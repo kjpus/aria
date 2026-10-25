@@ -38,6 +38,8 @@ struct DriveFileEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "mimeType")]
     mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parents: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -157,9 +159,7 @@ impl GoogleDriveBackend {
                         DriveFileList { files: Vec::new() }
                     };
 
-                    let found_id = if let Some(f) = list.files.into_iter().next() {
-                        f.id
-                    } else {
+                    let found_id = if list.files.is_empty() {
                         let create_url = format!("{DRIVE_API_BASE}/files");
                         let mut body_map = serde_json::Map::new();
                         body_map.insert("name".to_string(), serde_json::Value::String(segment.to_string()));
@@ -192,6 +192,69 @@ impl GoogleDriveBackend {
                             .await
                             .map_err(|e| RemoteStorageError::Serialization(e.to_string()))?;
                         entry.id
+                    } else if list.files.len() == 1 {
+                        list.files[0].id.clone()
+                    } else {
+                        tracing::info!(
+                            folder_count = list.files.len(),
+                            segment = %segment,
+                            "Multiple folders share name on Drive; disambiguating"
+                        );
+                        
+                        // Check if aria-library-index.json exists anywhere in Drive to identify the true root folder
+                        let master_q = "name = 'aria-library-index.json' and trashed = false";
+                        let master_url = format!("{DRIVE_API_BASE}/files?q={}&fields=files(id,name,parents)", urlencoding(master_q));
+                        if let Ok(res) = self.client.get(&master_url).bearer_auth(&token).send().await {
+                            if let Ok(m_list) = res.json::<DriveFileList>().await {
+                                if let Some(m_file) = m_list.files.into_iter().next() {
+                                    if let Some(p_id) = m_file.parents.and_then(|p| p.into_iter().next()) {
+                                        if list.files.iter().any(|f| f.id == p_id) {
+                                            tracing::info!(root_id = %p_id, "Root folder identified via aria-library-index.json parent");
+                                            return Ok(p_id);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Multiple folders share this name (e.g. re-created root or duplicate folders on Drive).
+                        // Disambiguate by checking which candidate actually contains 'aria-library-index.json' or contents.
+                        let mut selected_id = None;
+                        for cand in &list.files {
+                            let chk_q = format!(
+                                "name = 'aria-library-index.json' and '{}' in parents and trashed = false",
+                                escape_drive_query_string(&cand.id)
+                            );
+                            let chk_url = format!("{DRIVE_API_BASE}/files?q={}&fields=files(id)", urlencoding(&chk_q));
+                            if let Ok(c_res) = self.client.get(&chk_url).bearer_auth(&token).send().await {
+                                if let Ok(c_list) = c_res.json::<DriveFileList>().await {
+                                    if !c_list.files.is_empty() {
+                                        selected_id = Some(cand.id.clone());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if selected_id.is_none() {
+                            for cand in &list.files {
+                                let chk_q = format!(
+                                    "'{}' in parents and trashed = false",
+                                    escape_drive_query_string(&cand.id)
+                                );
+                                let chk_url = format!("{DRIVE_API_BASE}/files?q={}&fields=files(id)&pageSize=1", urlencoding(&chk_q));
+                                if let Ok(c_res) = self.client.get(&chk_url).bearer_auth(&token).send().await {
+                                    if let Ok(c_list) = c_res.json::<DriveFileList>().await {
+                                        if !c_list.files.is_empty() {
+                                            selected_id = Some(cand.id.clone());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let res_id = selected_id.unwrap_or_else(|| list.files[0].id.clone());
+                        tracing::info!(segment = %segment, chosen_id = %res_id, "Disambiguated folder");
+                        res_id
                     };
 
                     let mut cache = self.folder_id_cache.write().await;
@@ -246,8 +309,43 @@ impl GoogleDriveBackend {
             .await
             .map_err(|e| RemoteStorageError::Serialization(e.to_string()))?;
 
-        if let Some(entry) = list.files.into_iter().next() {
-            return Ok(entry.id);
+        if list.files.len() == 1 {
+            return Ok(list.files[0].id.clone());
+        }
+
+        if list.files.len() > 1 {
+            // Disambiguate multiple child folders: prefer one that contains files
+            for cand in &list.files {
+                let chk_q = format!(
+                    "'{}' in parents and trashed = false",
+                    escape_drive_query_string(&cand.id)
+                );
+                let chk_url = format!("{DRIVE_API_BASE}/files?q={}&fields=files(id)&pageSize=1", urlencoding(&chk_q));
+                if let Ok(c_res) = self.client.get(&chk_url).bearer_auth(&token).send().await {
+                    if let Ok(c_list) = c_res.json::<DriveFileList>().await {
+                        if !c_list.files.is_empty() {
+                            return Ok(cand.id.clone());
+                        }
+                    }
+                }
+            }
+            return Ok(list.files[0].id.clone());
+        }
+
+        // Fallback: Check parent folder listing before creating a duplicate folder
+        let parent_query = format!(
+            "'{}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+            escape_drive_query_string(parent_id)
+        );
+        let parent_url = format!("{DRIVE_API_BASE}/files?q={}&fields=files(id,name)&pageSize=100", urlencoding(&parent_query));
+        if let Ok(parent_res) = self.client.get(&parent_url).bearer_auth(&token).send().await {
+            if parent_res.status().is_success() {
+                if let Ok(parent_list) = parent_res.json::<DriveFileList>().await {
+                    if let Some(entry) = parent_list.files.into_iter().find(|f| f.name == folder_name) {
+                        return Ok(entry.id);
+                    }
+                }
+            }
         }
 
         // Create the child folder
@@ -315,7 +413,42 @@ impl GoogleDriveBackend {
             .await
             .map_err(|e| RemoteStorageError::Serialization(e.to_string()))?;
 
-        Ok(list.files.into_iter().next().map(|f| f.id))
+        if let Some(entry) = list.files.into_iter().next() {
+            return Ok(Some(entry.id));
+        }
+
+        // Fallback: If exact query returned no matches (e.g. quote escaping or indexing lag in Google Drive search),
+        // query all files directly in this parent folder and match in memory.
+        let parent_query = format!("'{}' in parents and trashed = false", escape_drive_query_string(parent_id));
+        let parent_url = format!("{DRIVE_API_BASE}/files?q={}&fields=files(id,name)&pageSize=100", urlencoding(&parent_query));
+        let parent_res = self
+            .client
+            .get(&parent_url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| RemoteStorageError::ConnectionFailed(e.to_string()))?;
+
+        if parent_res.status().is_success() {
+            if let Ok(parent_list) = parent_res.json::<DriveFileList>().await {
+                // 1. Exact match
+                if let Some(entry) = parent_list.files.iter().find(|f| f.name == file_name) {
+                    return Ok(Some(entry.id.clone()));
+                }
+                // 2. Case-insensitive or normalized match (quotes, apostrophes)
+                let normalize = |s: &str| -> String {
+                    s.replace(['\u{2018}', '\u{2019}', '`'], "'")
+                        .replace(['\u{201C}', '\u{201D}'], "\"")
+                        .to_lowercase()
+                };
+                let norm_target = normalize(file_name);
+                if let Some(entry) = parent_list.files.iter().find(|f| normalize(&f.name) == norm_target) {
+                    return Ok(Some(entry.id.clone()));
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     /// Splits a relative path (e.g. "Beethoven/Sym9/manifest.json") into directory path and file name.
@@ -662,6 +795,7 @@ impl RemoteStorageBackend for GoogleDriveBackend {
             Some(dir) => self.ensure_directory(dir).await?,
             None => self.get_or_create_root_folder().await?,
         };
+        tracing::debug!(remote_path = %remote_path, ?dir_part, parent_id = %parent_id, "gdrive read_bytes");
 
         let file_id = self
             .find_file_in_parent(&parent_id, file_name)
@@ -671,20 +805,32 @@ impl RemoteStorageBackend for GoogleDriveBackend {
         let token = self.get_access_token().await?;
         let url = format!("{DRIVE_API_BASE}/files/{file_id}?alt=media");
 
-        let res = self
-            .client
-            .get(&url)
-            .bearer_auth(&token)
-            .send()
-            .await
-            .map_err(|e| RemoteStorageError::ConnectionFailed(e.to_string()))?;
+        let mut retries = 0;
+        let res = loop {
+            let res = self
+                .client
+                .get(&url)
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(|e| RemoteStorageError::ConnectionFailed(e.to_string()))?;
 
-        if !res.status().is_success() {
-            return Err(RemoteStorageError::ProviderError(format!(
-                "Failed to read file from Drive: {}",
-                res.status()
-            )));
-        }
+            let status = res.status();
+            if (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()) && retries < 3 {
+                retries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(500 * (1 << retries))).await;
+                continue;
+            }
+
+            if !status.is_success() {
+                return Err(RemoteStorageError::ProviderError(format!(
+                    "Failed to read file from Drive: {}",
+                    status
+                )));
+            }
+
+            break res;
+        };
 
         let bytes = res
             .bytes()

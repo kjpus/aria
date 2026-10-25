@@ -434,7 +434,7 @@ impl AppCore {
                     .take(3)
                     .map(|r| r.queue_item.id.clone())
                     .collect();
-                let _ = self.resolve_remote_track_if_needed(&mut req, &window).await;
+                self.resolve_remote_track_if_needed(&mut req, &window).await?;
             }
         }
         let snapshot = self.playback.play().await?;
@@ -450,9 +450,8 @@ impl AppCore {
         mut request: PlayTrackRequest,
     ) -> Result<PlaybackSnapshot, AppCoreError> {
         let active_window = vec![request.queue_item.id.clone()];
-        let _ = self
-            .resolve_remote_track_if_needed(&mut request, &active_window)
-            .await;
+        self.resolve_remote_track_if_needed(&mut request, &active_window)
+            .await?;
         let snapshot = self.playback.play_track(request).await?;
         self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
             snapshot.clone(),
@@ -481,9 +480,8 @@ impl AppCore {
                 .take(3)
                 .map(|r| r.queue_item.id.clone())
                 .collect();
-            let _ = self
-                .resolve_remote_track_if_needed(&mut requests[0], &active_window)
-                .await;
+            self.resolve_remote_track_if_needed(&mut requests[0], &active_window)
+                .await?;
         }
         let snapshot = self.playback.replace_queue(requests, start_playing).await?;
         self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
@@ -507,9 +505,8 @@ impl AppCore {
                         .take(3)
                         .map(|r| r.queue_item.id.clone())
                         .collect();
-                    let _ = self
-                        .resolve_remote_track_if_needed(&mut prev_req, &window)
-                        .await;
+                    self.resolve_remote_track_if_needed(&mut prev_req, &window)
+                        .await?;
                 }
             }
         }
@@ -532,12 +529,32 @@ impl AppCore {
                     .take(3)
                     .map(|r| r.queue_item.id.clone())
                     .collect();
-                let _ = self
-                    .resolve_remote_track_if_needed(&mut next_req, &window)
-                    .await;
+                self.resolve_remote_track_if_needed(&mut next_req, &window)
+                    .await?;
             }
         }
         let snapshot = self.playback.next_track().await?;
+        self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
+            snapshot.clone(),
+        )));
+        self.trigger_sliding_window_prefetch().await;
+        Ok(snapshot)
+    }
+
+    pub async fn play_queue_index(&self, index: usize) -> Result<PlaybackSnapshot, AppCoreError> {
+        let session = self.playback.persisted_session();
+        if let Some(mut req) = session.queue.get(index).cloned() {
+            let window: Vec<String> = session
+                .queue
+                .iter()
+                .skip(index)
+                .take(3)
+                .map(|r| r.queue_item.id.clone())
+                .collect();
+            self.resolve_remote_track_if_needed(&mut req, &window)
+                .await?;
+        }
+        let snapshot = self.playback.play_queue_index(index).await?;
         self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
             snapshot.clone(),
         )));
@@ -554,7 +571,10 @@ impl AppCore {
 
         // 1. If already cached locally, update path to local cached path
         if let Some(cached_path) = self.cache_manager.get_cached_path(track_id).await {
-            request.path = cached_path.to_string_lossy().to_string();
+            let local_path_str = cached_path.to_string_lossy().to_string();
+            request.path = local_path_str.clone();
+            self.playback
+                .update_queue_track_path(track_id, local_path_str);
             return Ok(true);
         }
 
@@ -591,14 +611,40 @@ impl AppCore {
         )));
 
         // 4. Download and cache track atomically
-        let targets = self.database.load_remote_targets()?;
-        let target = targets
-            .into_iter()
-            .find(|t| t.id == target_id)
-            .ok_or_else(|| AppCoreError::Remote(format!("Target '{target_id}' not found")))?;
-        let backend = create_backend_for_target(&target)?;
+        let targets = match self.database.load_remote_targets() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("[app-core] Failed to load remote targets for track '{track_id}': {e}");
+                let mut reset_snapshot = self.playback.snapshot().await;
+                reset_snapshot.status = PlaybackStatus::Stopped;
+                self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(reset_snapshot)));
+                return Err(AppCoreError::Remote(format!("Failed to load remote targets: {e}")));
+            }
+        };
 
-        let local_path = self
+        let target = match targets.into_iter().find(|t| t.id == target_id) {
+            Some(t) => t,
+            None => {
+                eprintln!("[app-core] Remote target '{target_id}' not found for track '{track_id}'");
+                let mut reset_snapshot = self.playback.snapshot().await;
+                reset_snapshot.status = PlaybackStatus::Stopped;
+                self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(reset_snapshot)));
+                return Err(AppCoreError::Remote(format!("Target '{target_id}' not found")));
+            }
+        };
+
+        let backend = match create_backend_for_target(&target) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[app-core] Failed to instantiate backend for target '{target_id}': {e}");
+                let mut reset_snapshot = self.playback.snapshot().await;
+                reset_snapshot.status = PlaybackStatus::Stopped;
+                self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(reset_snapshot)));
+                return Err(AppCoreError::Remote(format!("Failed to create backend: {e}")));
+            }
+        };
+
+        let local_path = match self
             .cache_manager
             .get_or_download_track(
                 backend.as_ref(),
@@ -607,7 +653,19 @@ impl AppCore {
                 checksum.as_deref(),
                 active_window_ids,
             )
-            .await?;
+            .await
+        {
+            Ok(p) => p,
+            Err(err) => {
+                eprintln!("[app-core] Failed to download remote track '{rel_path}' (id: {track_id}): {err}");
+                let mut reset_snapshot = self.playback.snapshot().await;
+                reset_snapshot.status = PlaybackStatus::Stopped;
+                self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(reset_snapshot)));
+                return Err(AppCoreError::Remote(format!(
+                    "Download failed for '{rel_path}': {err}"
+                )));
+            }
+        };
 
         let local_path_str = local_path.to_string_lossy().to_string();
         request.path = local_path_str.clone();
@@ -890,64 +948,75 @@ impl AppCore {
     }
 
     fn spawn_output_device_monitor(&self) {
-        let playback = self.playback.clone();
-        let settings = self.settings.clone();
-        let events = self.events.clone();
+        #[cfg(target_os = "android")]
+        {
+            // On Android, audio routing is handled natively by the OS AudioPolicyManager.
+            // Continuous polling of CPAL output devices queries AudioPolicyManager JNI,
+            // which causes active AAudio stream interruptions and stutter.
+            let _ = self;
+        }
 
-        std::thread::Builder::new()
-            .name("aria-output-device-monitor".into())
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
-                    .build()
-                    .expect("failed to create output device monitor runtime");
+        #[cfg(not(target_os = "android"))]
+        {
+            let playback = self.playback.clone();
+            let settings = self.settings.clone();
+            let events = self.events.clone();
 
-                runtime.block_on(async move {
-                    let mut last_devices = playback.list_output_devices().unwrap_or_default();
+            std::thread::Builder::new()
+                .name("aria-output-device-monitor".into())
+                .spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_time()
+                        .build()
+                        .expect("failed to create output device monitor runtime");
 
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                    runtime.block_on(async move {
+                        let mut last_devices = playback.list_output_devices().unwrap_or_default();
 
-                        let devices = match playback.list_output_devices() {
-                            Ok(devices) => devices,
-                            Err(error) => {
-                                eprintln!("failed to list output devices: {error}");
-                                continue;
-                            }
-                        };
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
 
-                        if devices != last_devices {
-                            last_devices = devices.clone();
-                            let _ = events.send(AppEvent::Playback(
-                                PlaybackEvent::OutputDevicesChanged(devices.clone()),
-                            ));
-                        }
+                            let devices = match playback.list_output_devices() {
+                                Ok(devices) => devices,
+                                Err(error) => {
+                                    eprintln!("failed to list output devices: {error}");
+                                    continue;
+                                }
+                            };
 
-                        match playback.handle_output_device_change(&devices).await {
-                            Ok(Some(refresh)) => {
+                            if devices != last_devices {
+                                last_devices = devices.clone();
                                 let _ = events.send(AppEvent::Playback(
-                                    PlaybackEvent::SnapshotChanged(
-                                        refresh.playback_snapshot.clone(),
-                                    ),
+                                    PlaybackEvent::OutputDevicesChanged(devices.clone()),
                                 ));
+                            }
 
-                                if let Some(updated_preferences) =
-                                    refresh.updated_preferences.clone()
-                                {
-                                    let settings_snapshot =
-                                        settings.update_playback(updated_preferences).await;
-                                    let _ = events.send(AppEvent::Settings(settings_snapshot));
+                            match playback.handle_output_device_change(&devices).await {
+                                Ok(Some(refresh)) => {
+                                    let _ = events.send(AppEvent::Playback(
+                                        PlaybackEvent::SnapshotChanged(
+                                            refresh.playback_snapshot.clone(),
+                                        ),
+                                    ));
+
+                                    if let Some(updated_preferences) =
+                                        refresh.updated_preferences.clone()
+                                    {
+                                        let settings_snapshot =
+                                            settings.update_playback(updated_preferences).await;
+                                        let _ = events.send(AppEvent::Settings(settings_snapshot));
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    eprintln!("failed to refresh output device state: {error}");
                                 }
                             }
-                            Ok(None) => {}
-                            Err(error) => {
-                                eprintln!("failed to refresh output device state: {error}");
-                            }
                         }
-                    }
-                });
-            })
-            .expect("failed to spawn aria-output-device-monitor");
+                    });
+                })
+                .expect("failed to spawn aria-output-device-monitor");
+        }
     }
 
     pub fn get_remote_targets(&self) -> Result<Vec<RemoteTarget>, AppCoreError> {

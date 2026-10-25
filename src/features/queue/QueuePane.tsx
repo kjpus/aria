@@ -9,6 +9,7 @@ type QueuePaneProps = {
   playback: PlaybackSnapshot;
   tracks: ScannedTrack[];
   onClearQueue: () => void | Promise<void>;
+  onPlayQueueIndex: (index: number) => void | Promise<void>;
   onRestoreOrder: () => void | Promise<void>;
   onShuffle: () => void | Promise<void>;
   onOpenAlbum: (albumId: string) => void;
@@ -18,6 +19,7 @@ type QueuePaneProps = {
 type QueueContextMenuState = {
   trackId: string;
   albumId: string | null;
+  index: number;
   x: number;
   y: number;
 };
@@ -26,6 +28,7 @@ export function QueuePane({
   playback,
   tracks,
   onClearQueue,
+  onPlayQueueIndex,
   onRestoreOrder,
   onShuffle,
   onOpenAlbum,
@@ -127,11 +130,14 @@ export function QueuePane({
                 playback={playback}
                 queuedTrack={track}
                 scannedTrack={trackLookup.get(track.id) ?? null}
+                onPlayQueueIndex={onPlayQueueIndex}
                 onContextMenu={(event, trackId, albumId) => {
                   event.preventDefault();
+                  event.stopPropagation();
                   setContextMenu({
                     trackId,
                     albumId,
+                    index,
                     x: Math.min(event.clientX, window.innerWidth - 240),
                     y: Math.min(event.clientY, window.innerHeight - 140),
                   });
@@ -147,6 +153,15 @@ export function QueuePane({
             ref={menuRef}
             style={{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }}
           >
+            <button
+              onClick={() => {
+                void onPlayQueueIndex(contextMenu.index);
+                setContextMenu(null);
+              }}
+              type="button"
+            >
+              Play
+            </button>
             <button
               onClick={() => {
                 onOpenTrack(contextMenu.trackId);
@@ -181,6 +196,7 @@ type QueueRowProps = {
   playback: PlaybackSnapshot;
   index: number;
   currentTrackRef: RefObject<HTMLLIElement> | null;
+  onPlayQueueIndex: (index: number) => void | Promise<void>;
   onContextMenu: (event: React.MouseEvent, trackId: string, albumId: string | null) => void;
 };
 
@@ -190,6 +206,7 @@ function QueueRow({
   playback,
   index,
   currentTrackRef,
+  onPlayQueueIndex,
   onContextMenu,
 }: QueueRowProps) {
   const summary = buildQueueSummary(queuedTrack, scannedTrack);
@@ -201,9 +218,21 @@ function QueueRow({
   return (
     <li
       ref={currentTrackRef}
+      onClick={() => void onPlayQueueIndex(index)}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          void onPlayQueueIndex(index);
+        }
+      }}
+      tabIndex={0}
+      role="button"
+      aria-label={`Play ${queuedTrack.title} and subsequent tracks`}
+      title="Click to play from this track"
       onContextMenu={(event) => onContextMenu(event, queuedTrack.id, albumId)}
       className={[
         'queue-list__item',
+        'queue-list__item--playable',
         playback.currentTrack?.id === queuedTrack.id ? 'queue-list__item--current' : '',
         playback.currentQueueIndex !== null && index < playback.currentQueueIndex
           ? 'queue-list__item--played'

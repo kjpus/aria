@@ -42,6 +42,7 @@ import {
   openDirectory,
   pickDirectory,
   play,
+  playQueueIndex,
   playTrack,
   previousTrack,
   regeneratePlaylistIcon,
@@ -181,6 +182,8 @@ export function App() {
   const [draftCatalogRules, setDraftCatalogRules] = useState<CatalogRule[]>([]);
   const [outputDevices, setOutputDevices] = useState<OutputDeviceSnapshot[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [isErrorExpanded, setIsErrorExpanded] = useState(false);
+  const [errorCopied, setErrorCopied] = useState(false);
   const playbackPreferencesRequestId = useRef(0);
   const [playlistPickerState, setPlaylistPickerState] = useState<{
     trackIds: string[];
@@ -1080,6 +1083,18 @@ export function App() {
     }
   }
 
+  async function handlePlayQueueIndex(index: number) {
+    try {
+      const playback = await playQueueIndex(index);
+      setBootstrap((current) =>
+        current ? { ...current, playback } : current,
+      );
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   async function handleSaveMappings() {
     try {
       const library = await setFieldMappings(draftMappings);
@@ -1608,15 +1623,38 @@ export function App() {
               ) : null}
               {error ? (
                 <div
-                  className="device-chip workspace__status-chip workspace__status-chip--error"
+                  className={`device-chip workspace__status-chip workspace__status-chip--error ${
+                    isErrorExpanded ? 'workspace__status-chip--expanded' : ''
+                  }`}
+                  onClick={() => setIsErrorExpanded((prev) => !prev)}
                   title={error}
+                  role="alert"
                 >
                   <span>{error}</span>
                   <button
+                    aria-label="Copy error"
+                    className="ghost-button workspace__status-chip-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (navigator.clipboard?.writeText) {
+                        navigator.clipboard.writeText(error).then(() => {
+                          setErrorCopied(true);
+                          setTimeout(() => setErrorCopied(false), 2000);
+                        });
+                      }
+                    }}
+                    title="Copy full error message"
+                    type="button"
+                  >
+                    {errorCopied ? 'Copied' : 'Copy'}
+                  </button>
+                  <button
                     aria-label="Dismiss error"
-                    className="ghost-button"
-                    onClick={() => {
+                    className="ghost-button workspace__status-chip-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
                       setError(null);
+                      setIsErrorExpanded(false);
                       setActiveUploadProgress(null);
                     }}
                     title="Dismiss"
@@ -1819,6 +1857,7 @@ export function App() {
                 onClearQueue={handleClearQueue}
                 onOpenAlbum={handleOpenAlbum}
                 onOpenTrack={handleOpenTrack}
+                onPlayQueueIndex={handlePlayQueueIndex}
                 onRestoreOrder={handleRestoreQueueOrder}
                 onShuffle={handleShuffleQueue}
                 playback={bootstrap.playback}

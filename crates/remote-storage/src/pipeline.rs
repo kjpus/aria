@@ -898,13 +898,31 @@ pub async fn sync_remote_library(
 
     let total_albums = master_index.albums.len();
 
-    // Early exit: if the master index has not changed since our last sync and local tracks exist
+    // Ensure artwork cache directory exists
+    let _ = tokio::fs::create_dir_all(artwork_cache_dir).await;
+
+    // Check if any album that declares artwork is missing its cached image on disk
+    let has_missing_artwork = master_index.albums.iter().any(|summary| {
+        if summary.artwork_file_name.is_some() {
+            let clean_album_id: String = summary
+                .album_id
+                .chars()
+                .map(|ch| if ch.is_alphanumeric() || ch == '-' || ch == '_' { ch } else { '_' })
+                .collect();
+            let target_art_file = artwork_cache_dir.join(format!("{clean_album_id}.jpg"));
+            !target_art_file.exists()
+        } else {
+            false
+        }
+    });
+
+    // Early exit: only if the master index has not changed since our last sync,
+    // local tracks exist, AND all declared artwork files exist locally
     if let Some(last_sync) = target_last_synced_at {
-        if last_sync == master_index.updated_at && !existing_remote_track_ids.is_empty() {
+        if last_sync == master_index.updated_at && !existing_remote_track_ids.is_empty() && !has_missing_artwork {
             tracing::info!(
-                "Target '{}' master index unchanged since last sync ({}), early exiting.",
-                target.name,
-                last_sync
+                "Target '{}' master index unchanged and all artwork cached, early exiting.",
+                target.name
             );
             if let Some(ref tx) = progress_tx {
                 let _ = tx.send(RemoteSyncProgressEvent {
@@ -927,9 +945,6 @@ pub async fn sync_remote_library(
             });
         }
     }
-
-    // Ensure artwork cache directory exists
-    let _ = tokio::fs::create_dir_all(artwork_cache_dir).await;
 
     // Delta filtering: find which albums need downloading
     let mut albums_to_fetch = Vec::new();
@@ -991,7 +1006,7 @@ pub async fn sync_remote_library(
     }
 
     let completed_counter = Arc::new(AtomicUsize::new(already_skipped_count));
-    const CONCURRENCY_LIMIT: usize = 8;
+    const CONCURRENCY_LIMIT: usize = 3;
 
     let fetched_albums: Vec<Option<FetchedAlbum>> = stream::iter(albums_to_fetch)
         .map(|summary| {
@@ -1015,7 +1030,8 @@ pub async fn sync_remote_library(
                     });
                 }
 
-                let manifest_path = format!("{}/aria-manifest.json", summary.relative_folder);
+                let rel_folder = summary.relative_folder.trim_matches(['/', '\\']);
+                let manifest_path = format!("{rel_folder}/aria-manifest.json");
                 let manifest_bytes = match backend.read_bytes(&manifest_path).await {
                     Ok(bytes) => bytes,
                     Err(e) => {
@@ -1054,7 +1070,7 @@ pub async fn sync_remote_library(
                     if target_art_file.exists() {
                         local_art_path = Some(target_art_file.to_string_lossy().to_string());
                     } else {
-                        let remote_art_path = format!("{}/{}", summary.relative_folder, art_file_name);
+                        let remote_art_path = format!("{rel_folder}/{art_file_name}");
                         if let Ok(art_bytes) = backend.read_bytes(&remote_art_path).await {
                             if let Ok(()) = tokio::fs::write(&target_art_file, &art_bytes).await {
                                 local_art_path = Some(target_art_file.to_string_lossy().to_string());
