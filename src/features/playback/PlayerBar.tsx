@@ -254,9 +254,9 @@ export function PlayerBar({
             <button
               aria-label="Buffering"
               className="player-bar__control-button player-bar__control-button--primary"
-              disabled
-              style={{ opacity: 0.8 }}
-              title="Buffering remote track..."
+              onClick={onStop}
+              style={{ opacity: 0.9 }}
+              title="Buffering remote track... Click to cancel"
               type="button"
             >
               <span

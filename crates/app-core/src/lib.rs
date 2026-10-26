@@ -58,7 +58,7 @@ impl AppCore {
     pub fn new() -> Result<Self, AppCoreError> {
         let database = AppDatabase::new_default()?;
         let persisted = database.load_state()?;
-        let (events, _) = broadcast::channel(64);
+        let (events, _) = broadcast::channel(512);
         let playback = PlaybackService::with_session(
             persisted.settings.playback.clone(),
             persisted.playback,
@@ -425,7 +425,14 @@ impl AppCore {
 
     pub async fn play(&self) -> Result<PlaybackSnapshot, AppCoreError> {
         let session = self.playback.persisted_session();
-        if let Some(idx) = session.current_queue_index {
+        let target_idx = session.current_queue_index.or_else(|| {
+            if !session.queue.is_empty() {
+                Some(0)
+            } else {
+                None
+            }
+        });
+        if let Some(idx) = target_idx {
             if let Some(mut req) = session.queue.get(idx).cloned() {
                 let window: Vec<String> = session
                     .queue

@@ -584,10 +584,12 @@ fn run_android_exclusive_thread(
     // Spawn the background decode worker
     let stop_flag = Arc::new(AtomicBool::new(false));
     let (decode_thread, chunk_rx) = spawn_decode_worker(decoder, active_format, stop_flag.clone());
+    let mut chunk_rx = Some(chunk_rx);
 
     let mut is_paused = start_paused;
+    let mut reached_eos = false;
 
-    loop {
+    while !reached_eos {
         // Handle pending commands non-blocking
         while let Ok(cmd) = commands.try_recv() {
             match cmd {
@@ -601,6 +603,7 @@ fn run_android_exclusive_thread(
                 }
                 ExclusiveCommand::Terminate => {
                     stop_flag.store(true, Ordering::Relaxed);
+                    drop(chunk_rx.take());
                     let _ = env.call_method(&player_obj, "close", "()Z", &[]);
                     let _ = env.exception_clear();
                     let _ = decode_thread.join();
@@ -620,6 +623,7 @@ fn run_android_exclusive_thread(
                     ExclusiveCommand::Pause => {}
                     ExclusiveCommand::Terminate => {
                         stop_flag.store(true, Ordering::Relaxed);
+                        drop(chunk_rx.take());
                         let _ = env.call_method(&player_obj, "close", "()Z", &[]);
                         let _ = env.exception_clear();
                         let _ = decode_thread.join();
@@ -630,8 +634,13 @@ fn run_android_exclusive_thread(
             continue;
         }
 
+        let rx = match chunk_rx.as_ref() {
+            Some(rx) => rx,
+            None => break,
+        };
+
         // Receive next chunk
-        match chunk_rx.recv_timeout(Duration::from_millis(50)) {
+        match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(Ok(DecodedChunk::Data(mut data))) => {
                 let volume = current_volume(&state);
                 if volume < 0.999_9 && !data.is_empty() {
@@ -665,32 +674,103 @@ fn run_android_exclusive_thread(
                 }
             }
             Ok(Ok(DecodedChunk::EndOfStream)) => {
-                state.finished.store(true, Ordering::Relaxed);
-                if let Ok(cmd) = commands.recv() {
-                    if let ExclusiveCommand::Terminate = cmd {
-                        break;
-                    }
-                }
+                reached_eos = true;
                 break;
             }
             Ok(Err(_)) => {
-                state.finished.store(true, Ordering::Relaxed);
+                reached_eos = true;
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 continue;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                state.finished.store(true, Ordering::Relaxed);
+                reached_eos = true;
                 break;
             }
         }
     }
 
+    // Stop and join decode thread cleanly by dropping the channel receiver first
     stop_flag.store(true, Ordering::Relaxed);
+    drop(chunk_rx.take());
+    let _ = decode_thread.join();
+
+    // If we reached end of stream naturally, initiate AudioTrack drain so remaining
+    // buffered audio plays out completely before signaling finished.
+    if reached_eos {
+        let _ = env.call_method(&player_obj, "endOfStream", "()Z", &[]);
+        let _ = env.exception_clear();
+
+        let drain_start = std::time::Instant::now();
+        let max_drain_duration = Duration::from_secs(15);
+
+        loop {
+            // Process any incoming commands during drain
+            while let Ok(cmd) = commands.try_recv() {
+                match cmd {
+                    ExclusiveCommand::Play => {
+                        let _ = env.call_method(&player_obj, "play", "()Z", &[]);
+                    }
+                    ExclusiveCommand::Pause => {
+                        let _ = env.call_method(&player_obj, "pause", "()Z", &[]);
+                    }
+                    ExclusiveCommand::Terminate => {
+                        let _ = env.call_method(&player_obj, "close", "()Z", &[]);
+                        let _ = env.exception_clear();
+                        return;
+                    }
+                }
+            }
+
+            // Update position during drain
+            if let Ok(pos_val) = env.call_method(&player_obj, "getPositionMs", "()J", &[]) {
+                if let Ok(pos_ms) = pos_val.j() {
+                    if pos_ms >= 0 {
+                        state.position_ms.store(pos_ms as u64, Ordering::Relaxed);
+                    }
+                }
+            } else {
+                let _ = env.exception_clear();
+            }
+
+            // Check if AudioTrack finished playing
+            let finished = match env.call_method(&player_obj, "isFinished", "()Z", &[]) {
+                Ok(val) => val.z().unwrap_or(true),
+                Err(_) => {
+                    let _ = env.exception_clear();
+                    true
+                }
+            };
+
+            if finished || drain_start.elapsed() > max_drain_duration {
+                state.finished.store(true, Ordering::Relaxed);
+                break;
+            }
+
+            thread::sleep(Duration::from_millis(30));
+        }
+
+        // Wait for Terminate command (from PlaybackService advancing or stopping)
+        // or a brief timeout before closing the player object.
+        loop {
+            match commands.recv_timeout(Duration::from_millis(200)) {
+                Ok(ExclusiveCommand::Terminate) => break,
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if drain_start.elapsed() > max_drain_duration + Duration::from_secs(2) {
+                        break;
+                    }
+                }
+            }
+        }
+    } else {
+        state.finished.store(true, Ordering::Relaxed);
+    }
+
     let _ = env.call_method(&player_obj, "close", "()Z", &[]);
     let _ = env.exception_clear();
-    let _ = decode_thread.join();
 }
 
 fn current_volume(state: &ExclusiveState) -> f32 {

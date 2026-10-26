@@ -23,8 +23,18 @@ pub fn run() {
             let mut events = setup_core.subscribe();
 
             tauri::async_runtime::spawn(async move {
-                while let Ok(event) = events.recv().await {
-                    let _ = app_handle.emit("aria://app-event", event);
+                loop {
+                    match events.recv().await {
+                        Ok(event) => {
+                            let _ = app_handle.emit("aria://app-event", event);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                            eprintln!("[tauri] app-event forwarder lagged by {missed} events; continuing");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            break;
+                        }
+                    }
                 }
             });
 

@@ -253,10 +253,40 @@ class AriaBitPerfectPlayer {
         val track = audioTrack ?: return false
         return try {
             track.flush()
+            framesWritten = 0
             true
         } catch (e: Exception) {
             Log.e(TAG, "Error flushing audio track", e)
             false
+        }
+    }
+
+    fun endOfStream(): Boolean {
+        val track = audioTrack ?: return true
+        return try {
+            if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                track.stop()
+            }
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Error initiating end of stream drain", e)
+            false
+        }
+    }
+
+    fun isFinished(): Boolean {
+        val track = audioTrack ?: return true
+        return try {
+            if (track.playState == AudioTrack.PLAYSTATE_STOPPED) {
+                return true
+            }
+            if (framesWritten <= 0) {
+                return true
+            }
+            val head = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+            head >= framesWritten
+        } catch (e: Exception) {
+            true
         }
     }
 
@@ -278,11 +308,16 @@ class AriaBitPerfectPlayer {
         return try {
             audioTrack?.let { track ->
                 try {
+                    track.pause()
+                    track.flush()
+                } catch (_: Exception) {}
+                try {
                     track.stop()
                 } catch (_: Exception) {}
                 track.release()
             }
             audioTrack = null
+            framesWritten = 0
 
             if (Build.VERSION.SDK_INT >= 34 && mixerAttributesConfigured) {
                 val am = audioManager
