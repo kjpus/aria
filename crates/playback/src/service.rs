@@ -897,7 +897,7 @@ fn open_shared_output(
 
     #[cfg(target_os = "android")]
     {
-        if target.snapshot.is_bluetooth {
+        if target.snapshot.is_bluetooth || exclusive_android::has_bluetooth_output() {
             exclusive_android::optimize_bluetooth_audio();
         }
         // 50ms default is too small on Android and causes buffer underruns (xruns).
@@ -922,6 +922,15 @@ fn list_output_devices() -> Result<Vec<OutputDeviceSnapshot>, PlaybackError> {
     let mut devices = host
         .output_devices()
         .map_err(|error| PlaybackError::Output(error.to_string()))?
+        .filter(|device| {
+            if let Ok(desc) = device.description() {
+                let name = desc.name().to_lowercase();
+                if name.contains("sco") || name.contains("handsfree") || name.contains("telephony") || name.contains("voice") {
+                    return false;
+                }
+            }
+            true
+        })
         .filter_map(|device| {
             output_device_snapshot(&device, default_device_id.as_deref(), false).ok()
         })
@@ -975,7 +984,9 @@ fn resolve_output_target(
     }
 
     // Approach 3: If no specific device is selected (or requested device is missing in non-strict mode),
-    // and an external USB DAC or Bluetooth device is present, automatically route to it.
+    // and an external USB DAC is present, automatically route to the USB DAC.
+    // For Bluetooth, do not override with a pinned hardware port ID: Android's OS AudioPolicy
+    // automatically routes default_output_device() to the active Bluetooth A2DP device.
     #[cfg(target_os = "android")]
     {
         if let Some(usb_device) = find_usb_output_device(&host) {
@@ -986,17 +997,6 @@ fn resolve_output_target(
             )?;
             return Ok(OutputTarget {
                 device: usb_device,
-                snapshot,
-            });
-        }
-        if let Some(bt_device) = find_bluetooth_output_device(&host) {
-            let snapshot = output_device_snapshot(
-                &bt_device,
-                default_device_id.as_deref(),
-                preferences.exclusive_mode,
-            )?;
-            return Ok(OutputTarget {
-                device: bt_device,
                 snapshot,
             });
         }
@@ -1048,11 +1048,29 @@ fn is_usb_device_description(desc: &DeviceDescription) -> bool {
 
 #[allow(dead_code)]
 fn is_bluetooth_device_description(desc: &DeviceDescription) -> bool {
+    let name = desc.name().to_lowercase();
+    if name.contains("sco") || name.contains("handsfree") || name.contains("telephony") || name.contains("voice") || name.contains("call") {
+        return false;
+    }
+
+    for candidate in desc.extended() {
+        let lower = candidate.to_lowercase();
+        if lower.contains("sco") || lower.contains("handsfree") || lower.contains("telephony") || lower.contains("voice") || lower.contains("call") {
+            return false;
+        }
+    }
+
+    if let Some(driver) = desc.driver() {
+        let lower = driver.to_lowercase();
+        if lower.contains("sco") || lower.contains("handsfree") || lower.contains("telephony") || lower.contains("voice") || lower.contains("call") {
+            return false;
+        }
+    }
+
     if desc.interface_type() == cpal::InterfaceType::Bluetooth {
         return true;
     }
 
-    let name = desc.name().to_lowercase();
     if name.contains("bluetooth") || name.contains("a2dp") || name.contains("ble") {
         return true;
     }
@@ -1130,7 +1148,9 @@ fn output_device_snapshot(
     #[cfg(target_os = "android")]
     {
         if !is_bluetooth {
-            if let Ok(id_int) = id.parse::<i32>() {
+            if exclusive_android::has_bluetooth_output() {
+                is_bluetooth = true;
+            } else if let Ok(id_int) = id.parse::<i32>() {
                 if exclusive_android::is_bluetooth_device_id(id_int) {
                     is_bluetooth = true;
                 }
@@ -1190,7 +1210,7 @@ fn exclusive_capable_for_preferences(preferences: &PlaybackPreferences) -> bool 
             #[cfg(target_os = "android")]
             {
                 let host = cpal::default_host();
-                find_usb_output_device(&host).is_some() || find_bluetooth_output_device(&host).is_some()
+                find_usb_output_device(&host).is_some()
             }
             #[cfg(not(any(target_os = "windows", target_os = "android")))]
             {
@@ -1209,8 +1229,8 @@ fn is_exclusive_capable_device(device_id: &str, is_usb: bool, is_bluetooth: bool
 
     #[cfg(target_os = "android")]
     {
-        let _ = device_id;
-        is_usb || is_bluetooth
+        let _ = (device_id, is_bluetooth);
+        is_usb
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "android")))]
@@ -1231,14 +1251,9 @@ fn is_exclusive_capable_device_id(device_id: &str) -> bool {
         let host = cpal::default_host();
         if let Some(device) = output_device_by_id(&host, device_id) {
             if let Ok(desc) = device.description() {
-                if is_usb_device_description(&desc) || is_bluetooth_device_description(&desc) {
+                if is_usb_device_description(&desc) {
                     return true;
                 }
-            }
-        }
-        if let Ok(id_int) = device_id.parse::<i32>() {
-            if exclusive_android::is_bluetooth_device_id(id_int) {
-                return true;
             }
         }
         false
@@ -1483,5 +1498,18 @@ mod tests {
             .interface_type(cpal::InterfaceType::BuiltIn)
             .build();
         assert!(!is_bluetooth_device_description(&desc_speaker));
+    }
+
+    #[test]
+    fn test_is_bluetooth_device_description_rejects_sco_and_handsfree() {
+        let desc_sco = rodio::cpal::DeviceDescriptionBuilder::new("BT SCO Headset")
+            .interface_type(cpal::InterfaceType::Bluetooth)
+            .build();
+        assert!(!is_bluetooth_device_description(&desc_sco));
+
+        let desc_hf = rodio::cpal::DeviceDescriptionBuilder::new("HandsFreeLink")
+            .interface_type(cpal::InterfaceType::Bluetooth)
+            .build();
+        assert!(!is_bluetooth_device_description(&desc_hf));
     }
 }

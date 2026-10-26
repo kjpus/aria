@@ -36,6 +36,12 @@ class AriaBitPerfectPlayer {
     private var bytesPerFrame: Int = 4
     private var framesWritten: Long = 0
 
+    private fun isScoDevice(device: AudioDeviceInfo): Boolean {
+        if (device.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) return true
+        val name = device.productName?.toString()?.lowercase() ?: ""
+        return name.contains("sco") || name.contains("handsfree") || name.contains("telephony")
+    }
+
     fun open(
         context: Context,
         deviceId: Int,
@@ -53,19 +59,21 @@ class AriaBitPerfectPlayer {
             this.channelCount = channelCount
 
             // Find target output device:
-            // 1. Explicit deviceId if provided (> 0)
+            // 1. Explicit deviceId if provided (> 0) and not an SCO voice profile
             // 2. USB device fallback (external DAC)
-            // 3. Bluetooth device fallback (HD audio headphones/earbuds)
+            // 3. Bluetooth A2DP device fallback (HD audio headphones/earbuds)
             val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            val usbDevice = devices.find {
+                it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET
+            }
+            val a2dpDevice = devices.find {
+                AriaBluetoothAudioHelper.isBluetoothDevice(it) && !isScoDevice(it)
+            }
             val device = if (deviceId > 0) {
-                devices.find { it.id == deviceId }
+                devices.find { it.id == deviceId && !isScoDevice(it) }
             } else {
                 null
-            } ?: devices.find {
-                it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET
-            } ?: devices.find {
-                AriaBluetoothAudioHelper.isBluetoothDevice(it)
-            }
+            } ?: usbDevice ?: a2dpDevice
 
             if (device == null) {
                 Log.w(TAG, "No suitable audio output device found for high-res routing")
@@ -203,11 +211,17 @@ class AriaBitPerfectPlayer {
                 .setTransferMode(AudioTrack.MODE_STREAM)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                builder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                if (isBluetooth) {
+                    builder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_NONE)
+                } else {
+                    builder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                }
             }
 
             val track = builder.build()
-            track.preferredDevice = device
+            if (device != null && !isBluetooth) {
+                track.preferredDevice = device
+            }
 
             if (track.state != AudioTrack.STATE_INITIALIZED) {
                 Log.e(TAG, "AudioTrack failed to initialize (state=${track.state})")
