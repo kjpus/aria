@@ -13,9 +13,18 @@ field-mapping-*.png
 
 # Generated app assets and docs previews
 src-tauri/.cache/
-src-tauri/gen/
+src-tauri/gen/schemas/
 docs/icon-concepts/
 docs/field-mapping-preview.html
+
+# Android build outputs and caches (supplements nested gen/android .gitignore)
+src-tauri/gen/android/.gradle/
+src-tauri/gen/android/build/
+src-tauri/gen/android/app/build/
+src-tauri/gen/android/app/.cxx/
+src-tauri/gen/android/app/src/main/jniLibs/
+src-tauri/gen/android/local.properties
+src-tauri/gen/android/.idea/
 
 # Editor and OS noise
 .DS_Store
