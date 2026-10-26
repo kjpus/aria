@@ -41,6 +41,9 @@ pub enum AppCoreError {
     Remote(String),
 }
 
+static GLOBAL_PENDING_GDRIVE_AUTH: Mutex<Option<PendingAuthFlow>> = Mutex::const_new(None);
+static GLOBAL_LAST_COMPLETED_GDRIVE_TARGET: Mutex<Option<RemoteTarget>> = Mutex::const_new(None);
+
 #[derive(Clone)]
 pub struct AppCore {
     events: broadcast::Sender<AppEvent>,
@@ -49,7 +52,6 @@ pub struct AppCore {
     playlists: PlaylistService,
     settings: SettingsStore,
     database: AppDatabase,
-    pending_gdrive_auth: Arc<Mutex<Option<PendingAuthFlow>>>,
     cache_manager: Arc<RemoteCacheManager>,
     prefetcher: Arc<PlaybackPrefetcher>,
 }
@@ -87,7 +89,6 @@ impl AppCore {
             playlists: PlaylistService::with_snapshot(persisted.playlists),
             settings: SettingsStore::with_snapshot(persisted.settings),
             database: database.clone(),
-            pending_gdrive_auth: Arc::new(Mutex::new(None)),
             cache_manager,
             prefetcher,
         };
@@ -1107,21 +1108,66 @@ impl AppCore {
         &self,
         client_id: String,
         client_secret: Option<String>,
+        target_name: Option<String>,
+        root_folder_name: Option<String>,
+        storage_limit_bytes: Option<u64>,
     ) -> Result<String, AppCoreError> {
         let auth_config = GoogleAuthConfig {
-            client_id,
-            client_secret,
+            client_id: client_id.clone(),
+            client_secret: client_secret.clone(),
         };
         let flow = PendingAuthFlow::start(auth_config).await?;
         let auth_url = flow.authorization_url.clone();
         let mut status_rx = flow.subscribe_status();
         let events = self.events.clone();
+        let database = self.database.clone();
+        let flow_client_id = flow.config().client_id.clone();
+        let flow_client_secret = flow.config().client_secret.clone();
+        let target_name_saved = target_name.clone();
+        let root_folder_saved = root_folder_name.clone();
 
         tokio::spawn(async move {
             loop {
-                if let Some(ref res) = *status_rx.borrow() {
+                let current_status = status_rx.borrow().clone();
+                if let Some(res) = current_status {
                     match res {
-                        Ok(_) => {
+                        Ok(tokens) => {
+                            // Automatically construct and persist the RemoteTarget immediately
+                            // as soon as the OAuth callback succeeds, so Android app pauses/resumes
+                            // or event races can never lose the authenticated target.
+                            if let Some(ref name) = target_name_saved {
+                                let folder = root_folder_saved
+                                    .as_deref()
+                                    .map(|s| s.trim())
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or("Aria")
+                                    .to_string();
+
+                                let stored_cfg = GoogleDriveStoredConfig {
+                                    client_id: flow_client_id.clone(),
+                                    client_secret: flow_client_secret.clone(),
+                                    access_token: Some(tokens.access_token.clone()),
+                                    refresh_token: tokens.refresh_token.clone(),
+                                    expires_at: Some(tokens.expires_at),
+                                    root_folder_name: folder,
+                                };
+
+                                let target = RemoteTarget {
+                                    id: format!("gdrive-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()),
+                                    name: name.clone(),
+                                    backend_type: RemoteBackendType::GoogleDrive,
+                                    storage_limit_bytes,
+                                    is_enabled: true,
+                                    config_json: serde_json::to_string(&stored_cfg).unwrap_or_default(),
+                                };
+
+                                if let Err(e) = database.save_remote_target(&target) {
+                                    eprintln!("[app-core] failed to auto-save Google Drive remote target: {e}");
+                                } else {
+                                    *GLOBAL_LAST_COMPLETED_GDRIVE_TARGET.lock().await = Some(target);
+                                }
+                            }
+
                             let _ = events.send(AppEvent::Remote(RemoteEvent::GoogleAuthCompleted(
                                 aria_domain::GoogleAuthCompletedEvent {
                                     success: true,
@@ -1146,8 +1192,8 @@ impl AppCore {
             }
         });
 
-        let mut pending = self.pending_gdrive_auth.lock().await;
-        *pending = Some(flow);
+        *GLOBAL_PENDING_GDRIVE_AUTH.lock().await = Some(flow);
+        *GLOBAL_LAST_COMPLETED_GDRIVE_TARGET.lock().await = None;
         Ok(auth_url)
     }
 
@@ -1157,11 +1203,38 @@ impl AppCore {
         root_folder_name: Option<String>,
         storage_limit_bytes: Option<u64>,
     ) -> Result<RemoteTarget, AppCoreError> {
-        let flow = {
-            let mut pending = self.pending_gdrive_auth.lock().await;
-            pending
-                .take()
-                .ok_or_else(|| AppCoreError::Remote("No pending Google Drive auth flow".into()))?
+        // 1. If target was already auto-saved when callback succeeded, return it immediately!
+        {
+            let last = GLOBAL_LAST_COMPLETED_GDRIVE_TARGET.lock().await;
+            if let Some(ref target) = *last {
+                return Ok(target.clone());
+            }
+        }
+
+        // 2. Otherwise complete using the pending flow
+        let flow_opt = {
+            let mut pending = GLOBAL_PENDING_GDRIVE_AUTH.lock().await;
+            pending.take()
+        };
+
+        let flow = match flow_opt {
+            Some(f) => f,
+            None => {
+                // Check if target with this name or any gdrive target already exists in database
+                if let Ok(targets) = self.database.load_remote_targets() {
+                    if let Some(existing) = targets.into_iter().find(|t| {
+                        t.backend_type == RemoteBackendType::GoogleDrive
+                            && (t.name == target_name || target_name.is_empty())
+                    }) {
+                        return Ok(existing);
+                    }
+                }
+                let last = GLOBAL_LAST_COMPLETED_GDRIVE_TARGET.lock().await;
+                if let Some(ref target) = *last {
+                    return Ok(target.clone());
+                }
+                return Err(AppCoreError::Remote("No pending Google Drive auth flow".into()));
+            }
         };
 
         let client_id = flow.config().client_id.clone();
@@ -1191,6 +1264,10 @@ impl AppCore {
         };
 
         self.save_remote_target(target.clone())?;
+
+        let mut last = GLOBAL_LAST_COMPLETED_GDRIVE_TARGET.lock().await;
+        *last = Some(target.clone());
+
         Ok(target)
     }
 

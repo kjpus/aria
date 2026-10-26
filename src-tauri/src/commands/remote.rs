@@ -40,8 +40,20 @@ pub async fn start_gdrive_auth_flow(
     state: State<'_, AppState>,
     client_id: String,
     client_secret: Option<String>,
+    target_name: Option<String>,
+    root_folder_name: Option<String>,
+    storage_limit_bytes: Option<u64>,
 ) -> Result<String, CommandError> {
-    let auth_url = state.core.start_gdrive_auth_flow(client_id, client_secret).await?;
+    let auth_url = state
+        .core
+        .start_gdrive_auth_flow(
+            client_id,
+            client_secret,
+            target_name,
+            root_folder_name,
+            storage_limit_bytes,
+        )
+        .await?;
     Ok(auth_url)
 }
 

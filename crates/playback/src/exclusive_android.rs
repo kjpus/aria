@@ -12,7 +12,7 @@ use std::{
 };
 
 use jni::{
-    objects::{JClass, JObject, JValue},
+    objects::{JClass, JObject, JString, JValue},
     JavaVM,
 };
 use symphonia::core::{
@@ -839,5 +839,175 @@ fn apply_volume(bytes: &mut [u8], active_format: ActivePcmFormat, volume: f32) {
                     as i32;
             }
         }
+    }
+}
+
+pub fn get_active_bluetooth_description() -> Option<String> {
+    let ctx = ndk_context::android_context();
+    let vm = match unsafe { JavaVM::from_raw(ctx.vm().cast()) } {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    let mut env = match vm.attach_current_thread() {
+        Ok(e) => e,
+        Err(_) => return None,
+    };
+    let app_context = unsafe { JObject::from_raw(ctx.context().cast()) };
+
+    let class_loader = match env
+        .call_method(&app_context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+        .and_then(|v| v.l())
+    {
+        Ok(cl) => cl,
+        Err(_) => return None,
+    };
+
+    let class_name = match env.new_string("com.aria.player.AriaBluetoothAudioHelper") {
+        Ok(cn) => cn,
+        Err(_) => return None,
+    };
+
+    let helper_class_obj = match env
+        .call_method(
+            &class_loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[(&class_name).into()],
+        )
+        .and_then(|v| v.l())
+    {
+        Ok(obj) => obj,
+        Err(_) => return None,
+    };
+
+    let helper_class: JClass = helper_class_obj.into();
+    let res = match env.call_static_method(
+        &helper_class,
+        "getActiveBluetoothDescription",
+        "(Landroid/content/Context;)Ljava/lang/String;",
+        &[(&app_context).into()],
+    ) {
+        Ok(val) => match val.l() {
+            Ok(obj) => obj,
+            Err(_) => return None,
+        },
+        Err(_) => return None,
+    };
+
+    if res.is_null() {
+        return None;
+    }
+
+    let jstr: JString = res.into();
+    env.get_string(&jstr).ok().map(|s| s.into())
+}
+
+pub fn optimize_bluetooth_audio() -> Option<String> {
+    let ctx = ndk_context::android_context();
+    let vm = match unsafe { JavaVM::from_raw(ctx.vm().cast()) } {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    let mut env = match vm.attach_current_thread() {
+        Ok(e) => e,
+        Err(_) => return None,
+    };
+    let app_context = unsafe { JObject::from_raw(ctx.context().cast()) };
+
+    let class_loader = match env
+        .call_method(&app_context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+        .and_then(|v| v.l())
+    {
+        Ok(cl) => cl,
+        Err(_) => return None,
+    };
+
+    let class_name = match env.new_string("com.aria.player.AriaBluetoothAudioHelper") {
+        Ok(cn) => cn,
+        Err(_) => return None,
+    };
+
+    let helper_class_obj = match env
+        .call_method(
+            &class_loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[(&class_name).into()],
+        )
+        .and_then(|v| v.l())
+    {
+        Ok(obj) => obj,
+        Err(_) => return None,
+    };
+
+    let helper_class: JClass = helper_class_obj.into();
+    let res = match env.call_static_method(
+        &helper_class,
+        "optimizeBluetoothAudio",
+        "(Landroid/content/Context;)Ljava/lang/String;",
+        &[(&app_context).into()],
+    ) {
+        Ok(val) => match val.l() {
+            Ok(obj) => obj,
+            Err(_) => return None,
+        },
+        Err(_) => return None,
+    };
+
+    if res.is_null() {
+        return None;
+    }
+
+    let jstr: JString = res.into();
+    env.get_string(&jstr).ok().map(|s| s.into())
+}
+
+pub fn is_bluetooth_device_id(device_id_int: i32) -> bool {
+    let ctx = ndk_context::android_context();
+    let vm = match unsafe { JavaVM::from_raw(ctx.vm().cast()) } {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let mut env = match vm.attach_current_thread() {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    let app_context = unsafe { JObject::from_raw(ctx.context().cast()) };
+
+    let class_loader = match env
+        .call_method(&app_context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+        .and_then(|v| v.l())
+    {
+        Ok(cl) => cl,
+        Err(_) => return false,
+    };
+
+    let class_name = match env.new_string("com.aria.player.AriaBluetoothAudioHelper") {
+        Ok(cn) => cn,
+        Err(_) => return false,
+    };
+
+    let helper_class_obj = match env
+        .call_method(
+            &class_loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[(&class_name).into()],
+        )
+        .and_then(|v| v.l())
+    {
+        Ok(obj) => obj,
+        Err(_) => return false,
+    };
+
+    let helper_class: JClass = helper_class_obj.into();
+    match env.call_static_method(
+        &helper_class,
+        "isBluetoothDeviceId",
+        "(Landroid/content/Context;I)Z",
+        &[(&app_context).into(), JValue::Int(device_id_int)],
+    ) {
+        Ok(v) => v.z().unwrap_or(false),
+        Err(_) => false,
     }
 }

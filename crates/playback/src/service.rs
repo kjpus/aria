@@ -897,6 +897,9 @@ fn open_shared_output(
 
     #[cfg(target_os = "android")]
     {
+        if target.snapshot.is_bluetooth {
+            exclusive_android::optimize_bluetooth_audio();
+        }
         // 50ms default is too small on Android and causes buffer underruns (xruns).
         // 4096 frames (~90-100ms) provides reliable stability for media playback.
         builder = builder.with_buffer_size(cpal::BufferSize::Fixed(4096));
@@ -972,18 +975,31 @@ fn resolve_output_target(
     }
 
     // Approach 3: If no specific device is selected (or requested device is missing in non-strict mode),
-    // and an external USB DAC is present, automatically route to the USB device.
+    // and an external USB DAC or Bluetooth device is present, automatically route to it.
     #[cfg(target_os = "android")]
-    if let Some(usb_device) = find_usb_output_device(&host) {
-        let snapshot = output_device_snapshot(
-            &usb_device,
-            default_device_id.as_deref(),
-            preferences.exclusive_mode,
-        )?;
-        return Ok(OutputTarget {
-            device: usb_device,
-            snapshot,
-        });
+    {
+        if let Some(usb_device) = find_usb_output_device(&host) {
+            let snapshot = output_device_snapshot(
+                &usb_device,
+                default_device_id.as_deref(),
+                preferences.exclusive_mode,
+            )?;
+            return Ok(OutputTarget {
+                device: usb_device,
+                snapshot,
+            });
+        }
+        if let Some(bt_device) = find_bluetooth_output_device(&host) {
+            let snapshot = output_device_snapshot(
+                &bt_device,
+                default_device_id.as_deref(),
+                preferences.exclusive_mode,
+            )?;
+            return Ok(OutputTarget {
+                device: bt_device,
+                snapshot,
+            });
+        }
     }
 
     let device = host
@@ -1031,12 +1047,63 @@ fn is_usb_device_description(desc: &DeviceDescription) -> bool {
 }
 
 #[allow(dead_code)]
+fn is_bluetooth_device_description(desc: &DeviceDescription) -> bool {
+    if desc.interface_type() == cpal::InterfaceType::Bluetooth {
+        return true;
+    }
+
+    let name = desc.name().to_lowercase();
+    if name.contains("bluetooth") || name.contains("a2dp") || name.contains("ble") {
+        return true;
+    }
+
+    for candidate in desc.extended() {
+        let lower = candidate.to_lowercase();
+        if lower.contains("bluetooth") || lower.contains("a2dp") || lower.contains("ble") {
+            return true;
+        }
+    }
+
+    if let Some(driver) = desc.driver() {
+        let lower = driver.to_lowercase();
+        if lower.contains("bluetooth") || lower.contains("a2dp") || lower.contains("ble") {
+            return true;
+        }
+    }
+
+    false
+}
+
+#[allow(dead_code)]
 fn find_usb_output_device(host: &cpal::Host) -> Option<cpal::Device> {
     let devices = host.output_devices().ok()?;
     for device in devices {
         if let Ok(desc) = device.description() {
             if is_usb_device_description(&desc) {
                 return Some(device);
+            }
+        }
+    }
+    None
+}
+
+#[allow(dead_code)]
+fn find_bluetooth_output_device(host: &cpal::Host) -> Option<cpal::Device> {
+    let devices = host.output_devices().ok()?;
+    for device in devices {
+        if let Ok(desc) = device.description() {
+            if is_bluetooth_device_description(&desc) {
+                return Some(device);
+            }
+        }
+        #[cfg(target_os = "android")]
+        {
+            if let Ok(id) = device.id() {
+                if let Ok(id_int) = id.to_string().parse::<i32>() {
+                    if exclusive_android::is_bluetooth_device_id(id_int) {
+                        return Some(device);
+                    }
+                }
             }
         }
     }
@@ -1057,15 +1124,30 @@ fn output_device_snapshot(
         .to_string();
 
     let is_usb = is_usb_device_description(&description);
-    let exclusive_capable = is_exclusive_capable_device(&id, is_usb);
+    #[allow(unused_mut)]
+    let mut is_bluetooth = is_bluetooth_device_description(&description);
+
+    #[cfg(target_os = "android")]
+    {
+        if !is_bluetooth {
+            if let Ok(id_int) = id.parse::<i32>() {
+                if exclusive_android::is_bluetooth_device_id(id_int) {
+                    is_bluetooth = true;
+                }
+            }
+        }
+    }
+
+    let exclusive_capable = is_exclusive_capable_device(&id, is_usb, is_bluetooth);
 
     Ok(OutputDeviceSnapshot {
         is_default: default_device_id.as_deref() == Some(&id),
         id: id.clone(),
         name: preferred_output_device_name(&description),
-        backend: output_backend_label(exclusive_mode, is_usb),
+        backend: output_backend_label(exclusive_mode, is_usb, is_bluetooth),
         exclusive_capable,
         is_usb,
+        is_bluetooth,
     })
 }
 
@@ -1108,7 +1190,7 @@ fn exclusive_capable_for_preferences(preferences: &PlaybackPreferences) -> bool 
             #[cfg(target_os = "android")]
             {
                 let host = cpal::default_host();
-                find_usb_output_device(&host).is_some()
+                find_usb_output_device(&host).is_some() || find_bluetooth_output_device(&host).is_some()
             }
             #[cfg(not(any(target_os = "windows", target_os = "android")))]
             {
@@ -1118,22 +1200,22 @@ fn exclusive_capable_for_preferences(preferences: &PlaybackPreferences) -> bool 
     }
 }
 
-fn is_exclusive_capable_device(device_id: &str, is_usb: bool) -> bool {
+fn is_exclusive_capable_device(device_id: &str, is_usb: bool, is_bluetooth: bool) -> bool {
     #[cfg(target_os = "windows")]
     {
-        let _ = is_usb;
+        let _ = (is_usb, is_bluetooth);
         is_wasapi_device_id(device_id)
     }
 
     #[cfg(target_os = "android")]
     {
         let _ = device_id;
-        is_usb
+        is_usb || is_bluetooth
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "android")))]
     {
-        let _ = (device_id, is_usb);
+        let _ = (device_id, is_usb, is_bluetooth);
         false
     }
 }
@@ -1149,7 +1231,14 @@ fn is_exclusive_capable_device_id(device_id: &str) -> bool {
         let host = cpal::default_host();
         if let Some(device) = output_device_by_id(&host, device_id) {
             if let Ok(desc) = device.description() {
-                return is_usb_device_description(&desc);
+                if is_usb_device_description(&desc) || is_bluetooth_device_description(&desc) {
+                    return true;
+                }
+            }
+        }
+        if let Ok(id_int) = device_id.parse::<i32>() {
+            if exclusive_android::is_bluetooth_device_id(id_int) {
+                return true;
             }
         }
         false
@@ -1162,7 +1251,7 @@ fn is_exclusive_capable_device_id(device_id: &str) -> bool {
     }
 }
 
-fn output_backend_label(exclusive_mode: bool, is_usb: bool) -> String {
+fn output_backend_label(exclusive_mode: bool, is_usb: bool, is_bluetooth: bool) -> String {
     if cfg!(target_os = "windows") {
         if exclusive_mode {
             "WASAPI exclusive".into()
@@ -1170,7 +1259,19 @@ fn output_backend_label(exclusive_mode: bool, is_usb: bool) -> String {
             "rodio / WASAPI shared".into()
         }
     } else if cfg!(target_os = "android") {
-        if exclusive_mode {
+        if is_bluetooth {
+            #[cfg(target_os = "android")]
+            {
+                if let Some(desc) = exclusive_android::get_active_bluetooth_description() {
+                    return format!("Android Bluetooth HD ({desc})");
+                }
+            }
+            if exclusive_mode {
+                "Android Bluetooth HD direct".into()
+            } else {
+                "Android Bluetooth HD".into()
+            }
+        } else if exclusive_mode {
             "Android bit-perfect direct".into()
         } else if is_usb {
             "rodio / AAudio shared (USB)".into()
@@ -1184,11 +1285,12 @@ fn output_backend_label(exclusive_mode: bool, is_usb: bool) -> String {
 
 fn backend_backend_label(backend: &PlaybackBackend) -> String {
     let is_usb = backend.output_device.is_usb;
+    let is_bluetooth = backend.output_device.is_bluetooth;
     match backend.active {
         #[cfg(any(target_os = "windows", target_os = "android"))]
-        Some(ActivePlayback::Exclusive { .. }) => output_backend_label(true, is_usb),
-        Some(ActivePlayback::Shared { .. }) => output_backend_label(false, is_usb),
-        None => output_backend_label(backend.preferences.exclusive_mode, is_usb),
+        Some(ActivePlayback::Exclusive { .. }) => output_backend_label(true, is_usb, is_bluetooth),
+        Some(ActivePlayback::Shared { .. }) => output_backend_label(false, is_usb, is_bluetooth),
+        None => output_backend_label(backend.preferences.exclusive_mode, is_usb, is_bluetooth),
     }
 }
 
@@ -1340,9 +1442,46 @@ mod tests {
             exclusive_capable: true,
             is_default: false,
             is_usb: true,
+            is_bluetooth: false,
         };
         assert!(snapshot.is_usb);
+        assert!(!snapshot.is_bluetooth);
         assert_eq!(snapshot.id, "usb-1");
         assert_eq!(snapshot.backend, "rodio / AAudio shared (USB)");
+    }
+
+    #[test]
+    fn test_output_device_snapshot_includes_is_bluetooth() {
+        let snapshot = OutputDeviceSnapshot {
+            id: "bt-1".into(),
+            name: "WH-1000XM5".into(),
+            backend: "Android Bluetooth HD (LDAC 96kHz / 24-bit @ 990kbps)".into(),
+            exclusive_capable: true,
+            is_default: false,
+            is_usb: false,
+            is_bluetooth: true,
+        };
+        assert!(snapshot.is_bluetooth);
+        assert!(!snapshot.is_usb);
+        assert_eq!(snapshot.id, "bt-1");
+        assert_eq!(snapshot.backend, "Android Bluetooth HD (LDAC 96kHz / 24-bit @ 990kbps)");
+    }
+
+    #[test]
+    fn test_is_bluetooth_device_description_matches_interface_and_name() {
+        let desc = rodio::cpal::DeviceDescriptionBuilder::new("Sony WH-1000XM4")
+            .interface_type(cpal::InterfaceType::Bluetooth)
+            .build();
+        assert!(is_bluetooth_device_description(&desc));
+
+        let desc_name = rodio::cpal::DeviceDescriptionBuilder::new("Bluetooth audio receiver")
+            .interface_type(cpal::InterfaceType::Unknown)
+            .build();
+        assert!(is_bluetooth_device_description(&desc_name));
+
+        let desc_speaker = rodio::cpal::DeviceDescriptionBuilder::new("Speaker")
+            .interface_type(cpal::InterfaceType::BuiltIn)
+            .build();
+        assert!(!is_bluetooth_device_description(&desc_speaker));
     }
 }

@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { SectionCard } from '../../components/SectionCard';
 import type { RemoteBackendType, RemoteCacheStatus, RemoteTarget, StorageStatus } from '../../types/aria';
 import {
   clearRemoteCache,
   deleteRemoteTarget,
   getRemoteCacheStatus,
+  getRemoteTargets,
   saveRemoteTarget,
   startGdriveAuthFlow,
   completeGdriveAuthFlow,
@@ -564,6 +565,7 @@ function AddRemoteDialog({ onClose, onAdded }: AddRemoteDialogProps) {
   const [showAdvancedGdrive, setShowAdvancedGdrive] = useState(false);
   const [copiedAuthUrl, setCopiedAuthUrl] = useState(false);
   const [authStatusMessage, setAuthStatusMessage] = useState<string | null>(null);
+  const isCompletingAuthRef = useRef(false);
 
   useEffect(() => {
     if (!gdriveAuthUrl) return;
@@ -588,12 +590,27 @@ function AddRemoteDialog({ onClose, onAdded }: AddRemoteDialogProps) {
     };
   }, [gdriveAuthUrl, name, gdriveFolderName, storageLimitGb]);
 
+  useEffect(() => {
+    if (!gdriveAuthUrl) return;
+
+    function handleWindowFocus() {
+      // User returned from browser window; attempt to complete auth automatically
+      void handleCompleteGdriveAuth();
+    }
+    window.addEventListener('focus', handleWindowFocus);
+    return () => {
+      window.removeEventListener('focus', handleWindowFocus);
+    };
+  }, [gdriveAuthUrl, name, gdriveFolderName, storageLimitGb]);
+
   async function handleStartGdriveAuth() {
     if (!name.trim()) {
       setError('Please provide a name for this remote target');
       return;
     }
-    const effectiveClientId = gdriveClientId.trim() || DEFAULT_GOOGLE_CLIENT_ID;
+    const effectiveClientId = gdriveClientId.trim().replace(/\/+$/, '') || DEFAULT_GOOGLE_CLIENT_ID;
+    const limitBytes = storageLimitGb ? parseFloat(storageLimitGb) * 1024 * 1024 * 1024 : undefined;
+    const folder = gdriveFolderName.trim() || 'Aria';
     setError(null);
     setAuthStatusMessage(null);
     setSubmitting(true);
@@ -601,6 +618,9 @@ function AddRemoteDialog({ onClose, onAdded }: AddRemoteDialogProps) {
       const authUrl = await startGdriveAuthFlow(
         effectiveClientId,
         gdriveClientSecret.trim() || undefined,
+        name.trim(),
+        folder,
+        limitBytes,
       );
       setGdriveAuthUrl(authUrl);
       try {
@@ -616,10 +636,14 @@ function AddRemoteDialog({ onClose, onAdded }: AddRemoteDialogProps) {
   }
 
   async function handleCompleteGdriveAuth() {
+    if (isCompletingAuthRef.current) {
+      return;
+    }
     if (!name.trim()) {
       setError('Please provide a name for this remote target');
       return;
     }
+    isCompletingAuthRef.current = true;
     setError(null);
     setSubmitting(true);
     try {
@@ -629,9 +653,20 @@ function AddRemoteDialog({ onClose, onAdded }: AddRemoteDialogProps) {
       const updated = await saveRemoteTarget(target);
       onAdded(updated);
     } catch (err) {
-      setError(String(err));
+      const msg = String(err);
+      try {
+        const targets = await getRemoteTargets();
+        if (targets.some((t: RemoteTarget) => t.backendType === 'google_drive' && (t.name === name.trim() || !name.trim()))) {
+          onAdded(targets);
+          return;
+        }
+      } catch {
+        // fallback
+      }
+      setError(msg);
     } finally {
       setSubmitting(false);
+      isCompletingAuthRef.current = false;
     }
   }
 
@@ -1035,7 +1070,7 @@ function AddRemoteDialog({ onClose, onAdded }: AddRemoteDialogProps) {
                     onClick={() => void handleCompleteGdriveAuth()}
                     type="button"
                   >
-                    {submitting ? 'Saving...' : 'Confirm Authorization & Save'}
+                    {submitting ? 'Saving Target...' : 'Confirm Authorization & Save'}
                   </button>
                 </div>
               </div>

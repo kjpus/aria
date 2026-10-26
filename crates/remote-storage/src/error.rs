@@ -33,3 +33,16 @@ pub enum RemoteStorageError {
         calculated: String,
     },
 }
+
+impl RemoteStorageError {
+    pub fn auth_failed(msg: impl Into<String>) -> Self {
+        let mut s = msg.into();
+        while let Some(stripped) = s.strip_prefix("Authentication failed: ") {
+            s = stripped.to_string();
+        }
+        while let Some(stripped) = s.strip_prefix("authentication failed: ") {
+            s = stripped.to_string();
+        }
+        Self::AuthFailed(s)
+    }
+}

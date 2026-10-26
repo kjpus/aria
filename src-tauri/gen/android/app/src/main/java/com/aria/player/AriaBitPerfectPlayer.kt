@@ -52,7 +52,10 @@ class AriaBitPerfectPlayer {
             this.sampleRate = sampleRate
             this.channelCount = channelCount
 
-            // Find target USB output device
+            // Find target output device:
+            // 1. Explicit deviceId if provided (> 0)
+            // 2. USB device fallback (external DAC)
+            // 3. Bluetooth device fallback (HD audio headphones/earbuds)
             val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
             val device = if (deviceId > 0) {
                 devices.find { it.id == deviceId }
@@ -60,15 +63,24 @@ class AriaBitPerfectPlayer {
                 null
             } ?: devices.find {
                 it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET
+            } ?: devices.find {
+                AriaBluetoothAudioHelper.isBluetoothDevice(it)
             }
 
             if (device == null) {
-                Log.w(TAG, "No USB audio output device found for bit-perfect routing")
+                Log.w(TAG, "No suitable audio output device found for high-res routing")
                 return FORMAT_FAILED
             }
 
+            val isBluetooth = AriaBluetoothAudioHelper.isBluetoothDevice(device)
+            if (isBluetooth) {
+                Log.i(TAG, "Bluetooth output device targeted: ${device.productName} (id=${device.id}). Optimizing for highest supported HD audio quality...")
+                val btInfo = AriaBluetoothAudioHelper.optimizeForHighestQuality(context)
+                Log.i(TAG, "Bluetooth HD audio active: ${btInfo.summary}")
+            }
+
             this.targetDevice = device
-            Log.i(TAG, "Targeting device: ${device.productName} (id=${device.id}, type=${device.type}) for ${sampleRate}Hz, ${bitDepth}-bit, ${channelCount}ch")
+            Log.i(TAG, "Targeting device: ${device.productName} (id=${device.id}, type=${device.type}, isBluetooth=$isBluetooth) for ${sampleRate}Hz, ${bitDepth}-bit, ${channelCount}ch")
 
             val channelMask = if (channelCount == 1) {
                 AudioFormat.CHANNEL_OUT_MONO
@@ -140,8 +152,8 @@ class AriaBitPerfectPlayer {
                 .setEncoding(chosenEncoding)
                 .build()
 
-            // 1. Android 14+ (API 34+): Request built-in BIT_PERFECT mixer behavior on the USB device
-            if (Build.VERSION.SDK_INT >= 34) {
+            // 1. Android 14+ (API 34+): Request built-in BIT_PERFECT mixer behavior on external USB DAC devices
+            if (Build.VERSION.SDK_INT >= 34 && !isBluetooth) {
                 try {
                     val supportedMixers = am.getSupportedMixerAttributes(device)
                     Log.i(TAG, "Device ${device.productName} supported mixer configurations: ${supportedMixers.size}")

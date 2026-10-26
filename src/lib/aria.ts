@@ -1147,6 +1147,9 @@ export async function testRemoteTarget(targetId: string): Promise<StorageStatus>
 export async function startGdriveAuthFlow(
   clientId: string,
   clientSecret?: string,
+  targetName?: string,
+  rootFolderName?: string,
+  storageLimitBytes?: number,
 ): Promise<string> {
   if (!isTauriRuntime) {
     return 'https://accounts.google.com/o/oauth2/v2/auth?mock=preview';
@@ -1154,6 +1157,9 @@ export async function startGdriveAuthFlow(
   return invoke<string>('start_gdrive_auth_flow', {
     clientId,
     clientSecret: clientSecret || null,
+    targetName: targetName || null,
+    rootFolderName: rootFolderName || null,
+    storageLimitBytes: storageLimitBytes || null,
   });
 }
 
@@ -1287,6 +1293,9 @@ declare global {
       openUrl: (url: string) => boolean;
       copyText: (text: string) => boolean;
       hasUsbAudioDevice?: () => boolean;
+      hasBluetoothAudioDevice?: () => boolean;
+      getBluetoothAudioInfo?: () => string;
+      optimizeBluetoothAudio?: () => string;
     };
   }
 }

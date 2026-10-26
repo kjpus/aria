@@ -114,14 +114,14 @@ pub const DEFAULT_GOOGLE_CLIENT_ID: &str =
 
 pub fn resolve_google_client_id(provided: Option<&str>) -> String {
     if let Some(id) = provided {
-        let trimmed = id.trim();
+        let trimmed = id.trim().trim_end_matches('/');
         if !trimmed.is_empty() {
             return trimmed.to_string();
         }
     }
     std::env::var("ARIA_GOOGLE_CLIENT_ID")
         .ok()
-        .map(|s| s.trim().to_string())
+        .map(|s| s.trim().trim_end_matches('/').to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_GOOGLE_CLIENT_ID.to_string())
 }
@@ -144,6 +144,8 @@ pub struct PendingAuthFlow {
     pub redirect_uri: String,
     config: GoogleAuthConfig,
     status_rx: tokio::sync::watch::Receiver<Option<Result<GoogleTokens, String>>>,
+    status_tx: tokio::sync::watch::Sender<Option<Result<GoogleTokens, String>>>,
+    received_code: std::sync::Arc<tokio::sync::Mutex<Option<(String, String)>>>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -185,7 +187,7 @@ impl PendingAuthFlow {
         let state = generate_oauth_state();
 
         let mut auth_url = Url::parse(GOOGLE_AUTH_URL)
-            .map_err(|e| RemoteStorageError::AuthFailed(e.to_string()))?;
+            .map_err(|e| RemoteStorageError::auth_failed(e.to_string()))?;
         auth_url
             .query_pairs_mut()
             .append_pair("client_id", &config.client_id)
@@ -198,41 +200,148 @@ impl PendingAuthFlow {
             .append_pair("access_type", "offline")
             .append_pair("prompt", "consent");
 
+        // Wrap the OAuth authorization URL with Google's AccountChooser endpoint.
+        // On mobile browsers (like Android Chrome with an active Google account), navigating
+        // directly to the OAuth endpoint causes Chrome's built-in Identity Services to silently
+        // auto-select the device's primary synced account and skip account selection.
+        // Routing through AccountChooser forces Google to present the account picker UI
+        // ("Choose an account" / "Use another account") so users can select an alternative account.
+        let mut chooser_url = Url::parse("https://accounts.google.com/AccountChooser")
+            .map_err(|e| RemoteStorageError::auth_failed(e.to_string()))?;
+        chooser_url
+            .query_pairs_mut()
+            .append_pair("continue", auth_url.as_str());
+
         let (status_tx, status_rx) = tokio::sync::watch::channel(None);
+        let received_code = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let config_clone = config.clone();
         let redirect_uri_clone = redirect_uri.clone();
         let expected_state = state.clone();
+        let code_store = received_code.clone();
+        let status_tx_bg = status_tx.clone();
 
         let task = tokio::spawn(async move {
-            let res = listen_for_callback(listener, config_clone, redirect_uri_clone, verifier, expected_state).await;
-            let _ = status_tx.send(Some(res.map_err(|e| e.to_string())));
+            let res = listen_for_callback(
+                listener,
+                config_clone,
+                redirect_uri_clone,
+                verifier,
+                expected_state,
+                code_store.clone(),
+            )
+            .await;
+            match res {
+                Ok(tokens) => {
+                    let _ = status_tx_bg.send(Some(Ok(tokens)));
+                }
+                Err(err) => {
+                    let err_str = err.to_string();
+                    let has_code = code_store.lock().await.is_some();
+                    let is_transport_err = err_str.contains("reqwest error")
+                        || err_str.contains("error sending request")
+                        || err_str.contains("os error")
+                        || err_str.contains("dns error")
+                        || err_str.contains("Connect")
+                        || err_str.contains("timed out");
+                    if has_code && is_transport_err {
+                        tracing::warn!(
+                            "Background token exchange encountered network error (app likely backgrounded/paused on Android): {err_str}. Preserving authorization code to exchange upon foreground resumption."
+                        );
+                    } else {
+                        let _ = status_tx_bg.send(Some(Err(err_str)));
+                    }
+                }
+            }
         });
 
         Ok(Self {
-            authorization_url: auth_url.to_string(),
+            authorization_url: chooser_url.to_string(),
             redirect_uri,
             config,
             status_rx,
+            status_tx,
+            received_code,
             task: Some(task),
         })
     }
 
     /// Listens for the callback from Google in the browser and exchanges the code for OAuth tokens.
     /// If tokens were already acquired by the background task, this returns immediately.
+    /// If the background task was interrupted or deferred by mobile OS network throttling,
+    /// this completes the token exchange in the foreground.
     pub async fn wait_for_tokens(mut self) -> Result<GoogleTokens, RemoteStorageError> {
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(300);
+
         loop {
-            if let Some(ref res) = *self.status_rx.borrow() {
-                return match res {
-                    Ok(tokens) => Ok(tokens.clone()),
-                    Err(err) => Err(RemoteStorageError::AuthFailed(err.clone())),
-                };
+            // 1. If tokens have already been acquired, return them immediately
+            let current_status = self.status_rx.borrow().clone();
+            if let Some(res) = current_status {
+                match res {
+                    Ok(tokens) => return Ok(tokens),
+                    Err(err) => {
+                        // Only treat as fatal if there is no pending authorization code we can exchange in foreground
+                        let has_code = self.received_code.lock().await.is_some();
+                        if !has_code {
+                            return Err(RemoteStorageError::auth_failed(err));
+                        }
+                    }
+                }
             }
-            self.status_rx
-                .changed()
-                .await
-                .map_err(|_| RemoteStorageError::AuthFailed("OAuth authorization flow cancelled".into()))?;
+
+            // 2. If we have the authorization code, exchange it now in the foreground!
+            let stored = {
+                let guard = self.received_code.lock().await;
+                guard.clone()
+            };
+            if let Some((code, verifier)) = stored {
+                tracing::info!("Exchanging stored authorization code for tokens in foreground...");
+                match exchange_code_for_tokens_with_retry(&self.config, &code, &self.redirect_uri, &verifier, 5).await {
+                    Ok(tokens) => {
+                        let _ = self.status_tx.send(Some(Ok(tokens.clone())));
+                        return Ok(tokens);
+                    }
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        let _ = self.status_tx.send(Some(Err(err_str.clone())));
+                        return Err(RemoteStorageError::auth_failed(err_str));
+                    }
+                }
+            }
+
+            // 3. Otherwise wait for updates or timeout
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(RemoteStorageError::auth_failed("OAuth authorization timed out after 5 minutes"));
+            }
+
+            tokio::select! {
+                res = self.status_rx.changed() => {
+                    if res.is_err() {
+                        return Err(RemoteStorageError::auth_failed("OAuth authorization flow cancelled"));
+                    }
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(250)) => {}
+            }
         }
     }
+}
+
+fn create_http_client() -> Client {
+    Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| Client::new())
+}
+
+fn format_reqwest_error(e: reqwest::Error) -> String {
+    let mut details = format!("reqwest error: {e}");
+    let mut source = std::error::Error::source(&e);
+    while let Some(s) = source {
+        details.push_str(&format!(" -> {s}"));
+        source = std::error::Error::source(s);
+    }
+    details
 }
 
 async fn listen_for_callback(
@@ -241,6 +350,7 @@ async fn listen_for_callback(
     redirect_uri: String,
     verifier: String,
     expected_state: String,
+    code_store: std::sync::Arc<tokio::sync::Mutex<Option<(String, String)>>>,
 ) -> Result<GoogleTokens, RemoteStorageError> {
     tokio::time::timeout(tokio::time::Duration::from_secs(300), async {
         loop {
@@ -283,7 +393,7 @@ async fn listen_for_callback(
             }
 
             let url = Url::parse(&format!("http://127.0.0.1{}", path))
-                .map_err(|e| RemoteStorageError::AuthFailed(e.to_string()))?;
+                .map_err(|e| RemoteStorageError::auth_failed(e.to_string()))?;
             let params: HashMap<_, _> = url.query_pairs().into_owned().collect();
 
             // Validate state parameter to protect against CSRF attacks (RFC 6749 §10.12)
@@ -319,7 +429,7 @@ async fn listen_for_callback(
                 let _ = socket.write_all(response.as_bytes()).await;
                 let _ = socket.flush().await;
                 let _ = socket.shutdown().await;
-                return Err(RemoteStorageError::AuthFailed(format!("Google returned error: {error}")));
+                return Err(RemoteStorageError::auth_failed(format!("Google returned error: {error}")));
             }
 
             let code = match params.get("code") {
@@ -334,9 +444,12 @@ async fn listen_for_callback(
                     let _ = socket.write_all(response.as_bytes()).await;
                     let _ = socket.flush().await;
                     let _ = socket.shutdown().await;
-                    return Err(RemoteStorageError::AuthFailed("No code in callback request".into()));
+                    return Err(RemoteStorageError::auth_failed("No code in callback request"));
                 }
             };
+
+            // Store authorization code and verifier so foreground resumption can exchange if background fails
+            *code_store.lock().await = Some((code.clone(), verifier.clone()));
 
             let body = r#"<!DOCTYPE html>
 <html>
@@ -416,11 +529,38 @@ async fn listen_for_callback(
             let _ = socket.flush().await;
             let _ = socket.shutdown().await;
 
-            return exchange_code_for_tokens(&config, &code, &redirect_uri, &verifier).await;
+            return exchange_code_for_tokens_with_retry(&config, &code, &redirect_uri, &verifier, 2).await;
         }
     })
     .await
-    .map_err(|_| RemoteStorageError::AuthFailed("OAuth authorization timed out after 5 minutes".into()))?
+    .map_err(|_| RemoteStorageError::auth_failed("OAuth authorization timed out after 5 minutes"))?
+}
+
+async fn exchange_code_for_tokens_with_retry(
+    config: &GoogleAuthConfig,
+    code: &str,
+    redirect_uri: &str,
+    verifier: &str,
+    max_retries: usize,
+) -> Result<GoogleTokens, RemoteStorageError> {
+    let mut last_err = RemoteStorageError::auth_failed("Unknown exchange failure");
+    for attempt in 1..=max_retries {
+        match exchange_code_for_tokens(config, code, redirect_uri, verifier).await {
+            Ok(tokens) => return Ok(tokens),
+            Err(e) => {
+                let err_msg = e.to_string();
+                // If it's a 4xx error from Google (e.g. invalid grant or client id), retrying won't help
+                if err_msg.contains("Failed to exchange code for tokens:") {
+                    return Err(e);
+                }
+                last_err = e;
+                if attempt < max_retries {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500 * attempt as u64)).await;
+                }
+            }
+        }
+    }
+    Err(last_err)
 }
 
 async fn exchange_code_for_tokens(
@@ -429,7 +569,7 @@ async fn exchange_code_for_tokens(
     redirect_uri: &str,
     verifier: &str,
 ) -> Result<GoogleTokens, RemoteStorageError> {
-    let client = Client::new();
+    let client = create_http_client();
     let mut form: HashMap<&str, &str> = HashMap::new();
     form.insert("code", code);
     form.insert("client_id", config.client_id.as_str());
@@ -445,11 +585,11 @@ async fn exchange_code_for_tokens(
         .form(&form)
         .send()
         .await
-        .map_err(|e| RemoteStorageError::AuthFailed(e.to_string()))?;
+        .map_err(|e| RemoteStorageError::auth_failed(format_reqwest_error(e)))?;
 
     if !res.status().is_success() {
         let err_text = res.text().await.unwrap_or_default();
-        return Err(RemoteStorageError::AuthFailed(format!(
+        return Err(RemoteStorageError::auth_failed(format!(
             "Failed to exchange code for tokens: {err_text}"
         )));
     }
@@ -476,7 +616,7 @@ pub async fn refresh_access_token(
     config: &GoogleAuthConfig,
     refresh_token: &str,
 ) -> Result<GoogleTokens, RemoteStorageError> {
-    let client = Client::new();
+    let client = create_http_client();
     let mut form: HashMap<&str, &str> = HashMap::new();
     form.insert("client_id", config.client_id.as_str());
     if let Some(ref secret) = config.client_secret {
@@ -490,11 +630,11 @@ pub async fn refresh_access_token(
         .form(&form)
         .send()
         .await
-        .map_err(|e| RemoteStorageError::AuthFailed(e.to_string()))?;
+        .map_err(|e| RemoteStorageError::auth_failed(format_reqwest_error(e)))?;
 
     if !res.status().is_success() {
         let err_text = res.text().await.unwrap_or_default();
-        return Err(RemoteStorageError::AuthFailed(format!(
+        return Err(RemoteStorageError::auth_failed(format!(
             "Failed to refresh access token: {err_text}"
         )));
     }
@@ -563,9 +703,13 @@ mod tests {
             DEFAULT_GOOGLE_CLIENT_ID
         );
 
-        // Custom client id preserved
+        // Custom client id preserved and trailing slashes stripped
         let custom = "custom-client-id-123.apps.googleusercontent.com";
         assert_eq!(resolve_google_client_id(Some(custom)), custom);
+        assert_eq!(
+            resolve_google_client_id(Some("custom-client-id-123.apps.googleusercontent.com/")),
+            custom
+        );
     }
 
     #[tokio::test]
@@ -585,12 +729,22 @@ mod tests {
         assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
 
         let auth_url_parsed = Url::parse(&flow.authorization_url).expect("parse auth url");
-        let state = auth_url_parsed
-            .query_pairs()
-            .find(|(k, _)| k == "state")
-            .expect("state present")
-            .1
-            .to_string();
+        let state = if let Some((_, continue_val)) = auth_url_parsed.query_pairs().find(|(k, _)| k == "continue") {
+            let inner_url = Url::parse(&continue_val).expect("parse inner oauth url");
+            inner_url
+                .query_pairs()
+                .find(|(k, _)| k == "state")
+                .expect("state present in inner url")
+                .1
+                .to_string()
+        } else {
+            auth_url_parsed
+                .query_pairs()
+                .find(|(k, _)| k == "state")
+                .expect("state present")
+                .1
+                .to_string()
+        };
 
         // 2. Sending request with missing or incorrect state should return 400 and trigger CSRF detection
         let bad_state_url = format!("{redirect_uri}?error=access_denied&state=tampered");

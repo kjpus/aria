@@ -142,6 +142,7 @@ export type OutputDeviceSnapshot = {
   exclusiveCapable: boolean;
   isDefault: boolean;
   isUsb?: boolean;
+  isBluetooth?: boolean;
 };
 
 export type PlaybackStatus = 'stopped' | 'paused' | 'playing' | 'buffering';

@@ -42,6 +42,8 @@ pub struct OutputDeviceSnapshot {
     pub is_default: bool,
     #[serde(default)]
     pub is_usb: bool,
+    #[serde(default)]
+    pub is_bluetooth: bool,
 }
 
 impl Default for OutputDeviceSnapshot {
@@ -53,6 +55,7 @@ impl Default for OutputDeviceSnapshot {
             exclusive_capable: false,
             is_default: true,
             is_usb: false,
+            is_bluetooth: false,
         }
     }
 }

@@ -57,6 +57,7 @@ class MainActivity : TauriActivity() {
     instance = this
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    AriaBluetoothAudioHelper.initialize(this)
     registerAudioDeviceMonitor()
   }
 
@@ -109,10 +110,26 @@ class MainActivity : TauriActivity() {
           it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET
         }
       }
+
+      @JavascriptInterface
+      fun hasBluetoothAudioDevice(): Boolean {
+        return AriaBluetoothAudioHelper.hasBluetoothOutput(this@MainActivity)
+      }
+
+      @JavascriptInterface
+      fun getBluetoothAudioInfo(): String {
+        return AriaBluetoothAudioHelper.getActiveBluetoothDescription(this@MainActivity) ?: ""
+      }
+
+      @JavascriptInterface
+      fun optimizeBluetoothAudio(): String {
+        return AriaBluetoothAudioHelper.optimizeBluetoothAudio(this@MainActivity) ?: ""
+      }
     }, "AriaAndroid")
   }
 
   override fun onDestroy() {
+    AriaBluetoothAudioHelper.cleanup()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && audioDeviceCallback != null) {
       val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
       audioManager?.unregisterAudioDeviceCallback(audioDeviceCallback)
