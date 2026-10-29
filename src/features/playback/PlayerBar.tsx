@@ -3,6 +3,7 @@ import { HoverScrollText } from '../albums/HoverScrollText';
 import { toLocalImageSrc } from '../../lib/runtime';
 import type { PlaybackSnapshot, ScannedTrack } from '../../types/aria';
 import { buildPlayerSubtitle, formatDuration } from '../library/view-models';
+import { ChevronDownIcon, PlayerToggleIcon } from '../../components/Icons';
 
 const SLEEP_TIMER_PRESETS_MINUTES = [15, 30, 45, 60, 90] as const;
 
@@ -11,6 +12,7 @@ type PlayerBarProps = {
   currentTrack: ScannedTrack | null;
   volume: number;
   isFavorited: boolean;
+  isPlayerPaneActive?: boolean;
   onPrevious: () => void;
   onPlay: () => void;
   onStop: () => void;
@@ -19,6 +21,7 @@ type PlayerBarProps = {
   onVolumeChange: (volume: number) => void | Promise<void>;
   onFavorite: () => void;
   onUnfavorite: () => void;
+  onTogglePlayerPane?: () => void;
 };
 
 export function PlayerBar({
@@ -26,6 +29,7 @@ export function PlayerBar({
   currentTrack,
   volume,
   isFavorited,
+  isPlayerPaneActive = false,
   onPrevious,
   onPlay,
   onStop,
@@ -34,6 +38,7 @@ export function PlayerBar({
   onVolumeChange,
   onFavorite,
   onUnfavorite,
+  onTogglePlayerPane,
 }: PlayerBarProps) {
   const progressRef = useRef<HTMLDivElement>(null);
   const sleepMenuRef = useRef<HTMLDivElement>(null);
@@ -51,6 +56,30 @@ export function PlayerBar({
   const [draftVolumePercent, setDraftVolumePercent] = useState(() =>
     Math.round(normalizedVolume * 100),
   );
+  const [isMobileOrTablet, setIsMobileOrTablet] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return (
+      Boolean((window as any).AriaAndroid) ||
+      /Android|iPhone|iPad|iPod|Tablet|Mobile/i.test(navigator.userAgent) ||
+      (typeof window.matchMedia === 'function' &&
+        window.matchMedia('(pointer: coarse), (max-width: 1024px)').matches)
+    );
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia('(pointer: coarse), (max-width: 1024px)');
+    const update = () => {
+      setIsMobileOrTablet(
+        Boolean((window as any).AriaAndroid) ||
+          /Android|iPhone|iPad|iPod|Tablet|Mobile/i.test(navigator.userAgent) ||
+          media.matches,
+      );
+    };
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+
   const duration = playback.currentTrack?.durationMs ?? 0;
   const displayPositionMs =
     isScrubbing && scrubPositionMs !== null ? scrubPositionMs : playback.positionMs;
@@ -175,7 +204,14 @@ export function PlayerBar({
 
   return (
     <section className="player-bar">
-      <div className="player-bar__identity">
+      <div
+        className="player-bar__identity"
+        onClick={() => onTogglePlayerPane?.()}
+        role={onTogglePlayerPane ? 'button' : undefined}
+        style={{ cursor: onTogglePlayerPane ? 'pointer' : 'default' }}
+        tabIndex={onTogglePlayerPane ? 0 : undefined}
+        title={onTogglePlayerPane ? (isPlayerPaneActive ? 'Close player view' : 'Open player view') : undefined}
+      >
         {art ? (
           <img
             alt=""
@@ -215,7 +251,7 @@ export function PlayerBar({
           <HoverScrollText className="player-bar__subtitle" speed={34} text={subtitle} />
         </div>
         {currentTrack && (
-          <div className="player-bar__rating">
+          <div className="player-bar__rating" onClick={(e) => e.stopPropagation()}>
             <button
               aria-label="Favorite track"
               className={`ghost-button player-bar__rating-button player-bar__rating-button--up${
@@ -356,25 +392,27 @@ export function PlayerBar({
       </div>
 
       <div className="player-bar__facts">
-        <label className="player-bar__volume" htmlFor="player-volume-range">
-          <VolumeIcon muted={draftVolumePercent === 0} />
-          <input
-            aria-label="Playback volume"
-            className="player-bar__volume-range"
-            id="player-volume-range"
-            max={100}
-            min={0}
-            onChange={(event) => {
-              const nextVolumePercent = Number(event.currentTarget.value);
-              setDraftVolumePercent(nextVolumePercent);
-              void onVolumeChange(nextVolumePercent / 100);
-            }}
-            step={1}
-            type="range"
-            value={draftVolumePercent}
-          />
-          <span>{draftVolumePercent}%</span>
-        </label>
+        {!isMobileOrTablet ? (
+          <label className="player-bar__volume" htmlFor="player-volume-range">
+            <VolumeIcon muted={draftVolumePercent === 0} />
+            <input
+              aria-label="Playback volume"
+              className="player-bar__volume-range"
+              id="player-volume-range"
+              max={100}
+              min={0}
+              onChange={(event) => {
+                const nextVolumePercent = Number(event.currentTarget.value);
+                setDraftVolumePercent(nextVolumePercent);
+                void onVolumeChange(nextVolumePercent / 100);
+              }}
+              step={1}
+              type="range"
+              value={draftVolumePercent}
+            />
+            <span>{draftVolumePercent}%</span>
+          </label>
+        ) : null}
 
         <div className="player-bar__device player-bar__device--source">
           <span>Source</span>
@@ -433,6 +471,22 @@ export function PlayerBar({
             </div>
           )}
         </div>
+
+        {onTogglePlayerPane ? (
+          <button
+            aria-label={isPlayerPaneActive ? 'Close player view' : 'Open player view'}
+            className={`ghost-button player-bar__player-toggle-button${isPlayerPaneActive ? ' player-bar__player-toggle-button--active' : ''}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onTogglePlayerPane();
+            }}
+            title={isPlayerPaneActive ? 'Close player view (Esc)' : 'Open player view'}
+            type="button"
+          >
+            {isPlayerPaneActive ? <ChevronDownIcon size={15} /> : <PlayerToggleIcon size={15} />}
+            <span className="player-bar__player-toggle-label">{isPlayerPaneActive ? 'Close' : 'Player'}</span>
+          </button>
+        ) : null}
       </div>
 
       {art && (

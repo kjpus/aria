@@ -69,7 +69,7 @@ impl AppCore {
         let cache_dir = RemoteCacheManager::default_cache_dir().unwrap_or_else(|_| {
             std::env::temp_dir().join("aria_remote_cache")
         });
-        let cache_manager = Arc::new(RemoteCacheManager::new(cache_dir, 3));
+        let cache_manager = Arc::new(RemoteCacheManager::new(cache_dir, 8));
 
         let playback_for_updater = playback.clone();
         let path_updater: PathUpdater = Arc::new(move |track_id, path| {
@@ -690,7 +690,7 @@ impl AppCore {
         };
 
         let mut active_window_ids = Vec::new();
-        for i in 0..3 {
+        for i in 0..5 {
             if let Some(item) = session.queue.get(current_idx + i) {
                 active_window_ids.push(item.queue_item.id.clone());
             }
@@ -702,7 +702,7 @@ impl AppCore {
         };
 
         let mut candidates = Vec::new();
-        for i in 1..=2 {
+        for i in 1..=3 {
             if let Some(req) = session.queue.get(current_idx + i) {
                 let track_id = &req.queue_item.id;
                 if self.cache_manager.is_track_cached(track_id).await {
@@ -962,6 +962,8 @@ impl AppCore {
 
                 runtime.block_on(async move {
                     let mut last_snapshot = playback.snapshot().await;
+                    let resolving_index: Arc<tokio::sync::Mutex<Option<usize>>> =
+                        Arc::new(tokio::sync::Mutex::new(None));
 
                     loop {
                         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -971,15 +973,71 @@ impl AppCore {
                             let track_changed = snapshot.current_track != last_snapshot.current_track;
                             last_snapshot = snapshot.clone();
                             let _ = events
-                                .send(AppEvent::Playback(PlaybackEvent::SnapshotChanged(snapshot)));
+                                .send(AppEvent::Playback(PlaybackEvent::SnapshotChanged(snapshot.clone())));
                             if track_changed {
                                 core.trigger_sliding_window_prefetch().await;
                             }
+                        }
+
+                        if snapshot.status == PlaybackStatus::Buffering {
+                            if let Some(current_idx) = snapshot.current_queue_index {
+                                let mut resolving = resolving_index.lock().await;
+                                if *resolving != Some(current_idx) {
+                                    *resolving = Some(current_idx);
+                                    let core_clone = core.clone();
+                                    let resolving_clone = resolving_index.clone();
+                                    tokio::spawn(async move {
+                                        core_clone.resolve_and_resume_buffering_track(current_idx).await;
+                                        let mut r = resolving_clone.lock().await;
+                                        if *r == Some(current_idx) {
+                                            *r = None;
+                                        }
+                                    });
+                                }
+                            }
+                        } else {
+                            let mut resolving = resolving_index.lock().await;
+                            *resolving = None;
                         }
                     }
                 });
             })
             .expect("failed to spawn aria-playback-publisher");
+    }
+
+    async fn resolve_and_resume_buffering_track(&self, index: usize) {
+        let session = self.playback.persisted_session();
+        let Some(mut req) = session.queue.get(index).cloned() else {
+            return;
+        };
+
+        let window: Vec<String> = session
+            .queue
+            .iter()
+            .skip(index)
+            .take(5)
+            .map(|r| r.queue_item.id.clone())
+            .collect();
+
+        match self.resolve_remote_track_if_needed(&mut req, &window).await {
+            Ok(_) => {
+                let current_snapshot = self.playback.snapshot().await;
+                if current_snapshot.current_queue_index == Some(index)
+                    && current_snapshot.status == PlaybackStatus::Buffering
+                {
+                    if let Ok(new_snapshot) = self.playback.play().await {
+                        self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(new_snapshot)));
+                        self.trigger_sliding_window_prefetch().await;
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("[app-core] failed to resolve buffering track at index {index}: {err}");
+                let mut stopped_snapshot = self.playback.snapshot().await;
+                stopped_snapshot.status = PlaybackStatus::Stopped;
+                self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(stopped_snapshot)));
+            }
+        }
     }
 
     fn spawn_output_device_monitor(&self) {

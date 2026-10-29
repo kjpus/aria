@@ -352,6 +352,12 @@ impl PlaybackService {
             let mut backend = self.backend.lock().expect("playback backend poisoned");
             if let Some(active) = backend.active.as_ref() {
                 active.play();
+                #[cfg(target_os = "android")]
+                exclusive_android::update_playback_service(
+                    Some(&active.request().queue_item.title),
+                    Some(&active.request().queue_item.subtitle),
+                    true,
+                );
             } else if let Some(request) = current_queue_request(&backend)
                 .cloned()
                 .or_else(|| backend.last_request.clone())
@@ -547,6 +553,9 @@ impl PlaybackService {
             backend.active = None;
         }
 
+        #[cfg(target_os = "android")]
+        exclusive_android::stop_playback_service();
+
         let mut state = self.state.write().await;
         self.refresh_state(&mut state);
         state.status = PlaybackStatus::Stopped;
@@ -592,6 +601,9 @@ impl PlaybackService {
             backend.shared_output = None;
         }
 
+        #[cfg(target_os = "android")]
+        exclusive_android::stop_playback_service();
+
         let mut state = self.state.blocking_write();
         self.refresh_state(&mut state);
         state.status = PlaybackStatus::Stopped;
@@ -625,24 +637,40 @@ impl PlaybackService {
                 backend.last_request = Some(request.clone());
 
                 if let Some(next_request) = advance_queue_after_finish(&mut backend) {
-                    match start_request(&mut backend, next_request, Duration::ZERO, false) {
-                        Ok(()) => {
-                            sync_snapshot_queue_state(state, &backend);
-                            if let Some(active) = backend.active.as_ref() {
-                                state.status = if active.is_paused() {
-                                    PlaybackStatus::Paused
-                                } else {
-                                    PlaybackStatus::Playing
-                                };
-                                state.current_track = Some(active.request().queue_item.clone());
-                                state.position_ms = (active.get_pos().as_millis() as u64)
-                                    .min(active.request().queue_item.duration_ms);
-                                return;
+                    let is_local_playable = !next_request.path.starts_with("remote://")
+                        && std::path::Path::new(&next_request.path).exists();
+
+                    if is_local_playable {
+                        match start_request(&mut backend, next_request, Duration::ZERO, false) {
+                            Ok(()) => {
+                                sync_snapshot_queue_state(state, &backend);
+                                if let Some(active) = backend.active.as_ref() {
+                                    state.status = if active.is_paused() {
+                                        PlaybackStatus::Paused
+                                    } else {
+                                        PlaybackStatus::Playing
+                                    };
+                                    state.current_track = Some(active.request().queue_item.clone());
+                                    state.position_ms = (active.get_pos().as_millis() as u64)
+                                        .min(active.request().queue_item.duration_ms);
+                                    return;
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("failed to continue queued playback: {error}");
                             }
                         }
-                        Err(error) => {
-                            eprintln!("failed to continue queued playback: {error}");
-                        }
+                    } else {
+                        // The next track is a remote track or still being downloaded into cache.
+                        // Keep playback alive in Buffering status with the next track so AppCore
+                        // can resolve, download, and seamlessly resume playback.
+                        backend.active = None;
+                        backend.saved_position = None;
+                        sync_snapshot_queue_state(state, &backend);
+                        state.status = PlaybackStatus::Buffering;
+                        state.current_track = Some(next_request.queue_item.clone());
+                        state.position_ms = 0;
+                        return;
                     }
                 }
 
@@ -651,13 +679,17 @@ impl PlaybackService {
                 sync_snapshot_queue_state(state, &backend);
                 state.status = PlaybackStatus::Stopped;
                 state.position_ms = request.queue_item.duration_ms;
+                #[cfg(target_os = "android")]
+                exclusive_android::stop_playback_service();
             }
             return;
         }
 
         let current_request = current_queue_request(&backend).cloned();
         if let Some(request) = current_request {
-            state.status = PlaybackStatus::Stopped;
+            if state.status != PlaybackStatus::Buffering {
+                state.status = PlaybackStatus::Stopped;
+            }
             let different_track = state
                 .current_track
                 .as_ref()
@@ -704,7 +736,21 @@ fn start_request(
     backend.active = None;
     backend.saved_position = None;
 
-    if backend.preferences.exclusive_mode {
+    let should_use_exclusive = backend.preferences.exclusive_mode || {
+        #[cfg(target_os = "android")]
+        {
+            // On Android, always prefer the direct native AudioTrack path (AriaBitPerfectPlayer)
+            // for all outputs (USB DAC, Bluetooth, wired headset, speaker).
+            // It routes accurately without up-sampling and natively supports foreground service playback.
+            true
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            false
+        }
+    };
+
+    if should_use_exclusive {
         #[cfg(any(target_os = "windows", target_os = "android"))]
         {
             match resolve_output_target(&backend.preferences, false).and_then(|target| {
@@ -721,20 +767,33 @@ fn start_request(
                     backend.shared_output = None;
                     backend.last_request = Some(request.clone());
                     backend.output_device = snapshot;
-                    backend.active = Some(ActivePlayback::Exclusive { player, request });
+                    backend.active = Some(ActivePlayback::Exclusive {
+                        player,
+                        request: request.clone(),
+                    });
+                    #[cfg(target_os = "android")]
+                    exclusive_android::update_playback_service(
+                        Some(&request.queue_item.title),
+                        Some(&request.queue_item.subtitle),
+                        !start_paused,
+                    );
                     return Ok(());
                 }
                 Err(error) => {
-                    eprintln!(
-                        "exclusive playback failed for '{}' on '{}': {error}",
-                        request.path,
-                        backend
-                            .preferences
-                            .output_device_id
-                            .as_deref()
-                            .unwrap_or("default output")
-                    );
-                    return Err(error);
+                    if backend.preferences.exclusive_mode {
+                        eprintln!(
+                            "exclusive playback failed for '{}' on '{}': {error}",
+                            request.path,
+                            backend
+                                .preferences
+                                .output_device_id
+                                .as_deref()
+                                .unwrap_or("default output")
+                        );
+                        return Err(error);
+                    } else {
+                        eprintln!("bit-accurate direct path unavailable ({error}), falling back to shared output");
+                    }
                 }
             }
         }
@@ -781,7 +840,16 @@ fn start_request(
     }
 
     backend.last_request = Some(request.clone());
-    backend.active = Some(ActivePlayback::Shared { player, request });
+    backend.active = Some(ActivePlayback::Shared {
+        player,
+        request: request.clone(),
+    });
+    #[cfg(target_os = "android")]
+    exclusive_android::update_playback_service(
+        Some(&request.queue_item.title),
+        Some(&request.queue_item.subtitle),
+        !start_paused,
+    );
     Ok(())
 }
 
@@ -898,7 +966,7 @@ fn open_shared_output(
     #[cfg(target_os = "android")]
     {
         if target.snapshot.is_bluetooth || exclusive_android::has_bluetooth_output() {
-            exclusive_android::optimize_bluetooth_audio();
+            exclusive_android::optimize_bluetooth_audio_default();
         }
         // 50ms default is too small on Android and causes buffer underruns (xruns).
         // 4096 frames (~90-100ms) provides reliable stability for media playback.
@@ -1210,7 +1278,7 @@ fn exclusive_capable_for_preferences(preferences: &PlaybackPreferences) -> bool 
             #[cfg(target_os = "android")]
             {
                 let host = cpal::default_host();
-                find_usb_output_device(&host).is_some()
+                find_usb_output_device(&host).is_some() || exclusive_android::has_bluetooth_output()
             }
             #[cfg(not(any(target_os = "windows", target_os = "android")))]
             {
@@ -1229,8 +1297,8 @@ fn is_exclusive_capable_device(device_id: &str, is_usb: bool, is_bluetooth: bool
 
     #[cfg(target_os = "android")]
     {
-        let _ = (device_id, is_bluetooth);
-        is_usb
+        let _ = device_id;
+        is_usb || is_bluetooth
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "android")))]
@@ -1251,9 +1319,14 @@ fn is_exclusive_capable_device_id(device_id: &str) -> bool {
         let host = cpal::default_host();
         if let Some(device) = output_device_by_id(&host, device_id) {
             if let Ok(desc) = device.description() {
-                if is_usb_device_description(&desc) {
+                if is_usb_device_description(&desc) || is_bluetooth_device_description(&desc) {
                     return true;
                 }
+            }
+        }
+        if let Ok(id_int) = device_id.parse::<i32>() {
+            if exclusive_android::is_bluetooth_device_id(id_int) {
+                return true;
             }
         }
         false

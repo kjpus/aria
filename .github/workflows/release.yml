@@ -48,6 +48,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARIA_BUILD_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         with:
           tagName: aria-v__VERSION__ # The action automatically replaces __VERSION__ with the version from package.json
           releaseName: 'Aria v__VERSION__'

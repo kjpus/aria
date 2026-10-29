@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlbumPane } from '../features/albums/AlbumPane';
 import { LibraryPane } from '../features/library/LibraryPane';
+import { PlayerPane } from '../features/now-playing/PlayerPane';
 import {
   tracksForAlbum,
   buildAlbumCards,
@@ -75,7 +76,9 @@ import { RefreshIcon } from '../components/RefreshIcon';
 import {
   AlbumIcon,
   AriaAppLogo,
+  ArrowLeftIcon,
   LibraryIcon,
+  NowPlayingIcon,
   PlaylistIcon,
   QueueIcon,
   SettingsIcon,
@@ -106,7 +109,9 @@ import type {
   UploadProgressEvent,
 } from '../types/aria';
 
-type PaneKey = 'library' | 'album' | 'tracks' | 'playlist' | 'queue' | 'settings';
+type PaneKey = 'library' | 'album' | 'tracks' | 'playlist' | 'queue' | 'settings' | 'player';
+
+const TOP_LEVEL_PANES: PaneKey[] = ['library', 'tracks', 'playlist', 'queue', 'settings'];
 
 const paneMeta: Record<PaneKey, { label: string }> = {
   library: { label: 'Library' },
@@ -115,6 +120,7 @@ const paneMeta: Record<PaneKey, { label: string }> = {
   playlist: { label: 'Playlists' },
   queue: { label: 'Queue' },
   settings: { label: 'Settings' },
+  player: { label: 'Now Playing' },
 };
 
 function applyEvent(current: AppBootstrap | null, event: AppEvent): AppBootstrap | null {
@@ -169,6 +175,8 @@ function getPaneIcon(pane: PaneKey) {
       return <QueueIcon size={17} />;
     case 'settings':
       return <SettingsIcon size={17} />;
+    case 'player':
+      return <NowPlayingIcon size={17} />;
   }
 }
 
@@ -176,7 +184,31 @@ export function App() {
   const [bootstrap, setBootstrap] = useState<AppBootstrap | null>(null);
   const [uiPrefs, setUiPrefs] = useState<UiPreferences>(() => loadUiPreferences());
   const [activePane, setActivePane] = useState<PaneKey>('library');
+  const [previousPane, setPreviousPane] = useState<PaneKey>('library');
   const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(null);
+
+  const isAndroidPlatform = useMemo(() => {
+    return (
+      typeof window !== 'undefined' &&
+      (Boolean((window as any).AriaAndroid) || /Android/i.test(navigator.userAgent))
+    );
+  }, []);
+
+  const topLevelNavPanes = useMemo(() => {
+    if (isAndroidPlatform) {
+      return TOP_LEVEL_PANES.filter((p) => p !== 'tracks');
+    }
+    return TOP_LEVEL_PANES;
+  }, [isAndroidPlatform]);
+
+  function handleTogglePlayerPane() {
+    if (activePane === 'player') {
+      setActivePane(previousPane);
+    } else {
+      setPreviousPane(activePane);
+      setActivePane('player');
+    }
+  }
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
   const [highlightTrackId, setHighlightTrackId] = useState<string | null>(null);
   const [sessionExportTags, setSessionExportTags] = useState<string[]>([]);
@@ -459,23 +491,30 @@ export function App() {
         return;
       }
 
+      if (event.key === 'Escape') {
+        if (activePane === 'album') {
+          event.preventDefault();
+          setActivePane('library');
+        } else if (activePane === 'player') {
+          event.preventDefault();
+          setActivePane(previousPane);
+        }
+      }
+
       if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey) {
         if (event.key === '1') {
           event.preventDefault();
           setActivePane('library');
         } else if (event.key === '2') {
           event.preventDefault();
-          setActivePane('album');
+          setActivePane('tracks');
         } else if (event.key === '3') {
           event.preventDefault();
-          setActivePane('tracks');
+          setActivePane('playlist');
         } else if (event.key === '4') {
           event.preventDefault();
-          setActivePane('playlist');
-        } else if (event.key === '5') {
-          event.preventDefault();
           setActivePane('queue');
-        } else if (event.key === '6') {
+        } else if (event.key === '5') {
           event.preventDefault();
           setActivePane('settings');
         } else if (event.key === 'b' || event.key === 'B') {
@@ -1550,8 +1589,8 @@ export function App() {
             </div>
 
             <nav className="app-sidebar__nav">
-              {(Object.keys(paneMeta) as PaneKey[]).map((pane) => {
-                const isActive = activePane === pane;
+              {topLevelNavPanes.map((pane) => {
+                const isActive = activePane === pane || (pane === 'library' && activePane === 'album');
                 return (
                   <button
                     aria-current={isActive ? 'page' : undefined}
@@ -1609,26 +1648,65 @@ export function App() {
                     <span className="app-sidebar__title" style={{ fontSize: '0.9rem' }}>Aria</span>
                   </div>
                 </div>
+                {activePane === 'album' || activePane === 'player' ? (
+                  <button
+                    className="ghost-button album-header__back-btn"
+                    onClick={() => setActivePane(activePane === 'player' ? previousPane : 'library')}
+                    type="button"
+                    title={activePane === 'player' ? 'Close Player' : 'Back to Library'}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.4rem',
+                      marginRight: '0.5rem',
+                      fontSize: '0.82rem',
+                    }}
+                  >
+                    <ArrowLeftIcon size={14} />
+                    <span>Back</span>
+                  </button>
+                ) : null}
                 <nav className="pane-tabs">
-                  {(Object.keys(paneMeta) as PaneKey[]).map((pane) => (
-                    <button
-                      className={activePane === pane ? 'pane-tabs__active' : 'ghost-button'}
-                      key={pane}
-                      onClick={() => setActivePane(pane)}
-                      type="button"
-                    >
-                      <span className="pane-tabs__icon">{getPaneIcon(pane)}</span>
-                      <span>
-                        {pane === 'queue'
-                          ? `${paneMeta[pane].label} (${remainingQueueCount})`
-                          : paneMeta[pane].label}
-                      </span>
-                    </button>
-                  ))}
+                  {topLevelNavPanes.map((pane) => {
+                    const isActive = activePane === pane || (pane === 'library' && activePane === 'album');
+                    return (
+                      <button
+                        className={isActive ? 'pane-tabs__active' : 'ghost-button'}
+                        key={pane}
+                        onClick={() => setActivePane(pane)}
+                        type="button"
+                      >
+                        <span className="pane-tabs__icon">{getPaneIcon(pane)}</span>
+                        <span>
+                          {pane === 'queue'
+                            ? `${paneMeta[pane].label} (${remainingQueueCount})`
+                            : paneMeta[pane].label}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </nav>
               </div>
             ) : (
               <div className="workspace__heading">
+                {activePane === 'album' || activePane === 'player' ? (
+                  <button
+                    className="ghost-button album-header__back-btn"
+                    onClick={() => setActivePane(activePane === 'player' ? previousPane : 'library')}
+                    type="button"
+                    title={activePane === 'player' ? 'Close Player' : 'Back to Library'}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.4rem',
+                      marginRight: '0.75rem',
+                      fontSize: '0.84rem',
+                    }}
+                  >
+                    <ArrowLeftIcon size={16} />
+                    <span>Back</span>
+                  </button>
+                ) : null}
                 <h1 className="workspace__pane-title">{paneMeta[activePane].label}</h1>
               </div>
             )}
@@ -1824,6 +1902,22 @@ export function App() {
               />
             ) : null}
 
+            {activePane === 'player' ? (
+              <PlayerPane
+                currentTrack={currentTrackDetails}
+                isMobile={isAndroidPlatform}
+                mappings={bootstrap.library.fieldMappings}
+                onClose={() => setActivePane(previousPane)}
+                onNext={handleNextTrack}
+                onOpenAlbum={handleOpenAlbum}
+                onPlay={handlePlay}
+                onPrevious={handlePreviousTrack}
+                onSeek={handleSeek}
+                onStop={handleStop}
+                playback={bootstrap.playback}
+              />
+            ) : null}
+
             <TrackPane
               highlightTrackId={highlightTrackId}
               isActive={activePane === 'tracks'}
@@ -1928,17 +2022,19 @@ export function App() {
 
       <PlayerBar
         currentTrack={currentTrackDetails}
+        isFavorited={isCurrentTrackFavorited}
+        isPlayerPaneActive={activePane === 'player'}
+        onFavorite={handleFavoriteCurrentTrack}
         onNext={handleNextTrack}
         onPlay={handlePlay}
-        onStop={handleStop}
         onPrevious={handlePreviousTrack}
         onSeek={handleSeek}
+        onStop={handleStop}
+        onTogglePlayerPane={handleTogglePlayerPane}
+        onUnfavorite={handleUnfavoriteCurrentTrack}
         onVolumeChange={handleVolumeChange}
         playback={bootstrap.playback}
         volume={bootstrap.settings.playback.volume}
-        isFavorited={isCurrentTrackFavorited}
-        onFavorite={handleFavoriteCurrentTrack}
-        onUnfavorite={handleUnfavoriteCurrentTrack}
       />
 
       {playlistPickerState ? (

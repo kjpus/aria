@@ -10,6 +10,7 @@ import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
@@ -57,8 +58,39 @@ class MainActivity : TauriActivity() {
     instance = this
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    volumeControlStream = AudioManager.STREAM_MUSIC
     AriaBluetoothAudioHelper.initialize(this)
     registerAudioDeviceMonitor()
+    requestNotificationPermission()
+  }
+
+  private fun requestNotificationPermission() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+        requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 101)
+      }
+    }
+  }
+
+  override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+    if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+      val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+      audioManager?.adjustStreamVolume(
+        AudioManager.STREAM_MUSIC,
+        AudioManager.ADJUST_RAISE,
+        AudioManager.FLAG_SHOW_UI
+      )
+      return true
+    } else if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+      val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+      audioManager?.adjustStreamVolume(
+        AudioManager.STREAM_MUSIC,
+        AudioManager.ADJUST_LOWER,
+        AudioManager.FLAG_SHOW_UI
+      )
+      return true
+    }
+    return super.onKeyDown(keyCode, event)
   }
 
   private fun registerAudioDeviceMonitor() {

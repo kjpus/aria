@@ -452,3 +452,65 @@ export function GripVerticalIcon({ size = 14, className, ...props }: IconProps) 
     </svg>
   );
 }
+
+export function NowPlayingIcon({ size = 18, className, ...props }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className}
+      fill="none"
+      height={size}
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.75"
+      viewBox="0 0 24 24"
+      width={size}
+      {...props}
+    >
+      <circle cx="12" cy="12" r="10" />
+      <polygon fill="currentColor" points="10 8 16 12 10 16 10 8" />
+    </svg>
+  );
+}
+
+export function PlayerToggleIcon({ size = 16, className, ...props }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className}
+      fill="none"
+      height={size}
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.75"
+      viewBox="0 0 24 24"
+      width={size}
+      {...props}
+    >
+      <rect height="18" rx="2" ry="2" width="18" x="3" y="3" />
+      <polyline points="8 14 12 10 16 14" />
+    </svg>
+  );
+}
+
+export function ChevronDownIcon({ size = 16, className, ...props }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className}
+      fill="none"
+      height={size}
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.75"
+      viewBox="0 0 24 24"
+      width={size}
+      {...props}
+    >
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  );
+}

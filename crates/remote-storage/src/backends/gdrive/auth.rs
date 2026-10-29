@@ -127,16 +127,28 @@ pub fn resolve_google_client_id(provided: Option<&str>) -> String {
 }
 
 pub fn resolve_google_client_secret(provided: Option<&str>) -> Option<String> {
+    // 1. Explicit user input from UI or settings
     if let Some(secret) = provided {
         let trimmed = secret.trim();
         if !trimmed.is_empty() {
             return Some(trimmed.to_string());
         }
     }
-    std::env::var("ARIA_GOOGLE_CLIENT_SECRET")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    // 2. Runtime environment variable override
+    if let Ok(secret) = std::env::var("ARIA_GOOGLE_CLIENT_SECRET") {
+        let trimmed = secret.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    // 3. Build-time injected secret via option_env!
+    if let Some(secret) = option_env!("ARIA_BUILD_CLIENT_SECRET") {
+        let trimmed = secret.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
 }
 
 pub struct PendingAuthFlow {
@@ -710,6 +722,25 @@ mod tests {
             resolve_google_client_id(Some("custom-client-id-123.apps.googleusercontent.com/")),
             custom
         );
+    }
+
+    #[test]
+    fn test_resolve_google_client_secret() {
+        // Explicit secret overrides everything
+        assert_eq!(
+            resolve_google_client_secret(Some("explicit-secret")),
+            Some("explicit-secret".to_string())
+        );
+        assert_eq!(
+            resolve_google_client_secret(Some("  explicit-secret  ")),
+            Some("explicit-secret".to_string())
+        );
+
+        // When provided is empty string, falls back to env or build-time secret
+        let resolved = resolve_google_client_secret(Some("   "));
+        if let Some(expected) = option_env!("ARIA_BUILD_CLIENT_SECRET").filter(|s| !s.trim().is_empty()) {
+            assert_eq!(resolved, Some(expected.trim().to_string()));
+        }
     }
 
     #[tokio::test]

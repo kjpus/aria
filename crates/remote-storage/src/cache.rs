@@ -1,15 +1,18 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, Notify, RwLock};
 
 use crate::error::RemoteStorageError;
 use crate::traits::RemoteStorageBackend;
+
+static TMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Cache status metadata for UI and monitoring.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -30,12 +33,13 @@ struct CacheEntry {
 
 /// Thread-safe in-memory LRU remote audio cache manager.
 /// Audio files are stored locally under `remote_cache/<track_id>.<ext>`.
-/// Writes are atomic (.tmp_<pid> renamed only on complete write + SHA-256 verification).
+/// Writes are atomic (.tmp_<pid>_<nonce> renamed only on complete write + SHA-256 verification).
 #[derive(Clone)]
 pub struct RemoteCacheManager {
     cache_dir: PathBuf,
     window_size: usize,
     entries: Arc<RwLock<HashMap<String, CacheEntry>>>,
+    in_flight: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
 }
 
 impl RemoteCacheManager {
@@ -44,6 +48,7 @@ impl RemoteCacheManager {
             cache_dir,
             window_size: window_size.max(1),
             entries: Arc::new(RwLock::new(HashMap::new())),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -116,7 +121,54 @@ impl RemoteCacheManager {
             return Ok(path);
         }
 
-        // 2. Ensure cache dir exists
+        // 2. Check if another task is already downloading this track
+        let notify = {
+            let mut in_flight = self.in_flight.lock().await;
+            if let Some(notify) = in_flight.get(track_id) {
+                Some(notify.clone())
+            } else {
+                in_flight.insert(track_id.to_string(), Arc::new(Notify::new()));
+                None
+            }
+        };
+
+        if let Some(notify) = notify {
+            notify.notified().await;
+            if let Some(path) = self.get_cached_path(track_id).await {
+                return Ok(path);
+            }
+        }
+
+        let result = self
+            .download_and_cache_internal(
+                backend,
+                remote_path,
+                track_id,
+                expected_checksum_sha256,
+                active_window_track_ids,
+            )
+            .await;
+
+        let notify_to_trigger = {
+            let mut in_flight = self.in_flight.lock().await;
+            in_flight.remove(track_id)
+        };
+        if let Some(notify) = notify_to_trigger {
+            notify.notify_waiters();
+        }
+
+        result
+    }
+
+    async fn download_and_cache_internal(
+        &self,
+        backend: &dyn RemoteStorageBackend,
+        remote_path: &str,
+        track_id: &str,
+        expected_checksum_sha256: Option<&str>,
+        active_window_track_ids: &[String],
+    ) -> Result<PathBuf, RemoteStorageError> {
+        // 1. Ensure cache dir exists
         fs::create_dir_all(&self.cache_dir)
             .await
             .map_err(RemoteStorageError::Io)?;
@@ -187,8 +239,9 @@ impl RemoteCacheManager {
             }
         }
 
-        // 5. Atomic write: write to temp file, then rename
-        let temp_file_name = format!("{target_file_name}.tmp_{}", std::process::id());
+        // 5. Atomic write: write to temp file with unique nonce, then rename
+        let nonce = TMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp_file_name = format!("{target_file_name}.tmp_{}_{nonce}", std::process::id());
         let temp_path = self.cache_dir.join(temp_file_name);
 
         {

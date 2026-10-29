@@ -902,7 +902,7 @@ pub fn get_active_bluetooth_description() -> Option<String> {
     env.get_string(&jstr).ok().map(|s| s.into())
 }
 
-pub fn optimize_bluetooth_audio() -> Option<String> {
+pub fn optimize_bluetooth_audio(sample_rate: u32) -> Option<String> {
     let ctx = ndk_context::android_context();
     let vm = match unsafe { JavaVM::from_raw(ctx.vm().cast()) } {
         Ok(v) => v,
@@ -943,9 +943,9 @@ pub fn optimize_bluetooth_audio() -> Option<String> {
     let helper_class: JClass = helper_class_obj.into();
     let res = match env.call_static_method(
         &helper_class,
-        "optimizeBluetoothAudio",
-        "(Landroid/content/Context;)Ljava/lang/String;",
-        &[(&app_context).into()],
+        "optimizeBluetoothAudioForRate",
+        "(Landroid/content/Context;I)Ljava/lang/String;",
+        &[(&app_context).into(), JValue::Int(sample_rate as i32)],
     ) {
         Ok(val) => match val.l() {
             Ok(obj) => obj,
@@ -960,6 +960,10 @@ pub fn optimize_bluetooth_audio() -> Option<String> {
 
     let jstr: JString = res.into();
     env.get_string(&jstr).ok().map(|s| s.into())
+}
+
+pub fn optimize_bluetooth_audio_default() -> Option<String> {
+    optimize_bluetooth_audio(44100)
 }
 
 pub fn has_bluetooth_output() -> bool {
@@ -1060,4 +1064,115 @@ pub fn is_bluetooth_device_id(device_id_int: i32) -> bool {
         Ok(v) => v.z().unwrap_or(false),
         Err(_) => false,
     }
+}
+
+pub fn update_playback_service(title: Option<&str>, artist: Option<&str>, is_playing: bool) {
+    let ctx = ndk_context::android_context();
+    let vm = match unsafe { JavaVM::from_raw(ctx.vm().cast()) } {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let mut env = match vm.attach_current_thread() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let app_context = unsafe { JObject::from_raw(ctx.context().cast()) };
+
+    let class_loader = match env
+        .call_method(&app_context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+        .and_then(|v| v.l())
+    {
+        Ok(cl) => cl,
+        Err(_) => return,
+    };
+
+    let class_name = match env.new_string("com.aria.player.AriaPlaybackService") {
+        Ok(cn) => cn,
+        Err(_) => return,
+    };
+
+    let service_class_obj = match env
+        .call_method(
+            &class_loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[(&class_name).into()],
+        )
+        .and_then(|v| v.l())
+    {
+        Ok(obj) => obj,
+        Err(_) => return,
+    };
+
+    let service_class: JClass = service_class_obj.into();
+    let null_obj = JObject::null();
+    let j_title = title.and_then(|t| env.new_string(t).ok());
+    let j_artist = artist.and_then(|a| env.new_string(a).ok());
+    let title_val: JValue = match j_title.as_ref() {
+        Some(s) => s.into(),
+        None => (&null_obj).into(),
+    };
+    let artist_val: JValue = match j_artist.as_ref() {
+        Some(s) => s.into(),
+        None => (&null_obj).into(),
+    };
+
+    let _ = env.call_static_method(
+        &service_class,
+        "updatePlayback",
+        "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Z)V",
+        &[
+            (&app_context).into(),
+            title_val,
+            artist_val,
+            JValue::Bool(if is_playing { 1 } else { 0 }),
+        ],
+    );
+}
+
+pub fn stop_playback_service() {
+    let ctx = ndk_context::android_context();
+    let vm = match unsafe { JavaVM::from_raw(ctx.vm().cast()) } {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let mut env = match vm.attach_current_thread() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let app_context = unsafe { JObject::from_raw(ctx.context().cast()) };
+
+    let class_loader = match env
+        .call_method(&app_context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+        .and_then(|v| v.l())
+    {
+        Ok(cl) => cl,
+        Err(_) => return,
+    };
+
+    let class_name = match env.new_string("com.aria.player.AriaPlaybackService") {
+        Ok(cn) => cn,
+        Err(_) => return,
+    };
+
+    let service_class_obj = match env
+        .call_method(
+            &class_loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[(&class_name).into()],
+        )
+        .and_then(|v| v.l())
+    {
+        Ok(obj) => obj,
+        Err(_) => return,
+    };
+
+    let service_class: JClass = service_class_obj.into();
+    let _ = env.call_static_method(
+        &service_class,
+        "stopPlayback",
+        "(Landroid/content/Context;)V",
+        &[(&app_context).into()],
+    );
 }

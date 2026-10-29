@@ -7,7 +7,9 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioMixerAttributes
 import android.media.AudioTrack
+import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.PowerManager
 import android.util.Log
 
 class AriaBitPerfectPlayer {
@@ -35,6 +37,75 @@ class AriaBitPerfectPlayer {
     private var channelCount: Int = 2
     private var bytesPerFrame: Int = 4
     private var framesWritten: Long = 0
+    private var appContext: Context? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+    private var currentTitle: String = "Aria"
+    private var currentArtist: String = "Playing audio"
+
+    fun setTrackMetadata(title: String?, artist: String?) {
+        if (!title.isNullOrBlank()) this.currentTitle = title
+        if (!artist.isNullOrBlank()) this.currentArtist = artist
+        appContext?.let {
+            val isPlaying = audioTrack?.playState == AudioTrack.PLAYSTATE_PLAYING
+            AriaPlaybackService.updatePlayback(it, this.currentTitle, this.currentArtist, isPlaying)
+        }
+    }
+
+    private fun acquireLocks() {
+        val ctx = appContext ?: return
+        try {
+            if (wakeLock == null) {
+                val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Aria:BitPerfectPlayback")?.apply {
+                    setReferenceCounted(false)
+                }
+            }
+            wakeLock?.let {
+                if (!it.isHeld) {
+                    it.acquire(45 * 60 * 1000L) // 45 min safety timeout
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not acquire WakeLock", e)
+        }
+
+        try {
+            if (wifiLock == null) {
+                val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                wifiLock = wm?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Aria:PlaybackWifiLock")?.apply {
+                    setReferenceCounted(false)
+                }
+            }
+            wifiLock?.let {
+                if (!it.isHeld) {
+                    it.acquire()
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not acquire WifiLock", e)
+        }
+    }
+
+    private fun releaseLocks() {
+        try {
+            wakeLock?.let {
+                if (it.isHeld) it.release()
+            }
+            wakeLock = null
+        } catch (e: Exception) {
+            Log.w(TAG, "Error releasing WakeLock", e)
+        }
+
+        try {
+            wifiLock?.let {
+                if (it.isHeld) it.release()
+            }
+            wifiLock = null
+        } catch (e: Exception) {
+            Log.w(TAG, "Error releasing WifiLock", e)
+        }
+    }
 
     private fun isScoDevice(device: AudioDeviceInfo): Boolean {
         if (device.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) return true
@@ -50,6 +121,7 @@ class AriaBitPerfectPlayer {
         bitDepth: Int
     ): Int {
         try {
+            this.appContext = context.applicationContext
             val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: run {
                 Log.e(TAG, "AudioManager not available")
                 return FORMAT_FAILED
@@ -69,11 +141,19 @@ class AriaBitPerfectPlayer {
             val a2dpDevice = devices.find {
                 AriaBluetoothAudioHelper.isBluetoothDevice(it) && !isScoDevice(it)
             }
+            val defaultDevice = devices.find {
+                it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                    it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                    it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER ||
+                    it.type == AudioDeviceInfo.TYPE_LINE_ANALOG ||
+                    it.type == AudioDeviceInfo.TYPE_LINE_DIGITAL
+            } ?: devices.firstOrNull()
+
             val device = if (deviceId > 0) {
                 devices.find { it.id == deviceId && !isScoDevice(it) }
             } else {
                 null
-            } ?: usbDevice ?: a2dpDevice
+            } ?: usbDevice ?: a2dpDevice ?: defaultDevice
 
             if (device == null) {
                 Log.w(TAG, "No suitable audio output device found for high-res routing")
@@ -82,8 +162,8 @@ class AriaBitPerfectPlayer {
 
             val isBluetooth = AriaBluetoothAudioHelper.isBluetoothDevice(device)
             if (isBluetooth) {
-                Log.i(TAG, "Bluetooth output device targeted: ${device.productName} (id=${device.id}). Optimizing for highest supported HD audio quality...")
-                val btInfo = AriaBluetoothAudioHelper.optimizeForHighestQuality(context)
+                Log.i(TAG, "Bluetooth output device targeted: ${device.productName} (id=${device.id}). Configuring for native source rate ${sampleRate}Hz (NEVER UPSAMPLING)...")
+                val btInfo = AriaBluetoothAudioHelper.optimizeForHighestQuality(context, sampleRate)
                 Log.i(TAG, "Bluetooth HD audio active: ${btInfo.summary}")
             }
 
@@ -170,7 +250,8 @@ class AriaBitPerfectPlayer {
                         Log.d(TAG, "  Mixer attr: format=${attr.format}, behavior=${attr.mixerBehavior} (isBitPerfect=$isBp)")
                     }
 
-                    // Prefer an exact matching bit-perfect attribute from the HAL, or construct one
+                    // Prefer an exact matching bit-perfect attribute at native source sampleRate from the HAL, or construct one.
+                    // CRITICAL AUDIOPHILE RULE: NEVER select a mixer attribute with a different/higher sample rate, as that forces up-sampling!
                     val bitPerfectAttr = supportedMixers.find { attr ->
                         attr.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT &&
                             attr.format.sampleRate == sampleRate &&
@@ -179,8 +260,6 @@ class AriaBitPerfectPlayer {
                     } ?: supportedMixers.find { attr ->
                         attr.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT &&
                             attr.format.sampleRate == sampleRate
-                    } ?: supportedMixers.find { attr ->
-                        attr.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT
                     } ?: AudioMixerAttributes.Builder(audioFormat)
                         .setMixerBehavior(AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT)
                         .build()
@@ -192,7 +271,7 @@ class AriaBitPerfectPlayer {
                     )
                     if (setOk) {
                         mixerAttributesConfigured = true
-                        Log.i(TAG, "Successfully enabled built-in MIXER_BEHAVIOR_BIT_PERFECT on ${device.productName} at ${sampleRate}Hz")
+                        Log.i(TAG, "Successfully enabled built-in MIXER_BEHAVIOR_BIT_PERFECT on ${device.productName} at native rate ${sampleRate}Hz")
                     } else {
                         Log.w(TAG, "setPreferredMixerAttributes returned false for ${device.productName}")
                     }
@@ -256,6 +335,10 @@ class AriaBitPerfectPlayer {
     fun play(): Boolean {
         val track = audioTrack ?: return false
         return try {
+            acquireLocks()
+            appContext?.let {
+                AriaPlaybackService.startPlayback(it, currentTitle, currentArtist)
+            }
             track.play()
             true
         } catch (e: Exception) {
@@ -268,6 +351,10 @@ class AriaBitPerfectPlayer {
         val track = audioTrack ?: return false
         return try {
             track.pause()
+            releaseLocks()
+            appContext?.let {
+                AriaPlaybackService.updatePlayback(it, currentTitle, currentArtist, false)
+            }
             true
         } catch (e: Exception) {
             Log.e(TAG, "Error pausing playback", e)
@@ -331,6 +418,10 @@ class AriaBitPerfectPlayer {
     }
 
     fun close(): Boolean {
+        releaseLocks()
+        appContext?.let {
+            AriaPlaybackService.stopPlayback(it)
+        }
         return try {
             audioTrack?.let { track ->
                 try {

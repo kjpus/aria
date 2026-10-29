@@ -993,7 +993,7 @@ function AddRemoteDialog({ onClose, onAdded }: AddRemoteDialogProps) {
                   <input
                     id="gdrive-client-secret"
                     type="password"
-                    placeholder="Optional for desktop PKCE apps"
+                    placeholder="Optional (injected at build time if configured)"
                     value={gdriveClientSecret}
                     onChange={(e) => setGdriveClientSecret(e.target.value)}
                   />

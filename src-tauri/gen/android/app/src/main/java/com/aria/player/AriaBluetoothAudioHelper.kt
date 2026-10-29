@@ -257,8 +257,9 @@ object AriaBluetoothAudioHelper {
      * supported by BOTH the phone and connected earbuds/headset, enables HD audio,
      * and sets the codec configuration preference to the maximum tier (e.g. LDAC 990 kbps).
      */
+    @JvmOverloads
     @JvmStatic
-    fun optimizeForHighestQuality(context: Context?): BluetoothAudioInfo {
+    fun optimizeForHighestQuality(context: Context?, sourceSampleRate: Int = 44100): BluetoothAudioInfo {
         val ctx = context ?: cachedAppContext ?: return BluetoothAudioInfo(isConnected = false)
         ensureA2dpProxy(ctx)
 
@@ -274,7 +275,7 @@ object AriaBluetoothAudioHelper {
             return getBluetoothAudioInfo(ctx)
         }
 
-        Log.i(TAG, "Optimizing Bluetooth audio quality for device: ${btDevice.name}")
+        Log.i(TAG, "Optimizing Bluetooth audio quality for device: ${btDevice.name} at source rate: ${sourceSampleRate}Hz (NEVER UPSAMPLING)")
 
         // 1. Enable HD Audio (optional codecs) on the device if supported
         val hdSupported = checkOptionalCodecsSupported(a2dp, btDevice)
@@ -298,8 +299,8 @@ object AriaBluetoothAudioHelper {
         if (selectableCaps.isNotEmpty()) {
             Log.i(TAG, "Discovered ${selectableCaps.size} selectable Bluetooth codec capabilities from phone & headset")
 
-            // Rank codecs to select highest quality:
-            // LDAC / Samsung Seamless Codec UHQ (96kHz, 24/32-bit) > aptX HD / SSC Hi-Fi (24-bit 48kHz) > LC3 > aptX > AAC > SBC
+            // Rank codecs to select highest quality codec family:
+            // LDAC / Samsung Seamless Codec UHQ > aptX HD / SSC Hi-Fi > LC3 > aptX > AAC > SBC
             val bestConfig = selectableCaps.maxByOrNull { config ->
                 val type = getCodecType(config)
                 val rank = getCodecRank(type, config)
@@ -315,16 +316,18 @@ object AriaBluetoothAudioHelper {
                 val bestSrMask = getSampleRateMask(bestConfig)
                 val bestBpsMask = getBitsPerSampleMask(bestConfig)
 
-                val targetSampleRateFlag = selectHighestSampleRateFlag(bestSrMask)
+                // CRITICAL AUDIOPHILE RULE: NEVER UP-SAMPLE.
+                // If source track is 44.1kHz, configure Bluetooth codec to 44.1kHz,
+                // even if earbuds or phone support 96kHz or 192kHz!
+                val targetSampleRateFlag = selectSampleRateFlagNeverUpsample(bestSrMask, sourceSampleRate)
                 val targetBitsPerSampleFlag = selectHighestBitsPerSampleFlag(bestBpsMask)
 
-                // For LDAC, force 1000L (Sound Quality Preferred / 990 kbps) instead of dynamic 330 kbps throttle
+                // For LDAC, force 1000L (Sound Quality Preferred / 990 kbps for 48k/96k, 909 kbps for 44.1k/88.2k)
                 val targetCodecSpecific1 = if (bestType == CODEC_TYPE_LDAC) LDAC_QUALITY_HIGH else 0L
 
-                Log.i(TAG, "Targeting optimal codec: type=$bestType (${formatCodecName(bestType, bestConfig)}), " +
-                    "sampleRateMask=0x${Integer.toHexString(targetSampleRateFlag)}, " +
-                    "bitsPerSampleMask=0x${Integer.toHexString(targetBitsPerSampleFlag)}, " +
-                    "codecSpecific1=$targetCodecSpecific1")
+                val negotiatedHz = sampleRateMaskToHz(targetSampleRateFlag)
+                Log.i(TAG, "Never-upsample policy: source=${sourceSampleRate}Hz -> Bluetooth codec=${formatCodecName(bestType, bestConfig)} @ ${negotiatedHz}Hz (flag=0x${Integer.toHexString(targetSampleRateFlag)}), " +
+                    "bitsPerSampleMask=0x${Integer.toHexString(targetBitsPerSampleFlag)}, codecSpecific1=$targetCodecSpecific1")
 
                 tryApplyCodecPreference(a2dp, btDevice, bestType, targetSampleRateFlag, targetBitsPerSampleFlag, targetCodecSpecific1)
             }
@@ -667,15 +670,52 @@ object AriaBluetoothAudioHelper {
 
     private fun highestSampleRateFromMask(mask: Int): Int = sampleRateMaskToHz(mask)
 
-    private fun selectHighestSampleRateFlag(mask: Int): Int {
-        return when {
-            mask and SAMPLE_RATE_192000 != 0 -> SAMPLE_RATE_192000
-            mask and SAMPLE_RATE_176400 != 0 -> SAMPLE_RATE_176400
-            mask and SAMPLE_RATE_96000 != 0 -> SAMPLE_RATE_96000
-            mask and SAMPLE_RATE_88200 != 0 -> SAMPLE_RATE_88200
-            mask and SAMPLE_RATE_48000 != 0 -> SAMPLE_RATE_48000
-            mask and SAMPLE_RATE_44100 != 0 -> SAMPLE_RATE_44100
-            else -> SAMPLE_RATE_44100
+    /**
+     * Selects a sample rate flag matching the source rate without EVER up-sampling.
+     * If source is 44.1kHz, selects 44.1kHz even if the earbuds/phone support 96kHz or 192kHz.
+     */
+    fun selectSampleRateFlagNeverUpsample(mask: Int, sourceSampleRate: Int): Int {
+        val target = if (sourceSampleRate > 0) sourceSampleRate else 44100
+
+        // 1. Exact match if supported by device/codec
+        when (target) {
+            192000 -> if (mask and SAMPLE_RATE_192000 != 0) return SAMPLE_RATE_192000
+            176400 -> if (mask and SAMPLE_RATE_176400 != 0) return SAMPLE_RATE_176400
+            96000 -> if (mask and SAMPLE_RATE_96000 != 0) return SAMPLE_RATE_96000
+            88200 -> if (mask and SAMPLE_RATE_88200 != 0) return SAMPLE_RATE_88200
+            48000 -> if (mask and SAMPLE_RATE_48000 != 0) return SAMPLE_RATE_48000
+            44100 -> if (mask and SAMPLE_RATE_44100 != 0) return SAMPLE_RATE_44100
+        }
+
+        // 2. If exact match is not available, pick highest supported rate that is STRICTLY <= target.
+        // Prefer same sample rate family (44.1k vs 48k family) to avoid asynchronous resampling.
+        if (target % 44100 == 0) {
+            // 44.1kHz family (44.1k, 88.2k, 176.4k)
+            if (target >= 176400 && mask and SAMPLE_RATE_176400 != 0) return SAMPLE_RATE_176400
+            if (target >= 88200 && mask and SAMPLE_RATE_88200 != 0) return SAMPLE_RATE_88200
+            if (mask and SAMPLE_RATE_44100 != 0) return SAMPLE_RATE_44100
+        } else {
+            // 48kHz family (48k, 96k, 192k)
+            if (target >= 192000 && mask and SAMPLE_RATE_192000 != 0) return SAMPLE_RATE_192000
+            if (target >= 96000 && mask and SAMPLE_RATE_96000 != 0) return SAMPLE_RATE_96000
+            if (target >= 48000 && mask and SAMPLE_RATE_48000 != 0) return SAMPLE_RATE_48000
+        }
+
+        // General fallback: strictly <= target
+        if (target >= 192000 && mask and SAMPLE_RATE_192000 != 0) return SAMPLE_RATE_192000
+        if (target >= 176400 && mask and SAMPLE_RATE_176400 != 0) return SAMPLE_RATE_176400
+        if (target >= 96000 && mask and SAMPLE_RATE_96000 != 0) return SAMPLE_RATE_96000
+        if (target >= 88200 && mask and SAMPLE_RATE_88200 != 0) return SAMPLE_RATE_88200
+        if (target >= 48000 && mask and SAMPLE_RATE_48000 != 0) return SAMPLE_RATE_48000
+        if (target >= 44100 && mask and SAMPLE_RATE_44100 != 0) return SAMPLE_RATE_44100
+
+        // Final fallback if hardware only supports higher than source: lowest available
+        return if (mask and SAMPLE_RATE_44100 != 0) {
+            SAMPLE_RATE_44100
+        } else if (mask and SAMPLE_RATE_48000 != 0) {
+            SAMPLE_RATE_48000
+        } else {
+            SAMPLE_RATE_44100
         }
     }
 
@@ -708,7 +748,13 @@ object AriaBluetoothAudioHelper {
 
     @JvmStatic
     fun optimizeBluetoothAudio(context: Context?): String? {
-        val info = optimizeForHighestQuality(context)
+        val info = optimizeForHighestQuality(context, 44100)
+        return if (info.isConnected && info.summary.isNotBlank()) info.summary else null
+    }
+
+    @JvmStatic
+    fun optimizeBluetoothAudioForRate(context: Context?, sourceSampleRate: Int): String? {
+        val info = optimizeForHighestQuality(context, sourceSampleRate)
         return if (info.isConnected && info.summary.isNotBlank()) info.summary else null
     }
 }
