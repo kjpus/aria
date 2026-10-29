@@ -73,3 +73,11 @@ pub async fn update_auto_sync_on_startup(
 ) -> Result<SettingsSnapshot, CommandError> {
     Ok(state.core.update_auto_sync_on_startup(enabled).await)
 }
+
+#[tauri::command]
+pub async fn update_remote_storage_only(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<SettingsSnapshot, CommandError> {
+    Ok(state.core.update_remote_storage_only(enabled).await)
+}

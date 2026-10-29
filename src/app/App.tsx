@@ -68,6 +68,7 @@ import {
   updateTheme,
   updatePlaybackPreferences,
   updateAutoSyncOnStartup,
+  updateRemoteStorageOnly,
   updateTrackTableSettings,
   pickPlaylistFile,
   syncAllRemoteTargets,
@@ -383,9 +384,19 @@ export function App() {
     };
   }, []);
 
+  const remoteStorageOnly = bootstrap?.settings.remoteStorageOnly ?? false;
+
+  const visibleTracks = useMemo(() => {
+    const tracks = bootstrap?.library.tracks ?? [];
+    if (remoteStorageOnly) {
+      return tracks.filter((t) => t.path.startsWith('remote://'));
+    }
+    return tracks.filter((t) => !t.path.startsWith('remote://'));
+  }, [bootstrap?.library.tracks, remoteStorageOnly]);
+
   const albumCards = useMemo(
-    () => buildAlbumCards(bootstrap?.library.tracks ?? []),
-    [bootstrap?.library.tracks],
+    () => buildAlbumCards(visibleTracks),
+    [visibleTracks],
   );
 
   const currentTrackDetails = useMemo(() => {
@@ -608,12 +619,22 @@ export function App() {
       const failed = results.filter((r) => !r.success);
       if (failed.length > 0) {
         setError(`Sync error: ${failed.map((f) => `${f.targetName}: ${f.errorMessage ?? 'Failed'}`).join(', ')}`);
-      } else if (totalAlbums > 0 || totalTracks > 0) {
-        setSyncStatusMessage(
-          `✓ Synced from remote: ${totalAlbums} new album(s) (${totalTracks} track(s)) imported.`
-        );
+      } else if (remoteStorageOnly) {
+        if (totalAlbums > 0 || totalTracks > 0) {
+          setSyncStatusMessage(
+            `✓ Synced from remote: ${totalAlbums} new album(s) (${totalTracks} track(s)) imported.`
+          );
+        } else {
+          setSyncStatusMessage('✓ Synced from remote: library is up to date.');
+        }
       } else {
-        setSyncStatusMessage('✓ Synced from remote: library is up to date.');
+        if (totalAlbums > 0 || totalTracks > 0) {
+          setSyncStatusMessage(
+            `✓ Synced to remote: ${totalAlbums} album(s) (${totalTracks} track(s)) uploaded.`
+          );
+        } else {
+          setSyncStatusMessage('✓ Synced to remote: remote storage is up to date.');
+        }
       }
       setTimeout(() => setSyncStatusMessage(null), 5000);
     } catch (err) {
@@ -799,7 +820,7 @@ export function App() {
       return;
     }
 
-    const requests = buildAlbumTrackRequests(bootstrap.library.tracks, albumId);
+    const requests = buildAlbumTrackRequests(visibleTracks, albumId);
     if (requests.length === 0) {
       return;
     }
@@ -818,7 +839,7 @@ export function App() {
       return;
     }
 
-    const requests = buildAlbumRequestsForSelection(bootstrap.library.tracks, albumIds);
+    const requests = buildAlbumRequestsForSelection(visibleTracks, albumIds);
     if (requests.length === 0) {
       return;
     }
@@ -837,7 +858,7 @@ export function App() {
       return;
     }
 
-    const requests = buildAlbumTrackRequests(bootstrap.library.tracks, albumId);
+    const requests = buildAlbumTrackRequests(visibleTracks, albumId);
     if (requests.length === 0) {
       return;
     }
@@ -862,7 +883,7 @@ export function App() {
       return;
     }
 
-    const requests = buildAlbumRequestsForSelection(bootstrap.library.tracks, albumIds);
+    const requests = buildAlbumRequestsForSelection(visibleTracks, albumIds);
     if (requests.length === 0) {
       return;
     }
@@ -884,7 +905,7 @@ export function App() {
       return;
     }
 
-    const path = directoryForAlbum(bootstrap.library.tracks, albumId);
+    const path = directoryForAlbum(visibleTracks, albumId);
     if (!path) {
       return;
     }
@@ -905,7 +926,7 @@ export function App() {
     const paths = Array.from(
       new Set(
         albumIds
-          .map((albumId) => directoryForAlbum(bootstrap.library.tracks, albumId))
+          .map((albumId) => directoryForAlbum(visibleTracks, albumId))
           .filter((path): path is string => Boolean(path)),
       ),
     );
@@ -1059,6 +1080,16 @@ export function App() {
   async function handleAutoSyncOnStartupChange(enabled: boolean) {
     try {
       const settings = await updateAutoSyncOnStartup(enabled);
+      setBootstrap((current) => (current ? { ...current, settings } : current));
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function handleRemoteStorageOnlyChange(enabled: boolean) {
+    try {
+      const settings = await updateRemoteStorageOnly(enabled);
       setBootstrap((current) => (current ? { ...current, settings } : current));
       setError(null);
     } catch (reason) {
@@ -1272,7 +1303,7 @@ export function App() {
       return;
     }
 
-    const tracksForSelection = tracksForAlbum(bootstrap.library.tracks, albumId);
+    const tracksForSelection = tracksForAlbum(visibleTracks, albumId);
     if (tracksForSelection.length === 0) {
       return;
     }
@@ -1289,7 +1320,7 @@ export function App() {
     }
 
     const tracksForSelection = albumIds.flatMap((albumId) =>
-      tracksForAlbum(bootstrap.library.tracks, albumId),
+      tracksForAlbum(visibleTracks, albumId),
     );
 
     if (tracksForSelection.length === 0) {
@@ -1873,8 +1904,9 @@ export function App() {
                 onReplaceQueue={(albumIds) =>
                   handleReplaceQueueForAlbums(albumIds, false)}
                 onUploadAlbum={(albumTitle) => setUploadAlbumTitle(albumTitle)}
+                remoteStorageOnly={remoteStorageOnly}
                 selectedAlbumId={selectedAlbumId}
-                tracks={bootstrap.library.tracks}
+                tracks={visibleTracks}
               />
             ) : null}
 
@@ -1898,7 +1930,7 @@ export function App() {
                 selectedAlbumId={selectedAlbumId}
                 sessionExportTags={sessionExportTags}
                 settings={bootstrap.settings.albumTrackTable}
-                tracks={bootstrap.library.tracks}
+                tracks={visibleTracks}
               />
             ) : null}
 
@@ -1941,7 +1973,7 @@ export function App() {
               onUploadAlbum={(albumTitle) => setUploadAlbumTitle(albumTitle)}
               sessionExportTags={sessionExportTags}
               settings={bootstrap.settings.trackTable}
-              tracks={bootstrap.library.tracks}
+              tracks={visibleTracks}
             />
 
             {activePane === 'playlist' ? (
@@ -1989,13 +2021,15 @@ export function App() {
                 currentOutputDevice={bootstrap.playback.outputDevice}
                 draftCatalogRules={draftCatalogRules}
                 draftMappings={draftMappings}
-                library={bootstrap.library}
+                library={{ ...bootstrap.library, tracks: visibleTracks }}
                 onAddCatalogRule={handleAddCatalogRule}
                 onAddDirectory={handleAddDirectory}
                 onAddField={handleAddField}
                 onClearLibrary={handleClearLibrary}
                 onPlaybackPreferencesChange={handlePlaybackPreferencesChange}
                 onAutoSyncOnStartupChange={handleAutoSyncOnStartupChange}
+                remoteStorageOnly={remoteStorageOnly}
+                onRemoteStorageOnlyChange={handleRemoteStorageOnlyChange}
                 onRemoveCatalogRule={handleRemoveCatalogRule}
                 onRemoveField={handleRemoveField}
                 onRemoveRoot={handleRemoveRoot}

@@ -64,4 +64,10 @@ impl SettingsStore {
         state.auto_sync_on_startup = enabled;
         state.clone()
     }
+
+    pub async fn update_remote_storage_only(&self, enabled: bool) -> SettingsSnapshot {
+        let mut state = self.state.write().await;
+        state.remote_storage_only = enabled;
+        state.clone()
+    }
 }

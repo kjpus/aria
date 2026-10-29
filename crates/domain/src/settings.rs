@@ -169,6 +169,8 @@ pub struct SettingsSnapshot {
     pub playback: PlaybackPreferences,
     #[serde(default)]
     pub auto_sync_on_startup: bool,
+    #[serde(default)]
+    pub remote_storage_only: bool,
 }
 
 impl Default for SettingsSnapshot {
@@ -181,6 +183,7 @@ impl Default for SettingsSnapshot {
             playlist_track_table: default_playlist_track_table_settings(),
             playback: PlaybackPreferences::default(),
             auto_sync_on_startup: false,
+            remote_storage_only: false,
         }
     }
 }

@@ -873,6 +873,12 @@ impl AppCore {
         snapshot
     }
 
+    pub async fn update_remote_storage_only(&self, enabled: bool) -> SettingsSnapshot {
+        let snapshot = self.settings.update_remote_storage_only(enabled).await;
+        self.emit(AppEvent::Settings(snapshot.clone()));
+        snapshot
+    }
+
     fn emit(&self, event: AppEvent) {
         let _ = self.events.send(event);
     }
@@ -1797,6 +1803,171 @@ impl AppCore {
             )));
         }
 
+        let remote_storage_only = self.settings.snapshot().await.remote_storage_only;
+        if !remote_storage_only {
+            let backend = create_backend_for_target(&target)?;
+            let mut current_usage = self.database.get_total_synced_bytes_for_target(&target.id)?;
+
+            let library_snapshot = self.library.snapshot().await;
+            let local_tracks: Vec<ScannedTrack> = library_snapshot
+                .tracks
+                .into_iter()
+                .filter(|t| !t.path.starts_with("remote://"))
+                .collect();
+
+            let album_groups = group_local_tracks_by_album(&local_tracks);
+            let total_albums = album_groups.len();
+
+            let (progress_tx, mut progress_rx) = broadcast::channel(64);
+            let events = self.events.clone();
+
+            tokio::spawn(async move {
+                while let Ok(progress) = progress_rx.recv().await {
+                    let _ = events.send(AppEvent::Remote(RemoteEvent::SyncProgress(progress)));
+                }
+            });
+
+            let mut total_new_tracks_uploaded = 0usize;
+            let mut total_new_albums_uploaded = 0usize;
+            let mut had_error = false;
+            let mut last_error_msg = None;
+
+            for (album_idx, (album_title, tracks_to_upload)) in album_groups.into_iter().enumerate() {
+                let _ = progress_tx.send(RemoteSyncProgressEvent {
+                    target_id: target.id.clone(),
+                    target_name: target.name.clone(),
+                    current_album: format!("{album_title} ({}/{})", album_idx + 1, total_albums),
+                    completed_albums: album_idx,
+                    total_albums,
+                    status: "uploading_album".to_string(),
+                });
+
+                let options = UploadOptions {
+                    compute_checksums: false,
+                    current_target_usage_bytes: current_usage,
+                };
+
+                let (album_progress_tx, mut album_progress_rx) = broadcast::channel::<UploadProgressEvent>(32);
+                let target_id_clone = target.id.clone();
+                let target_name_clone = target.name.clone();
+                let album_title_display = album_title.clone();
+                let progress_tx_clone = progress_tx.clone();
+
+                tokio::spawn(async move {
+                    while let Ok(upload_prog) = album_progress_rx.recv().await {
+                        let _ = progress_tx_clone.send(RemoteSyncProgressEvent {
+                            target_id: target_id_clone.clone(),
+                            target_name: target_name_clone.clone(),
+                            current_album: format!("{}: {}", album_title_display, upload_prog.current_file),
+                            completed_albums: album_idx,
+                            total_albums,
+                            status: upload_prog.status,
+                        });
+                    }
+                });
+
+                match upload_album(
+                    backend.clone(),
+                    &target,
+                    &album_title,
+                    &tracks_to_upload,
+                    options,
+                    Some(album_progress_tx),
+                )
+                .await
+                {
+                    Ok(result) => {
+                        if !result.synced_items.is_empty() {
+                            let _ = self.database.save_remote_synced_items_batch(&result.synced_items);
+                        }
+                        if let Ok(usage) = self.database.get_total_synced_bytes_for_target(&target.id) {
+                            current_usage = usage;
+                        }
+                        total_new_tracks_uploaded += result.new_tracks_uploaded;
+                        if result.new_tracks_uploaded > 0 {
+                            total_new_albums_uploaded += 1;
+                        }
+                    }
+                    Err(e) => {
+                        had_error = true;
+                        last_error_msg = Some(e.to_string());
+                        tracing::warn!("Failed to upload album '{album_title}' during local-to-remote sync: {e}");
+                    }
+                }
+            }
+
+            let playlists_snapshot = self.playlists.snapshot().await;
+            let mut total_new_playlists = 0usize;
+            for playlist in &playlists_snapshot.playlists {
+                let playlist_tracks: Vec<ScannedTrack> = playlist
+                    .track_ids
+                    .iter()
+                    .filter_map(|id| local_tracks.iter().find(|t| &t.id == id).cloned())
+                    .collect();
+                if playlist_tracks.is_empty() {
+                    continue;
+                }
+                let mut r_tracks = Vec::new();
+                for pt in &playlist_tracks {
+                    let alb_title = pt
+                        .mapped_fields
+                        .get("album")
+                        .and_then(|a| a.first())
+                        .map(|s| s.as_str())
+                        .unwrap_or(&pt.file_name);
+                    if let Ok(manifest) = build_album_manifest(alb_title, &[pt.clone()], None, false) {
+                        let folder = derive_systematic_folder_name(&manifest);
+                        let m_track = manifest.tracks.first();
+                        let rel_name = m_track.map(|m| m.relative_file_name.as_str()).unwrap_or(&pt.file_name);
+                        r_tracks.push(RemotePlaylistTrack {
+                            track_id: pt.id.clone(),
+                            relative_path: format!("{}/{}", folder, rel_name),
+                            title: pt.mapped_fields.get("title").and_then(|t| t.first()).cloned().unwrap_or_else(|| pt.file_name.clone()),
+                            composer: pt.mapped_fields.get("composer").and_then(|c| c.first()).cloned(),
+                            album: Some(alb_title.to_string()),
+                            duration_ms: pt.audio.duration_ms,
+                        });
+                    }
+                }
+                if !r_tracks.is_empty() {
+                    if let Ok(synced_item) = upload_playlist(backend.clone(), &target, playlist, &r_tracks, None).await {
+                        let _ = self.database.save_remote_synced_item(&synced_item);
+                        total_new_playlists += 1;
+                    }
+                }
+            }
+
+            let now = chrono::Utc::now().to_rfc3339();
+            let _ = self.database.save_remote_target_last_sync(&target.id, &now);
+
+            let _ = progress_tx.send(RemoteSyncProgressEvent {
+                target_id: target.id.clone(),
+                target_name: target.name.clone(),
+                current_album: String::new(),
+                completed_albums: total_albums,
+                total_albums,
+                status: "completed".to_string(),
+            });
+
+            let completed_event = RemoteSyncCompletedEvent {
+                target_id: target.id.clone(),
+                target_name: target.name.clone(),
+                new_albums_count: total_new_albums_uploaded,
+                new_tracks_count: total_new_tracks_uploaded,
+                new_playlists_count: total_new_playlists,
+                success: !had_error || total_new_tracks_uploaded > 0 || total_albums == 0,
+                error_message: if had_error && total_new_tracks_uploaded == 0 && total_albums > 0 {
+                    last_error_msg
+                } else {
+                    None
+                },
+            };
+            let _ = self.events.send(AppEvent::Remote(RemoteEvent::SyncCompleted(
+                completed_event.clone(),
+            )));
+            return Ok(completed_event);
+        }
+
         let backend = create_backend_for_target(&target)?;
         let artwork_cache_dir = self.cache_manager.cache_dir().join("artwork");
 
@@ -2452,6 +2623,40 @@ pub fn group_playlist_tracks_by_album(
     album_groups
 }
 
+pub fn group_local_tracks_by_album(
+    tracks: &[ScannedTrack],
+) -> Vec<(String, Vec<ScannedTrack>)> {
+    let get_album_title = |t: &ScannedTrack| -> String {
+        t.mapped_fields
+            .get("album")
+            .and_then(|a| a.first())
+            .map(|s| s.as_str())
+            .unwrap_or(&t.file_name)
+            .trim()
+            .to_string()
+    };
+
+    let mut album_groups: Vec<(String, Vec<ScannedTrack>)> = Vec::new();
+    let mut album_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    for track in tracks {
+        if track.path.starts_with("remote://") {
+            continue;
+        }
+        let title = get_album_title(track);
+        let key = title.to_lowercase();
+        if let Some(&idx) = album_map.get(&key) {
+            album_groups[idx].1.push(track.clone());
+        } else {
+            let idx = album_groups.len();
+            album_map.insert(key, idx);
+            album_groups.push((title, vec![track.clone()]));
+        }
+    }
+
+    album_groups
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2661,5 +2866,35 @@ Version=2
         let playlist_path = std::path::Path::new("C:\\Music\\Mozart\\Album\\29. Arie. \"Wenn der Freude\".flac");
         let matched = matcher.find_match(playlist_path);
         assert_eq!(matched.as_deref(), Some("aria_track_29"));
+    }
+
+    #[test]
+    fn test_group_local_tracks_by_album_ignores_remote_tracks() {
+        let mut t1 = ScannedTrack::default();
+        t1.id = "t1".into();
+        t1.path = "D:\\Music\\Beethoven\\Symphony5\\01.flac".into();
+        t1.mapped_fields.insert("album".into(), vec!["Symphony No. 5".into()]);
+
+        let mut t2 = ScannedTrack::default();
+        t2.id = "t2".into();
+        t2.path = "D:\\Music\\Beethoven\\Symphony5\\02.flac".into();
+        t2.mapped_fields.insert("album".into(), vec!["Symphony No. 5".into()]);
+
+        let mut t3_remote = ScannedTrack::default();
+        t3_remote.id = "t3".into();
+        t3_remote.path = "remote://target_1/Mozart/Requiem/01.flac".into();
+        t3_remote.mapped_fields.insert("album".into(), vec!["Requiem".into()]);
+
+        let mut t4 = ScannedTrack::default();
+        t4.id = "t4".into();
+        t4.path = "D:\\Music\\Bach\\Goldberg\\01.flac".into();
+        t4.mapped_fields.insert("album".into(), vec!["Goldberg Variations".into()]);
+
+        let groups = group_local_tracks_by_album(&[t1, t2, t3_remote, t4]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, "Symphony No. 5");
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[1].0, "Goldberg Variations");
+        assert_eq!(groups[1].1.len(), 1);
     }
 }

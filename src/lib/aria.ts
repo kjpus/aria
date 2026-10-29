@@ -255,6 +255,8 @@ let previewBootstrap: AppBootstrap = {
       exclusiveMode: false,
       volume: 1,
     },
+    autoSyncOnStartup: false,
+    remoteStorageOnly: false,
   },
 };
 
@@ -1084,6 +1086,22 @@ export async function updateAutoSyncOnStartup(
     return previewBootstrap.settings;
   }
   return invoke<SettingsSnapshot>('update_auto_sync_on_startup', { enabled });
+}
+
+export async function updateRemoteStorageOnly(
+  enabled: boolean,
+): Promise<SettingsSnapshot> {
+  if (!isTauriRuntime) {
+    previewBootstrap = {
+      ...previewBootstrap,
+      settings: {
+        ...previewBootstrap.settings,
+        remoteStorageOnly: enabled,
+      },
+    };
+    return previewBootstrap.settings;
+  }
+  return invoke<SettingsSnapshot>('update_remote_storage_only', { enabled });
 }
 
 export async function listenToAppEvents(

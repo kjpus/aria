@@ -30,6 +30,7 @@ type LibraryPaneProps = {
   onUploadAlbum?: (albumTitle: string) => void;
   onRefreshRemote?: () => void;
   isSyncingRemote?: boolean;
+  remoteStorageOnly?: boolean;
   gridSize?: AlbumGridSize;
   onGridSizeChange?: (size: AlbumGridSize) => void;
 };
@@ -57,6 +58,7 @@ export function LibraryPane({
   onUploadAlbum,
   onRefreshRemote,
   isSyncingRemote,
+  remoteStorageOnly = false,
   gridSize = 'medium',
   onGridSizeChange,
 }: LibraryPaneProps) {
@@ -341,11 +343,19 @@ export function LibraryPane({
                 className="ghost-button library-toolbar__button"
                 disabled={isSyncingRemote}
                 onClick={onRefreshRemote}
-                title="Refresh and download library metadata and tracks from remote storage"
+                title={
+                  remoteStorageOnly
+                    ? 'Refresh and download library metadata and tracks from remote storage'
+                    : 'Sync and upload local library to remote storage'
+                }
                 type="button"
               >
                 <RefreshIcon className={isSyncingRemote ? 'aria-spinning' : ''} />
-                <span>{isSyncingRemote ? 'Refreshing...' : 'Refresh'}</span>
+                <span>
+                  {isSyncingRemote
+                    ? (remoteStorageOnly ? 'Refreshing...' : 'Syncing...')
+                    : (remoteStorageOnly ? 'Refresh' : 'Sync to remote')}
+                </span>
               </button>
             ) : null}
 
@@ -358,7 +368,9 @@ export function LibraryPane({
             <div className="empty-state-card">
               <p className="empty-state">
                 {albums.length === 0
-                  ? 'No music scanned yet. Go to Settings to add your music folders.'
+                  ? remoteStorageOnly
+                    ? 'No remote music found. Click Refresh or configure a remote target in Settings.'
+                    : 'No music scanned yet. Go to Settings to add your music folders.'
                   : 'No albums match the current filter.'}
               </p>
             </div>

@@ -54,6 +54,8 @@ type SettingsPaneProps = {
   onThemeChange: (theme: ThemePreference) => void;
   onPlaybackPreferencesChange: (playback: PlaybackPreferences) => void;
   onAutoSyncOnStartupChange?: (enabled: boolean) => void;
+  remoteStorageOnly?: boolean;
+  onRemoteStorageOnlyChange?: (enabled: boolean) => void;
 };
 
 export function SettingsPane({
@@ -84,6 +86,8 @@ export function SettingsPane({
   onThemeChange,
   onPlaybackPreferencesChange,
   onAutoSyncOnStartupChange,
+  remoteStorageOnly,
+  onRemoteStorageOnlyChange,
 }: SettingsPaneProps) {
   const [isMappingsDialogOpen, setIsMappingsDialogOpen] = useState(false);
   const [isCatalogRulesDialogOpen, setIsCatalogRulesDialogOpen] = useState(false);
@@ -190,6 +194,8 @@ export function SettingsPane({
         onTargetsChange={onRemoteTargetsChange}
         autoSyncOnStartup={settings.autoSyncOnStartup ?? false}
         onAutoSyncOnStartupChange={onAutoSyncOnStartupChange}
+        remoteStorageOnly={remoteStorageOnly ?? settings.remoteStorageOnly ?? false}
+        onRemoteStorageOnlyChange={onRemoteStorageOnlyChange}
       />
 
       {isMappingsDialogOpen ? (

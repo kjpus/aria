@@ -22,6 +22,8 @@ type RemoteSettingsPanelProps = {
   onTargetsChange: (targets: RemoteTarget[]) => void;
   autoSyncOnStartup?: boolean;
   onAutoSyncOnStartupChange?: (enabled: boolean) => void;
+  remoteStorageOnly?: boolean;
+  onRemoteStorageOnlyChange?: (enabled: boolean) => void;
 };
 
 export function RemoteSettingsPanel({
@@ -29,6 +31,8 @@ export function RemoteSettingsPanel({
   onTargetsChange,
   autoSyncOnStartup = false,
   onAutoSyncOnStartupChange,
+  remoteStorageOnly = false,
+  onRemoteStorageOnlyChange,
 }: RemoteSettingsPanelProps) {
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [editingTarget, setEditingTarget] = useState<RemoteTarget | null>(null);
@@ -92,7 +96,9 @@ export function RemoteSettingsPanel({
       const result = await syncRemoteTarget(targetId);
       if (result.success) {
         setSyncBanner(
-          `✓ ${result.targetName}: synced ${result.newAlbumsCount} new album(s) (${result.newTracksCount} track(s))`
+          remoteStorageOnly
+            ? `✓ ${result.targetName}: synced ${result.newAlbumsCount} new album(s) (${result.newTracksCount} track(s)) from remote`
+            : `✓ ${result.targetName}: synced to remote, uploaded ${result.newAlbumsCount} album(s) (${result.newTracksCount} track(s))`
         );
       }
     } catch (err) {
@@ -114,7 +120,10 @@ export function RemoteSettingsPanel({
       const results = await syncAllRemoteTargets();
       const totalAlbums = results.reduce((acc, r) => acc + r.newAlbumsCount, 0);
       const totalTracks = results.reduce((acc, r) => acc + r.newTracksCount, 0);
-      setSyncBanner(`✓ Completed remote sync: ${totalAlbums} new album(s) (${totalTracks} track(s)) imported`);
+      const actionDesc = remoteStorageOnly
+        ? `${totalAlbums} new album(s) (${totalTracks} track(s)) imported from remote`
+        : `${totalAlbums} album(s) (${totalTracks} track(s)) uploaded to remote`;
+      setSyncBanner(`✓ Completed remote sync: ${actionDesc}`);
     } catch (err) {
       setActionError(`Sync All error: ${String(err)}`);
     } finally {
@@ -191,7 +200,11 @@ export function RemoteSettingsPanel({
                 onClick={() => void handleSyncAll()}
                 type="button"
               >
-                {isSyncingAll ? 'Syncing all...' : 'Sync all remotes'}
+                {isSyncingAll
+                  ? 'Syncing all...'
+                  : remoteStorageOnly
+                  ? 'Sync all from remote'
+                  : 'Sync all to remote'}
               </button>
             ) : null}
             <button
@@ -428,6 +441,18 @@ export function RemoteSettingsPanel({
           </label>
           <p className="dialog-section__note" style={{ marginTop: '0.35rem', marginLeft: '1.6rem' }}>
             When disabled (recommended), Aria loads your library instantly from the local database on startup and only syncs when you click &quot;Refresh from Remote&quot;. Newly added targets will still perform their first initial sync.
+          </p>
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', cursor: 'pointer', fontWeight: 500, marginTop: '1rem' }}>
+            <input
+              type="checkbox"
+              checked={remoteStorageOnly}
+              onChange={(e) => onRemoteStorageOnlyChange?.(e.target.checked)}
+            />
+            <span>Remote storage only</span>
+          </label>
+          <p className="dialog-section__note" style={{ marginTop: '0.35rem', marginLeft: '1.6rem' }}>
+            If unchecked, sync goes from local to remote only and remote tracks do not show up in the library. If checked, only remote tracks are shown in the library.
           </p>
         </div>
       </SectionCard>

@@ -165,6 +165,7 @@ export type SettingsSnapshot = {
   playlistTrackTable: TrackTableSettings;
   playback: PlaybackPreferences;
   autoSyncOnStartup?: boolean;
+  remoteStorageOnly?: boolean;
 };
 
 export type RemoteBackendType = 'google_drive' | 'filesystem' | 'web_dav' | 'smb';
