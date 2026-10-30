@@ -30,12 +30,43 @@ export function firstField(track: ScannedTrack, key: string): string {
   return track.mappedFields[key]?.[0] ?? '';
 }
 
+const DISC_SUBDIR_PATTERN = /^(?:cd|disc|disk|vol|volume|part)[.\s_-]*0*[0-9]+/i;
+
+export function effectiveAlbumDirectoryForPath(filePath: string): string {
+  const lastSep = Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/'));
+  if (lastSep < 0) {
+    return '';
+  }
+
+  const parentDir = filePath.slice(0, lastSep);
+  const parentSep = Math.max(parentDir.lastIndexOf('\\'), parentDir.lastIndexOf('/'));
+  const folderName = parentSep >= 0 ? parentDir.slice(parentSep + 1) : parentDir;
+
+  if (DISC_SUBDIR_PATTERN.test(folderName.trim())) {
+    const grandparent = parentSep >= 0 ? parentDir.slice(0, parentSep) : '';
+    if (grandparent) {
+      return grandparent;
+    }
+  }
+
+  return parentDir;
+}
+
+export function albumDirectoryForTrack(track: ScannedTrack): string {
+  return effectiveAlbumDirectoryForPath(track.path);
+}
+
 export function albumTitleForTrack(track: ScannedTrack): string {
   return firstField(track, 'album') || track.fileName;
 }
 
 export function albumIdForTrack(track: ScannedTrack): string {
-  return albumTitleForTrack(track).trim().toLowerCase() || track.id;
+  const title = albumTitleForTrack(track).trim().toLowerCase();
+  const dir = albumDirectoryForTrack(track).trim().toLowerCase().replace(/\\/g, '/');
+  if (title && dir) {
+    return `${title}::${dir}`;
+  }
+  return title || dir || track.id;
 }
 
 export function albumCreditForTrack(track: ScannedTrack): string {
@@ -78,7 +109,10 @@ export function buildAlbumCards(tracks: ScannedTrack[]): AlbumCardModel[] {
   }
 
   return Array.from(albums.values()).sort((left, right) =>
-    left.title.localeCompare(right.title),
+    left.title.localeCompare(right.title) ||
+    left.year.localeCompare(right.year) ||
+    left.credit.localeCompare(right.credit) ||
+    left.id.localeCompare(right.id),
   );
 }
 
@@ -143,11 +177,7 @@ export function directoryForAlbum(
     return null;
   }
 
-  const lastSeparator = Math.max(
-    firstTrack.path.lastIndexOf('\\'),
-    firstTrack.path.lastIndexOf('/'),
-  );
-  return lastSeparator >= 0 ? firstTrack.path.slice(0, lastSeparator) : null;
+  return albumDirectoryForTrack(firstTrack) || null;
 }
 
 export function sortQueueItems(

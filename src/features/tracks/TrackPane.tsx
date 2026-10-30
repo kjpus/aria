@@ -37,7 +37,7 @@ type TrackPaneProps = {
   onAddAlbumToQueue: (albumId: string) => void | Promise<void>;
   onGoToDirectory: (albumId: string) => void | Promise<void>;
   onPlayAlbum: (albumId: string) => void | Promise<void>;
-  onUploadAlbum?: (albumTitle: string) => void;
+  onUploadAlbum?: (albumTitle: string, albumId?: string) => void;
   onExportField: (
     tracks: ScannedTrack[],
     fieldKey: string,
@@ -1272,7 +1272,7 @@ export function TrackPane({
                           albumGroup?.album?.title ||
                           albumGroup?.tracks[0]?.mappedFields.album?.[0];
                         if (title) {
-                          onUploadAlbum(title);
+                          onUploadAlbum(title, albumContextMenu.albumId);
                         }
                       }}
                       type="button"

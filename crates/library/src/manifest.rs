@@ -30,6 +30,65 @@ pub fn sanitize_path_segment(segment: &str) -> String {
     }
 }
 
+/// Matches common disc folder patterns like "Disc 1", "Disc 02", "CD 1", "CD01", "Disk 1", "Volume 1", "Vol. 1", "Part 1".
+pub fn is_disc_directory_name(name: &str) -> bool {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)^(?:cd|disc|disk|vol|volume|part)[.\s_-]*0*[0-9]+").unwrap()
+    });
+    re.is_match(name.trim())
+}
+
+/// Returns the effective album directory for a track path, collapsing disc subdirectories (e.g. "Disc 1") to their parent.
+pub fn effective_album_directory(path: &str) -> String {
+    let last_sep = path.rfind(|c| c == '/' || c == '\\');
+    let parent = match last_sep {
+        Some(idx) => &path[..idx],
+        None => return String::new(),
+    };
+
+    let parent_sep = parent.rfind(|c| c == '/' || c == '\\');
+    let folder_name = match parent_sep {
+        Some(idx) => &parent[idx + 1..],
+        None => parent,
+    };
+
+    if is_disc_directory_name(folder_name) {
+        if let Some(idx) = parent_sep {
+            return parent[..idx].to_string();
+        }
+    }
+
+    parent.to_string()
+}
+
+/// Derives a consistent album ID for a track based on its album title and effective album directory.
+pub fn album_id_for_track(track: &ScannedTrack) -> String {
+    let title = track
+        .mapped_fields
+        .get("album")
+        .and_then(|a| a.first())
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| track.file_name.trim().to_lowercase());
+
+    let dir = effective_album_directory(&track.path)
+        .trim()
+        .to_lowercase()
+        .replace('\\', "/");
+
+    if !title.is_empty() && !dir.is_empty() {
+        format!("{title}::{dir}")
+    } else if !title.is_empty() {
+        title
+    } else if !dir.is_empty() {
+        dir
+    } else {
+        track.id.clone()
+    }
+}
+
 /// Derives a deterministic canonical album ID based on album title, composers, and catalog numbers.
 pub fn derive_canonical_album_id(
     title: &str,
@@ -370,6 +429,60 @@ mod tests {
         );
         assert_eq!(sanitize_path_segment("  ...test/folder...  "), "test_folder");
         assert_eq!(sanitize_path_segment(""), "Unknown");
+    }
+
+    #[test]
+    fn test_disc_directory_and_album_id() {
+        assert!(is_disc_directory_name("Disc 1"));
+        assert!(is_disc_directory_name("Disc 02"));
+        assert!(is_disc_directory_name("disc 10"));
+        assert!(is_disc_directory_name("CD 1"));
+        assert!(is_disc_directory_name("CD2"));
+        assert!(is_disc_directory_name("Disk 3"));
+        assert!(is_disc_directory_name("Vol. 1"));
+        assert!(is_disc_directory_name("Volume 2"));
+        assert!(is_disc_directory_name("Part 1"));
+        assert!(!is_disc_directory_name("Discovery"));
+        assert!(!is_disc_directory_name("Discus"));
+        assert!(!is_disc_directory_name("Partita No. 1"));
+        assert!(!is_disc_directory_name("Volume"));
+
+        let single_disc_path = "G:\\Music\\Vivaldi - Four Seasons (1994)\\01.flac";
+        assert_eq!(
+            effective_album_directory(single_disc_path),
+            "G:\\Music\\Vivaldi - Four Seasons (1994)"
+        );
+
+        let multi_disc1 = "G:\\Music\\Bach - Mass\\Disc 1\\01.flac";
+        let multi_disc2 = "G:\\Music\\Bach - Mass\\Disc 2\\01.flac";
+        assert_eq!(
+            effective_album_directory(multi_disc1),
+            "G:\\Music\\Bach - Mass"
+        );
+        assert_eq!(
+            effective_album_directory(multi_disc2),
+            "G:\\Music\\Bach - Mass"
+        );
+
+        let mut t1 = ScannedTrack::default();
+        t1.path = multi_disc1.to_string();
+        t1.mapped_fields.insert("album".into(), vec!["Mass in B Minor".into()]);
+
+        let mut t2 = ScannedTrack::default();
+        t2.path = multi_disc2.to_string();
+        t2.mapped_fields.insert("album".into(), vec!["Mass in B Minor".into()]);
+
+        assert_eq!(album_id_for_track(&t1), album_id_for_track(&t2));
+        assert_eq!(
+            album_id_for_track(&t1),
+            "mass in b minor::g:/music/bach - mass"
+        );
+
+        // Different recordings with same album name get different IDs
+        let mut t3_other_recording = ScannedTrack::default();
+        t3_other_recording.path = "G:\\Music\\Gardiner - Mass\\01.flac".to_string();
+        t3_other_recording.mapped_fields.insert("album".into(), vec!["Mass in B Minor".into()]);
+        assert_ne!(album_id_for_track(&t1), album_id_for_track(&t3_other_recording));
     }
 
     #[test]

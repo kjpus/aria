@@ -48,7 +48,7 @@ type AlbumPaneProps = {
   onReplaceQueue: (albumId: string) => void | Promise<void>;
   onPlayAlbum: (albumId: string) => void | Promise<void>;
   onGoToDirectory: (albumId: string) => void | Promise<void>;
-  onUploadAlbum?: (albumTitle: string) => void;
+  onUploadAlbum?: (albumTitle: string, albumId?: string) => void;
   sessionExportTags: string[];
 };
 
@@ -763,7 +763,7 @@ export function AlbumPane({
                 <button
                   onClick={() => {
                     setAlbumContextMenu(null);
-                    onUploadAlbum(selectedAlbum.title);
+                    onUploadAlbum(selectedAlbum.title, selectedAlbum.id);
                   }}
                   type="button"
                 >

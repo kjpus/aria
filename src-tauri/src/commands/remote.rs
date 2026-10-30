@@ -72,8 +72,9 @@ pub async fn upload_album_to_target(
     state: State<'_, AppState>,
     album_title: String,
     target_id: String,
+    album_id: Option<String>,
 ) -> Result<(), CommandError> {
-    Ok(state.core.upload_album_to_target(album_title, target_id).await?)
+    Ok(state.core.upload_album_to_target(album_title, target_id, album_id).await?)
 }
 
 #[tauri::command]

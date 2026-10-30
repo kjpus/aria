@@ -4,6 +4,7 @@ import { uploadAlbumToTarget } from '../../lib/aria';
 
 type RemoteUploadDialogProps = {
   albumTitle: string;
+  albumId?: string;
   targets: RemoteTarget[];
   onClose: () => void;
   onUploadStarted: (targetName: string, albumTitle: string) => void;
@@ -11,6 +12,7 @@ type RemoteUploadDialogProps = {
 
 export function RemoteUploadDialog({
   albumTitle,
+  albumId,
   targets,
   onClose,
   onUploadStarted,
@@ -38,7 +40,7 @@ export function RemoteUploadDialog({
     setError(null);
     try {
       // Start upload in background
-      void uploadAlbumToTarget(albumTitle, selectedTargetId).catch((err) => {
+      void uploadAlbumToTarget(albumTitle, selectedTargetId, albumId).catch((err) => {
         console.error('Upload failed:', err);
       });
       onUploadStarted(target.name, albumTitle);

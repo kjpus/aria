@@ -1214,11 +1214,16 @@ export async function completeGdriveAuthFlow(
 export async function uploadAlbumToTarget(
   albumTitle: string,
   targetId: string,
+  albumId?: string,
 ): Promise<void> {
   if (!isTauriRuntime) {
     return;
   }
-  return invoke<void>('upload_album_to_target', { albumTitle, targetId });
+  return invoke<void>('upload_album_to_target', {
+    albumTitle,
+    targetId,
+    albumId: albumId ?? null,
+  });
 }
 
 export async function uploadPlaylistToTarget(

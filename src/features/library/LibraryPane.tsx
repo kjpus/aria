@@ -27,7 +27,7 @@ type LibraryPaneProps = {
   onReplaceQueue: (albumIds: string[]) => void | Promise<void>;
   onPlayAlbum: (albumIds: string[]) => void | Promise<void>;
   onGoToDirectory: (albumIds: string[]) => void | Promise<void>;
-  onUploadAlbum?: (albumTitle: string) => void;
+  onUploadAlbum?: (albumTitle: string, albumId?: string) => void;
   onRefreshRemote?: () => void;
   isSyncingRemote?: boolean;
   remoteStorageOnly?: boolean;
@@ -480,7 +480,7 @@ export function LibraryPane({
                       const album = albums.find((a) => a.id === contextMenu.albumIds[0]);
                       setContextMenu(null);
                       if (album) {
-                        onUploadAlbum(album.title);
+                        onUploadAlbum(album.title, album.id);
                       }
                     }}
                     type="button"

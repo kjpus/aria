@@ -226,6 +226,7 @@ export function App() {
   } | null>(null);
   const [playlistImportPath, setPlaylistImportPath] = useState<string | null>(null);
   const [uploadAlbumTitle, setUploadAlbumTitle] = useState<string | null>(null);
+  const [uploadAlbumId, setUploadAlbumId] = useState<string | null>(null);
   const [uploadPlaylist, setUploadPlaylist] = useState<Playlist | null>(null);
   const [activeUploadProgress, setActiveUploadProgress] = useState<UploadProgressEvent | null>(null);
   const [uploadStatusMessage, setUploadStatusMessage] = useState<string | null>(null);
@@ -1903,7 +1904,10 @@ export function App() {
                 onRefreshRemote={handleRefreshFromRemote}
                 onReplaceQueue={(albumIds) =>
                   handleReplaceQueueForAlbums(albumIds, false)}
-                onUploadAlbum={(albumTitle) => setUploadAlbumTitle(albumTitle)}
+                onUploadAlbum={(albumTitle, albumId) => {
+                  setUploadAlbumTitle(albumTitle);
+                  setUploadAlbumId(albumId ?? null);
+                }}
                 remoteStorageOnly={remoteStorageOnly}
                 selectedAlbumId={selectedAlbumId}
                 tracks={visibleTracks}
@@ -1926,7 +1930,10 @@ export function App() {
                 onReplaceQueue={(albumId) => handleReplaceQueue(albumId, false)}
                 onShowInExplorer={handleShowTrackInExplorer}
                 onTrackTableChange={handleAlbumTrackTableChange}
-                onUploadAlbum={(albumTitle) => setUploadAlbumTitle(albumTitle)}
+                onUploadAlbum={(albumTitle, albumId) => {
+                  setUploadAlbumTitle(albumTitle);
+                  setUploadAlbumId(albumId ?? null);
+                }}
                 selectedAlbumId={selectedAlbumId}
                 sessionExportTags={sessionExportTags}
                 settings={bootstrap.settings.albumTrackTable}
@@ -1970,7 +1977,10 @@ export function App() {
               onReplaceQueueAndPlayTracks={handleReplaceQueueAndPlayTracks}
               onShowInExplorer={handleShowTrackInExplorer}
               onTrackTableChange={handleTrackTableChange}
-              onUploadAlbum={(albumTitle) => setUploadAlbumTitle(albumTitle)}
+              onUploadAlbum={(albumTitle, albumId) => {
+                setUploadAlbumTitle(albumTitle);
+                setUploadAlbumId(albumId ?? null);
+              }}
               sessionExportTags={sessionExportTags}
               settings={bootstrap.settings.trackTable}
               tracks={visibleTracks}
@@ -2094,8 +2104,12 @@ export function App() {
       {uploadAlbumTitle ? (
         <RemoteUploadDialog
           albumTitle={uploadAlbumTitle}
+          albumId={uploadAlbumId ?? undefined}
           targets={bootstrap.remoteTargets ?? []}
-          onClose={() => setUploadAlbumTitle(null)}
+          onClose={() => {
+            setUploadAlbumTitle(null);
+            setUploadAlbumId(null);
+          }}
           onUploadStarted={(targetName, title) => {
             setError(null);
             setActiveSyncProgress(null);

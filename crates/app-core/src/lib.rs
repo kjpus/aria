@@ -7,7 +7,7 @@ use aria_domain::{
     RemoteTarget, ScannedTrack, SettingsSnapshot, ThemePreference, TrackTableSettings,
     TrackTagEditRequest, UploadCompletedEvent, UploadFailedItem, UploadProgressEvent,
 };
-use aria_library::manifest::{build_album_manifest, derive_systematic_folder_name};
+use aria_library::manifest::{album_id_for_track, build_album_manifest, derive_systematic_folder_name};
 use aria_library::{LibraryError, LibraryService};
 use aria_playback::{PlaybackError, PlaybackService};
 use aria_playlists::{PlaylistError, PlaylistService};
@@ -1339,6 +1339,7 @@ impl AppCore {
         &self,
         album_title: String,
         target_id: String,
+        album_id: Option<String>,
     ) -> Result<(), AppCoreError> {
         let targets = self.database.load_remote_targets()?;
         let target = targets
@@ -1351,6 +1352,12 @@ impl AppCore {
             .tracks
             .into_iter()
             .filter(|t| {
+                if let Some(ref target_id) = album_id {
+                    let tid = album_id_for_track(t);
+                    if tid.eq_ignore_ascii_case(target_id) {
+                        return true;
+                    }
+                }
                 let title = t
                     .mapped_fields
                     .get("album")
@@ -2597,19 +2604,19 @@ pub fn group_playlist_tracks_by_album(
     let mut seen_albums = std::collections::HashSet::new();
 
     for track in playlist_tracks {
-        let title = get_album_title(track);
-        let title_key = title.to_lowercase();
-        if seen_albums.insert(title_key) {
+        let key = album_id_for_track(track);
+        if seen_albums.insert(key.clone()) {
+            let title = get_album_title(track);
             let tracks_to_upload: Vec<ScannedTrack> = if upload_full_albums {
                 all_library_tracks
                     .iter()
-                    .filter(|t| get_album_title(t).eq_ignore_ascii_case(&title))
+                    .filter(|t| album_id_for_track(t) == key)
                     .cloned()
                     .collect()
             } else {
                 playlist_tracks
                     .iter()
-                    .filter(|t| get_album_title(t).eq_ignore_ascii_case(&title))
+                    .filter(|t| album_id_for_track(t) == key)
                     .cloned()
                     .collect()
             };
@@ -2644,7 +2651,7 @@ pub fn group_local_tracks_by_album(
             continue;
         }
         let title = get_album_title(track);
-        let key = title.to_lowercase();
+        let key = album_id_for_track(track);
         if let Some(&idx) = album_map.get(&key) {
             album_groups[idx].1.push(track.clone());
         } else {
@@ -2896,5 +2903,32 @@ Version=2
         assert_eq!(groups[0].1.len(), 2);
         assert_eq!(groups[1].0, "Goldberg Variations");
         assert_eq!(groups[1].1.len(), 1);
+    }
+
+    #[test]
+    fn test_group_local_tracks_by_album_separates_performances_and_preserves_multidisc() {
+        // Multi-disc album: 2 discs in subdirectories
+        let mut t1_disc1 = ScannedTrack::default();
+        t1_disc1.id = "t1_d1".into();
+        t1_disc1.path = "D:\\Music\\Vivaldi - Four Seasons (Antonini)\\Disc 1\\01.flac".into();
+        t1_disc1.mapped_fields.insert("album".into(), vec!["Vivaldi: The Four Seasons".into()]);
+
+        let mut t1_disc2 = ScannedTrack::default();
+        t1_disc2.id = "t1_d2".into();
+        t1_disc2.path = "D:\\Music\\Vivaldi - Four Seasons (Antonini)\\Disc 2\\01.flac".into();
+        t1_disc2.mapped_fields.insert("album".into(), vec!["Vivaldi: The Four Seasons".into()]);
+
+        // A second, different recording with the identical album title
+        let mut t2_recording = ScannedTrack::default();
+        t2_recording.id = "t2_ozawa".into();
+        t2_recording.path = "D:\\Music\\Vivaldi - Four Seasons (Ozawa)\\01.flac".into();
+        t2_recording.mapped_fields.insert("album".into(), vec!["Vivaldi: The Four Seasons".into()]);
+
+        let groups = group_local_tracks_by_album(&[t1_disc1, t1_disc2, t2_recording]);
+        assert_eq!(groups.len(), 2, "Different recordings must become 2 separate albums");
+        assert_eq!(groups[0].0, "Vivaldi: The Four Seasons");
+        assert_eq!(groups[0].1.len(), 2, "Disc 1 and Disc 2 must be unified into one album");
+        assert_eq!(groups[1].0, "Vivaldi: The Four Seasons");
+        assert_eq!(groups[1].1.len(), 1, "Second recording is its own separate album");
     }
 }
