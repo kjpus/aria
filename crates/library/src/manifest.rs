@@ -63,7 +63,7 @@ pub fn effective_album_directory(path: &str) -> String {
     parent.to_string()
 }
 
-/// Derives a consistent album ID for a track based on its album title and effective album directory.
+/// Derives a consistent album ID for a track based on its album title, effective album directory, and performance metadata.
 pub fn album_id_for_track(track: &ScannedTrack) -> String {
     let title = track
         .mapped_fields
@@ -78,12 +78,70 @@ pub fn album_id_for_track(track: &ScannedTrack) -> String {
         .to_lowercase()
         .replace('\\', "/");
 
-    if !title.is_empty() && !dir.is_empty() {
-        format!("{title}::{dir}")
-    } else if !title.is_empty() {
-        title
-    } else if !dir.is_empty() {
-        dir
+    let conductor = track
+        .mapped_fields
+        .get("conductor")
+        .and_then(|v| v.first())
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
+
+    let ensemble = track
+        .mapped_fields
+        .get("ensemble")
+        .and_then(|v| v.first())
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
+
+    let soloist = track
+        .mapped_fields
+        .get("soloist")
+        .and_then(|v| v.first())
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
+
+    let year = track
+        .mapped_fields
+        .get("year")
+        .and_then(|v| v.first())
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
+
+    let catalog = track
+        .mapped_fields
+        .get("catalog")
+        .and_then(|v| v.first())
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
+
+    let performer = if !conductor.is_empty() && !ensemble.is_empty() {
+        format!("{conductor} / {ensemble}")
+    } else if !conductor.is_empty() {
+        conductor
+    } else if !ensemble.is_empty() {
+        ensemble
+    } else {
+        soloist
+    };
+
+    let mut parts = Vec::new();
+    if !title.is_empty() {
+        parts.push(title);
+    }
+    if !dir.is_empty() {
+        parts.push(dir);
+    }
+    if !performer.is_empty() {
+        parts.push(performer);
+    }
+    if !year.is_empty() {
+        parts.push(year);
+    }
+    if !catalog.is_empty() {
+        parts.push(catalog);
+    }
+
+    if !parts.is_empty() {
+        parts.join("::")
     } else {
         track.id.clone()
     }
@@ -95,6 +153,19 @@ pub fn derive_canonical_album_id(
     composers: &[String],
     catalog_numbers: &[String],
 ) -> String {
+    derive_canonical_album_id_full(title, composers, &[], &[], &[], None, catalog_numbers)
+}
+
+/// Derives a deterministic canonical album ID taking into account performers and recording year.
+pub fn derive_canonical_album_id_full(
+    title: &str,
+    composers: &[String],
+    conductors: &[String],
+    ensembles: &[String],
+    soloists: &[String],
+    year: Option<&str>,
+    catalog_numbers: &[String],
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(title.trim().to_lowercase().as_bytes());
     hasher.update(b"|");
@@ -104,6 +175,35 @@ pub fn derive_canonical_album_id(
     for c in &sorted_composers {
         hasher.update(c.trim().to_lowercase().as_bytes());
         hasher.update(b",");
+    }
+    hasher.update(b"|");
+
+    let mut sorted_conductors = conductors.to_vec();
+    sorted_conductors.sort();
+    for c in &sorted_conductors {
+        hasher.update(c.trim().to_lowercase().as_bytes());
+        hasher.update(b",");
+    }
+    hasher.update(b"|");
+
+    let mut sorted_ensembles = ensembles.to_vec();
+    sorted_ensembles.sort();
+    for e in &sorted_ensembles {
+        hasher.update(e.trim().to_lowercase().as_bytes());
+        hasher.update(b",");
+    }
+    hasher.update(b"|");
+
+    let mut sorted_soloists = soloists.to_vec();
+    sorted_soloists.sort();
+    for s in &sorted_soloists {
+        hasher.update(s.trim().to_lowercase().as_bytes());
+        hasher.update(b",");
+    }
+    hasher.update(b"|");
+
+    if let Some(y) = year {
+        hasher.update(y.trim().to_lowercase().as_bytes());
     }
     hasher.update(b"|");
 
@@ -199,7 +299,15 @@ pub fn build_album_manifest(
     let years = extract_unique_mapped_fields(tracks, "year");
     let year = years.into_iter().next();
 
-    let album_id = derive_canonical_album_id(album_title, &composers, &catalog_numbers);
+    let album_id = derive_canonical_album_id_full(
+        album_title,
+        &composers,
+        &conductors,
+        &ensembles,
+        &soloists,
+        year.as_deref(),
+        &catalog_numbers,
+    );
 
     let mut manifest_tracks = Vec::with_capacity(tracks.len());
 
@@ -299,7 +407,7 @@ pub fn derive_systematic_file_name(
     }
 }
 
-/// Derives the systematic folder path for an album: e.g., "Composer/Album".
+/// Derives the systematic folder path for an album: e.g., "Composer/Album" or "Composer/Album (Performers - Year)".
 pub fn derive_systematic_folder_name(manifest: &AlbumManifest) -> String {
     let composer = manifest
         .composers
@@ -308,7 +416,40 @@ pub fn derive_systematic_folder_name(manifest: &AlbumManifest) -> String {
         .unwrap_or_else(|| "Various Composers".to_string());
 
     let album = sanitize_path_segment(&manifest.title);
-    format!("{}/{}", composer, album)
+
+    let conductor = manifest.conductors.first().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let ensemble = manifest.ensembles.first().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let soloist = manifest.soloists.first().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let year = manifest.year.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
+
+    let performer = if let (Some(c), Some(e)) = (conductor, ensemble) {
+        Some(format!("{c}, {e}"))
+    } else if let Some(c) = conductor {
+        Some(c.to_string())
+    } else if let Some(e) = ensemble {
+        Some(e.to_string())
+    } else {
+        soloist.map(|s| s.to_string())
+    };
+
+    let disambiguator = match (performer, year) {
+        (Some(p), Some(y)) => Some(format!("{p} - {y}")),
+        (Some(p), None) => Some(p),
+        (None, Some(y)) => Some(y.to_string()),
+        (None, None) => None,
+    };
+
+    match disambiguator {
+        Some(dis) => {
+            if manifest.title.to_lowercase().contains(&dis.to_lowercase()) {
+                format!("{}/{}", composer, album)
+            } else {
+                let clean_dis = sanitize_path_segment(&dis);
+                format!("{}/{} ({})", composer, album, clean_dis)
+            }
+        }
+        None => format!("{}/{}", composer, album),
+    }
 }
 
 /// Creates a `MasterAlbumSummary` from an `AlbumManifest`.
@@ -607,5 +748,64 @@ mod tests {
         let index_json = serialize_master_playlist_index(&index).expect("serialize playlist index");
         let deserialized_index = deserialize_master_playlist_index(&index_json).expect("deserialize playlist index");
         assert_eq!(index, deserialized_index);
+    }
+
+    #[test]
+    fn test_album_manifest_and_folder_differentiates_performances() {
+        let m1 = AlbumManifest {
+            manifest_version: CURRENT_MANIFEST_VERSION,
+            album_id: "alb_1".into(),
+            title: "The Four Seasons".into(),
+            composers: vec!["Antonio Vivaldi".into()],
+            conductors: vec!["Giovanni Antonini".into()],
+            ensembles: vec!["Il Giardino Armonico".into()],
+            soloists: vec![],
+            catalog_numbers: vec![],
+            year: Some("1993".into()),
+            artwork_file_name: None,
+            updated_at: "2026-10-30T00:00:00Z".into(),
+            tracks: vec![],
+        };
+
+        let m2 = AlbumManifest {
+            manifest_version: CURRENT_MANIFEST_VERSION,
+            album_id: "alb_2".into(),
+            title: "The Four Seasons".into(),
+            composers: vec!["Antonio Vivaldi".into()],
+            conductors: vec!["Seiji Ozawa".into()],
+            ensembles: vec!["Boston Symphony Orchestra".into()],
+            soloists: vec!["Itzhak Perlman".into()],
+            catalog_numbers: vec![],
+            year: Some("1981".into()),
+            artwork_file_name: None,
+            updated_at: "2026-10-30T00:00:00Z".into(),
+            tracks: vec![],
+        };
+
+        let f1 = derive_systematic_folder_name(&m1);
+        let f2 = derive_systematic_folder_name(&m2);
+        assert_ne!(f1, f2);
+        assert_eq!(f1, "Antonio Vivaldi/The Four Seasons (Giovanni Antonini, Il Giardino Armonico - 1993)");
+        assert_eq!(f2, "Antonio Vivaldi/The Four Seasons (Seiji Ozawa, Boston Symphony Orchestra - 1981)");
+
+        let id1 = derive_canonical_album_id_full(
+            &m1.title,
+            &m1.composers,
+            &m1.conductors,
+            &m1.ensembles,
+            &m1.soloists,
+            m1.year.as_deref(),
+            &m1.catalog_numbers,
+        );
+        let id2 = derive_canonical_album_id_full(
+            &m2.title,
+            &m2.composers,
+            &m2.conductors,
+            &m2.ensembles,
+            &m2.soloists,
+            m2.year.as_deref(),
+            &m2.catalog_numbers,
+        );
+        assert_ne!(id1, id2, "Canonical album IDs must differ for different recordings");
     }
 }

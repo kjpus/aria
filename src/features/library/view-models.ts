@@ -60,17 +60,40 @@ export function albumTitleForTrack(track: ScannedTrack): string {
   return firstField(track, 'album') || track.fileName;
 }
 
+export function albumCreditForTrack(track: ScannedTrack): string {
+  const conductor = joinField(track, 'conductor');
+  const ensemble = joinField(track, 'ensemble');
+  const soloist = joinField(track, 'soloist');
+
+  const parts = [conductor, ensemble, soloist].filter(Boolean);
+  return parts.join(' / ');
+}
+
+export function albumDisambiguatorForTrack(track: ScannedTrack): string {
+  const conductor = firstField(track, 'conductor').trim().toLowerCase();
+  const ensemble = firstField(track, 'ensemble').trim().toLowerCase();
+  const soloist = firstField(track, 'soloist').trim().toLowerCase();
+  const year = firstField(track, 'year').trim().toLowerCase();
+  const catalog = firstField(track, 'catalog').trim().toLowerCase();
+
+  const performer = conductor && ensemble
+    ? `${conductor} / ${ensemble}`
+    : conductor || ensemble || soloist;
+
+  const parts = [performer, year, catalog].filter(Boolean);
+  return parts.join('::');
+}
+
 export function albumIdForTrack(track: ScannedTrack): string {
   const title = albumTitleForTrack(track).trim().toLowerCase();
   const dir = albumDirectoryForTrack(track).trim().toLowerCase().replace(/\\/g, '/');
-  if (title && dir) {
-    return `${title}::${dir}`;
-  }
-  return title || dir || track.id;
-}
+  const disambiguator = albumDisambiguatorForTrack(track);
 
-export function albumCreditForTrack(track: ScannedTrack): string {
-  return joinField(track, 'conductor') || joinField(track, 'soloist');
+  const parts = [title, dir, disambiguator].filter(Boolean);
+  if (parts.length > 0) {
+    return parts.join('::');
+  }
+  return track.id;
 }
 
 export function buildAlbumCards(tracks: ScannedTrack[]): AlbumCardModel[] {

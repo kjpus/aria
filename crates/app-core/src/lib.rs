@@ -1354,9 +1354,7 @@ impl AppCore {
             .filter(|t| {
                 if let Some(ref target_id) = album_id {
                     let tid = album_id_for_track(t);
-                    if tid.eq_ignore_ascii_case(target_id) {
-                        return true;
-                    }
+                    return tid.eq_ignore_ascii_case(target_id);
                 }
                 let title = t
                     .mapped_fields
@@ -2930,5 +2928,28 @@ Version=2
         assert_eq!(groups[0].1.len(), 2, "Disc 1 and Disc 2 must be unified into one album");
         assert_eq!(groups[1].0, "Vivaldi: The Four Seasons");
         assert_eq!(groups[1].1.len(), 1, "Second recording is its own separate album");
+    }
+
+    #[test]
+    fn test_album_id_separates_remote_tracks_with_different_performances() {
+        let mut t1 = ScannedTrack::default();
+        t1.id = "t1_remote_antonini".into();
+        t1.path = "remote://target_1/Antonio Vivaldi/The Four Seasons/01.flac".into();
+        t1.mapped_fields.insert("album".into(), vec!["Vivaldi: The Four Seasons".into()]);
+        t1.mapped_fields.insert("conductor".into(), vec!["Giovanni Antonini".into()]);
+        t1.mapped_fields.insert("ensemble".into(), vec!["Il Giardino Armonico".into()]);
+        t1.mapped_fields.insert("year".into(), vec!["1993".into()]);
+
+        let mut t2 = ScannedTrack::default();
+        t2.id = "t2_remote_ozawa".into();
+        t2.path = "remote://target_1/Antonio Vivaldi/The Four Seasons/13.flac".into();
+        t2.mapped_fields.insert("album".into(), vec!["Vivaldi: The Four Seasons".into()]);
+        t2.mapped_fields.insert("conductor".into(), vec!["Seiji Ozawa".into()]);
+        t2.mapped_fields.insert("ensemble".into(), vec!["Boston Symphony Orchestra".into()]);
+        t2.mapped_fields.insert("year".into(), vec!["1981".into()]);
+
+        let id1 = album_id_for_track(&t1);
+        let id2 = album_id_for_track(&t2);
+        assert_ne!(id1, id2, "Remote tracks from different recordings in same directory must have different album IDs");
     }
 }

@@ -481,64 +481,66 @@ pub async fn upload_album(
     let should_update_manifest = any_tracks_remotely && (existing_manifest.is_none() || any_files_uploaded || any_new_tracks_for_manifest);
 
     if let Some(ref ex) = existing_manifest {
-        let mut merged_tracks = manifest.tracks.clone();
-        for ex_track in &ex.tracks {
-            let already_present = merged_tracks.iter().any(|t| {
-                t.track_id == ex_track.track_id || t.relative_file_name == ex_track.relative_file_name
-            });
-            if !already_present {
-                merged_tracks.push(ex_track.clone());
+        if ex.album_id == manifest.album_id {
+            let mut merged_tracks = manifest.tracks.clone();
+            for ex_track in &ex.tracks {
+                let already_present = merged_tracks.iter().any(|t| {
+                    t.track_id == ex_track.track_id || t.relative_file_name == ex_track.relative_file_name
+                });
+                if !already_present {
+                    merged_tracks.push(ex_track.clone());
+                }
             }
-        }
 
-        let get_track_sort_key = |t: &ManifestTrack| -> (u32, u32, String) {
-            let disk = t
-                .mapped_fields
-                .get("disk_number")
-                .and_then(|v| v.first())
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
-            let track = t
-                .mapped_fields
-                .get("track_number")
-                .and_then(|v| v.first())
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            (disk, track, t.relative_file_name.clone())
-        };
-        merged_tracks.sort_by(|a, b| get_track_sort_key(a).cmp(&get_track_sort_key(b)));
-        manifest.tracks = merged_tracks;
+            let get_track_sort_key = |t: &ManifestTrack| -> (u32, u32, String) {
+                let disk = t
+                    .mapped_fields
+                    .get("disk_number")
+                    .and_then(|v| v.first())
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(1);
+                let track = t
+                    .mapped_fields
+                    .get("track_number")
+                    .and_then(|v| v.first())
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
+                (disk, track, t.relative_file_name.clone())
+            };
+            merged_tracks.sort_by(|a, b| get_track_sort_key(a).cmp(&get_track_sort_key(b)));
+            manifest.tracks = merged_tracks;
 
-        if manifest.artwork_file_name.is_none() {
-            manifest.artwork_file_name = ex.artwork_file_name.clone();
-        }
-        for c in &ex.composers {
-            if !manifest.composers.contains(c) {
-                manifest.composers.push(c.clone());
+            if manifest.artwork_file_name.is_none() {
+                manifest.artwork_file_name = ex.artwork_file_name.clone();
             }
-        }
-        for c in &ex.conductors {
-            if !manifest.conductors.contains(c) {
-                manifest.conductors.push(c.clone());
+            for c in &ex.composers {
+                if !manifest.composers.contains(c) {
+                    manifest.composers.push(c.clone());
+                }
             }
-        }
-        for e in &ex.ensembles {
-            if !manifest.ensembles.contains(e) {
-                manifest.ensembles.push(e.clone());
+            for c in &ex.conductors {
+                if !manifest.conductors.contains(c) {
+                    manifest.conductors.push(c.clone());
+                }
             }
-        }
-        for s in &ex.soloists {
-            if !manifest.soloists.contains(s) {
-                manifest.soloists.push(s.clone());
+            for e in &ex.ensembles {
+                if !manifest.ensembles.contains(e) {
+                    manifest.ensembles.push(e.clone());
+                }
             }
-        }
-        for cat in &ex.catalog_numbers {
-            if !manifest.catalog_numbers.contains(cat) {
-                manifest.catalog_numbers.push(cat.clone());
+            for s in &ex.soloists {
+                if !manifest.soloists.contains(s) {
+                    manifest.soloists.push(s.clone());
+                }
             }
-        }
-        if manifest.year.is_none() && ex.year.is_some() {
-            manifest.year = ex.year.clone();
+            for cat in &ex.catalog_numbers {
+                if !manifest.catalog_numbers.contains(cat) {
+                    manifest.catalog_numbers.push(cat.clone());
+                }
+            }
+            if manifest.year.is_none() && ex.year.is_some() {
+                manifest.year = ex.year.clone();
+            }
         }
     }
 
