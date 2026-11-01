@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::{Notify, RwLock};
 
 use crate::error::RemoteStorageError;
 use crate::traits::RemoteStorageBackend;
@@ -116,48 +116,67 @@ impl RemoteCacheManager {
         expected_checksum_sha256: Option<&str>,
         active_window_track_ids: &[String],
     ) -> Result<PathBuf, RemoteStorageError> {
-        // 1. Fast check if already cached
-        if let Some(path) = self.get_cached_path(track_id).await {
-            return Ok(path);
-        }
-
-        // 2. Check if another task is already downloading this track
-        let notify = {
-            let mut in_flight = self.in_flight.lock().await;
-            if let Some(notify) = in_flight.get(track_id) {
-                Some(notify.clone())
-            } else {
-                in_flight.insert(track_id.to_string(), Arc::new(Notify::new()));
-                None
-            }
-        };
-
-        if let Some(notify) = notify {
-            notify.notified().await;
+        loop {
+            // 1. Fast check if already cached
             if let Some(path) = self.get_cached_path(track_id).await {
                 return Ok(path);
             }
+
+            // 2. Check if another task is already downloading this track
+            let notify = {
+                let mut in_flight = self.in_flight.lock().unwrap();
+                if let Some(notify) = in_flight.get(track_id) {
+                    Some(notify.clone())
+                } else {
+                    in_flight.insert(track_id.to_string(), Arc::new(Notify::new()));
+                    None
+                }
+            };
+
+            if let Some(notify) = notify {
+                // Wait for the in-flight download to finish or abort
+                notify.notified().await;
+                // If it succeeded, it is now in cache:
+                if let Some(path) = self.get_cached_path(track_id).await {
+                    return Ok(path);
+                }
+                // If not in cache (e.g. prior download failed or was cancelled), loop back and try downloading
+                continue;
+            }
+
+            // 3. We are the active downloader: create RAII guard for cleanup on completion or cancellation
+            struct InFlightGuard {
+                in_flight: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
+                track_id: String,
+            }
+
+            impl Drop for InFlightGuard {
+                fn drop(&mut self) {
+                    let notify = {
+                        let mut in_flight = self.in_flight.lock().unwrap();
+                        in_flight.remove(&self.track_id)
+                    };
+                    if let Some(notify) = notify {
+                        notify.notify_waiters();
+                    }
+                }
+            }
+
+            let _guard = InFlightGuard {
+                in_flight: self.in_flight.clone(),
+                track_id: track_id.to_string(),
+            };
+
+            return self
+                .download_and_cache_internal(
+                    backend,
+                    remote_path,
+                    track_id,
+                    expected_checksum_sha256,
+                    active_window_track_ids,
+                )
+                .await;
         }
-
-        let result = self
-            .download_and_cache_internal(
-                backend,
-                remote_path,
-                track_id,
-                expected_checksum_sha256,
-                active_window_track_ids,
-            )
-            .await;
-
-        let notify_to_trigger = {
-            let mut in_flight = self.in_flight.lock().await;
-            in_flight.remove(track_id)
-        };
-        if let Some(notify) = notify_to_trigger {
-            notify.notify_waiters();
-        }
-
-        result
     }
 
     async fn download_and_cache_internal(

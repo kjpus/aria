@@ -3,6 +3,7 @@ import { SectionCard } from '../../components/SectionCard';
 import type { RemoteBackendType, RemoteCacheStatus, RemoteTarget, StorageStatus } from '../../types/aria';
 import {
   clearRemoteCache,
+  clearRemoteTarget,
   deleteRemoteTarget,
   getRemoteCacheStatus,
   getRemoteTargets,
@@ -45,6 +46,8 @@ export function RemoteSettingsPanel({
   const [isSyncingAll, setIsSyncingAll] = useState(false);
   const [syncStatusMessages, setSyncStatusMessages] = useState<Record<string, string>>({});
   const [syncBanner, setSyncBanner] = useState<string | null>(null);
+  const [clearingTargetId, setClearingTargetId] = useState<string | null>(null);
+  const [confirmClearTarget, setConfirmClearTarget] = useState<RemoteTarget | null>(null);
 
   useEffect(() => {
     getRemoteCacheStatus().then(setCacheStatus).catch(console.error);
@@ -183,6 +186,25 @@ export function RemoteSettingsPanel({
       onTargetsChange(updated);
     } catch (err) {
       setActionError(`Failed to update target: ${String(err)}`);
+    }
+  }
+
+  async function handleConfirmClearRemote() {
+    if (!confirmClearTarget) return;
+    const target = confirmClearTarget;
+    setConfirmClearTarget(null);
+    setClearingTargetId(target.id);
+    setActionError(null);
+    try {
+      const status = await clearRemoteTarget(target.id);
+      setTestResults((prev) => ({ ...prev, [target.id]: status }));
+      setSyncBanner(
+        `Cleared all remote data from "${target.name}". Remote storage is now empty and sync tracking has been reset — you can start over fresh.`
+      );
+    } catch (err) {
+      setActionError(`Failed to clear remote storage for "${target.name}": ${String(err)}`);
+    } finally {
+      setClearingTargetId(null);
     }
   }
 
@@ -346,6 +368,15 @@ export function RemoteSettingsPanel({
                       </button>
                       <button
                         className="ghost-button"
+                        disabled={clearingTargetId === target.id || syncingTargetIds.has(target.id)}
+                        onClick={() => setConfirmClearTarget(target)}
+                        style={{ fontSize: '0.8rem', padding: '2px 8px', color: '#ffb74d' }}
+                        type="button"
+                      >
+                        {clearingTargetId === target.id ? 'Clearing...' : 'Clear remote'}
+                      </button>
+                      <button
+                        className="ghost-button"
                         onClick={() => handleDelete(target.id)}
                         style={{ fontSize: '0.8rem', padding: '2px 8px', color: '#e57373' }}
                         type="button"
@@ -428,6 +459,80 @@ export function RemoteSettingsPanel({
               setEditingTarget(null);
             }}
           />
+        ) : null}
+
+        {confirmClearTarget ? (
+          <div
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              background: 'rgba(0, 0, 0, 0.75)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              zIndex: 1000,
+              backdropFilter: 'blur(4px)',
+            }}
+          >
+            <div
+              style={{
+                background: 'var(--surface-elevated, #1e1e24)',
+                border: '1px solid var(--border-subtle, #333)',
+                borderRadius: '12px',
+                padding: '1.5rem',
+                maxWidth: '460px',
+                width: '90%',
+                boxShadow: '0 8px 32px rgba(0, 0, 0, 0.5)',
+              }}
+            >
+              <h3 style={{ margin: '0 0 0.8rem 0', fontSize: '1.1rem', color: '#ffb74d' }}>
+                Clear Remote Storage
+              </h3>
+              <p style={{ margin: '0 0 0.8rem 0', fontSize: '0.9rem', lineHeight: '1.4', color: 'var(--foreground)' }}>
+                Are you sure you want to clear all synced data from <strong>{confirmClearTarget.name}</strong> ({formatBackendLabel(confirmClearTarget.backendType)})?
+              </p>
+              <div
+                style={{
+                  background: 'rgba(255, 183, 77, 0.1)',
+                  borderLeft: '3px solid #ffb74d',
+                  padding: '0.6rem 0.8rem',
+                  borderRadius: '4px',
+                  fontSize: '0.85rem',
+                  lineHeight: '1.4',
+                  marginBottom: '1.25rem',
+                  color: '#ffe082',
+                }}
+              >
+                This will permanently delete all uploaded files, albums, playlists, manifests, and index files stored in this remote storage and reset sync tracking in Aria so you can start over fresh.
+                <br /><br />
+                <em>Your local music library files will not be affected.</em>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.6rem' }}>
+                <button
+                  className="ghost-button"
+                  onClick={() => setConfirmClearTarget(null)}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="ghost-button"
+                  onClick={() => void handleConfirmClearRemote()}
+                  style={{
+                    background: 'rgba(239, 83, 80, 0.2)',
+                    color: '#ef5350',
+                    borderColor: '#ef5350',
+                  }}
+                  type="button"
+                >
+                  Clear remote storage
+                </button>
+              </div>
+            </div>
+          </div>
         ) : null}
 
         <div style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>

@@ -530,6 +530,55 @@ impl AppDatabase {
         Ok(())
     }
 
+    pub fn clear_remote_synced_items_for_target(&self, id: &str) -> Result<(), StorageError> {
+        let connection = self.connect()?;
+        connection.execute("delete from remote_synced_items where remote_target_id = ?1", params![id])?;
+        let sync_key = format!("remote_target_last_sync:{id}");
+        connection.execute("delete from app_settings where setting_key = ?1", params![sync_key])?;
+        Ok(())
+    }
+
+    pub fn prune_remote_synced_items_not_in_folders(
+        &self,
+        target_id: &str,
+        valid_folders: &std::collections::HashSet<String>,
+    ) -> Result<(), StorageError> {
+        let mut connection = self.connect()?;
+        let tx = connection.transaction()?;
+        let mut stmt = tx.prepare("select item_id, remote_path, item_type from remote_synced_items where remote_target_id = ?1")?;
+        let mut rows = stmt.query(params![target_id])?;
+        let mut ids_to_delete = Vec::new();
+        while let Some(row) = rows.next()? {
+            let item_id: String = row.get(0)?;
+            let remote_path: String = row.get(1)?;
+            let item_type: String = row.get(2)?;
+            if item_type == "playlist" || remote_path.starts_with("playlists/") {
+                continue;
+            }
+            let folder = if item_type == "album" {
+                remote_path.as_str()
+            } else if let Some((f, _)) = remote_path.rsplit_once('/') {
+                f
+            } else {
+                remote_path.as_str()
+            };
+            if !valid_folders.contains(folder) {
+                ids_to_delete.push(item_id);
+            }
+        }
+        drop(rows);
+        drop(stmt);
+
+        for id in ids_to_delete {
+            tx.execute(
+                "delete from remote_synced_items where remote_target_id = ?1 and item_id = ?2",
+                params![target_id, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get_remote_target_last_sync(&self, target_id: &str) -> Result<Option<String>, StorageError> {
         let connection = self.connect()?;
         let sync_key = format!("remote_target_last_sync:{target_id}");
@@ -666,6 +715,95 @@ impl AppDatabase {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn find_remote_synced_track_by_hints(
+        &self,
+        target_id: &str,
+        file_name: &str,
+        hints: &[&str],
+    ) -> Result<Option<RemoteSyncedItem>, StorageError> {
+        let connection = self.connect()?;
+        let pattern = format!("%/{file_name}");
+        let mut statement = connection.prepare(
+            "select item_id, remote_target_id, item_type, remote_path, remote_file_id, size_bytes, checksum, sync_status, last_synced_at
+             from remote_synced_items
+             where remote_target_id = ?1 and item_type = 'track' and sync_status = 'synced' and (remote_path like ?2 or remote_path = ?3)",
+        )?;
+        let mut rows = statement.query(params![target_id, pattern, file_name])?;
+        let mut matches = Vec::new();
+        while let Some(row) = rows.next()? {
+            let size_bytes: i64 = row.get(5)?;
+            matches.push(RemoteSyncedItem {
+                item_id: row.get(0)?,
+                remote_target_id: row.get(1)?,
+                item_type: row.get(2)?,
+                remote_path: row.get(3)?,
+                remote_file_id: row.get(4)?,
+                size_bytes: size_bytes as u64,
+                checksum: row.get(6)?,
+                sync_status: row.get(7)?,
+                last_synced_at: row.get(8)?,
+            });
+        }
+
+        if matches.is_empty() {
+            return Ok(None);
+        }
+        if matches.len() == 1 {
+            return Ok(matches.into_iter().next());
+        }
+
+        let tokenize = |s: &str| -> Vec<String> {
+            s.split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .map(|w| w.to_lowercase())
+                .collect()
+        };
+
+        let best = matches
+            .into_iter()
+            .max_by_key(|item| {
+                let path_tokens = tokenize(&item.remote_path);
+                let path_collapsed = path_tokens.join(" ");
+                let mut score = 0usize;
+
+                for hint in hints {
+                    let hint_tokens = tokenize(hint);
+                    if hint_tokens.is_empty() {
+                        continue;
+                    }
+                    let hint_collapsed = hint_tokens.join(" ");
+
+                    // 1. Full phrase match (ignoring whitespace and punctuation differences)
+                    if path_collapsed.contains(&hint_collapsed) {
+                        score += hint_collapsed.len() * 10;
+                    } else {
+                        // 2. Token overlap score
+                        for token in &hint_tokens {
+                            if token.len() >= 2 && path_tokens.contains(token) {
+                                score += token.len() * 2;
+                            }
+                        }
+                    }
+                }
+                (score, item.last_synced_at.clone())
+            });
+
+        Ok(best)
+    }
+
+    pub fn update_scanned_track_path(
+        &self,
+        track_id: &str,
+        new_path: &str,
+    ) -> Result<(), StorageError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "update scanned_tracks set path = ?1 where id = ?2",
+            params![new_path, track_id],
+        )?;
+        Ok(())
     }
 
     pub fn delete_remote_synced_item(&self, item_id: &str, target_id: &str) -> Result<(), StorageError> {
@@ -951,7 +1089,7 @@ mod tests {
 
     use aria_domain::{
         default_field_mappings, CatalogRule, LibraryFieldMapping, LibrarySnapshot, PlayTrackRequest, PlaybackPreferences,
-        PlaybackSessionSnapshot, QueueItem, SettingsSnapshot, ThemePreference, TrackTableSettings,
+        PlaybackSessionSnapshot, QueueItem, RemoteSyncedItem, SettingsSnapshot, ThemePreference, TrackTableSettings,
     };
 
     use super::{
@@ -1277,6 +1415,36 @@ mod tests {
         let total_bytes = database.get_total_synced_bytes_for_target("target_gdrive_1").expect("total bytes");
         assert_eq!(total_bytes, 550_000_000);
 
+        // Test find_remote_synced_track_by_hints
+        let found = database
+            .find_remote_synced_track_by_hints("target_gdrive_1", "01.flac", &["Sym9"])
+            .expect("find by hints");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().item_id, "trk_456");
+
+        // Test prune_remote_synced_items_not_in_folders
+        let mut valid_folders = std::collections::HashSet::new();
+        valid_folders.insert("Other/Album".to_string());
+        database
+            .prune_remote_synced_items_not_in_folders("target_gdrive_1", &valid_folders)
+            .expect("prune");
+        let items_after_prune = database
+            .load_remote_synced_items_for_target("target_gdrive_1")
+            .expect("load items after prune");
+        assert!(items_after_prune.is_empty());
+
+        // Re-save item to test clear_remote_synced_items_for_target
+        database.save_remote_synced_item(&synced_item).expect("re-save synced item");
+
+        // Test clear_remote_synced_items_for_target leaves target intact but clears synced items and last sync
+        database.clear_remote_synced_items_for_target("target_gdrive_1").expect("clear synced items");
+        let items_cleared = database.load_remote_synced_items_for_target("target_gdrive_1").expect("load items after clear");
+        assert!(items_cleared.is_empty());
+        let sync_time_cleared = database.get_remote_target_last_sync("target_gdrive_1").expect("sync timestamp after clear");
+        assert!(sync_time_cleared.is_none());
+        let targets_still_exist = database.load_remote_targets().expect("targets still exist");
+        assert_eq!(targets_still_exist.len(), 1);
+
         database.delete_remote_target("target_gdrive_1").expect("delete target");
         let targets_after = database.load_remote_targets().expect("load targets after delete");
         assert!(targets_after.is_empty());
@@ -1284,6 +1452,57 @@ mod tests {
         assert!(items_after.is_empty());
         let sync_time_after = database.get_remote_target_last_sync("target_gdrive_1").expect("get sync timestamp after delete");
         assert!(sync_time_after.is_none());
+
+        // Test disambiguation and tie-breaking by sync time
+        let item_old = RemoteSyncedItem {
+            item_id: "trk_old".to_string(),
+            remote_target_id: "target_gdrive_2".to_string(),
+            item_type: "track".to_string(),
+            remote_path: "Johann Sebastian Bach/Bach_ Keyboard Concertos Nos. 1-7, BWV 1052-8 etc/02.flac".to_string(),
+            remote_file_id: None,
+            size_bytes: 27_000_000,
+            checksum: None,
+            sync_status: "synced".to_string(),
+            last_synced_at: "2026-10-30T05:00:00Z".to_string(),
+        };
+        let item_perahia = RemoteSyncedItem {
+            item_id: "trk_perahia".to_string(),
+            remote_target_id: "target_gdrive_2".to_string(),
+            item_type: "track".to_string(),
+            remote_path: "Bach 50/Murray Perahia - Bach Keyboard Concertos, Vol. 1 (2001) [16B-44.1kHz]/02.flac".to_string(),
+            remote_file_id: None,
+            size_bytes: 25_000_000,
+            checksum: None,
+            sync_status: "synced".to_string(),
+            last_synced_at: "2026-11-01T03:00:00Z".to_string(),
+        };
+        let item_hewitt = RemoteSyncedItem {
+            item_id: "trk_hewitt".to_string(),
+            remote_target_id: "target_gdrive_2".to_string(),
+            item_type: "track".to_string(),
+            remote_path: "Bach 50/Angela Hewitt - Bach Keyboard Concertos Nos. 1-7, BWV 1052-8 etc. (2006) [16B-44.1kHz]/02.flac".to_string(),
+            remote_file_id: None,
+            size_bytes: 27_000_000,
+            checksum: None,
+            sync_status: "synced".to_string(),
+            last_synced_at: "2026-11-01T04:00:00Z".to_string(),
+        };
+
+        database.save_remote_synced_item(&item_old).expect("save old");
+        database.save_remote_synced_item(&item_perahia).expect("save perahia");
+        database.save_remote_synced_item(&item_hewitt).expect("save hewitt");
+
+        let hints = ["Bach: Keyboard Concertos Nos. 1-7, BWV 1052-8 etc.", "Angela Hewitt"];
+        let resolved = database
+            .find_remote_synced_track_by_hints("target_gdrive_2", "02.flac", &hints)
+            .expect("find by hints")
+            .expect("should find matching item");
+
+        assert_eq!(resolved.item_id, "trk_hewitt");
+        assert_eq!(
+            resolved.remote_path,
+            "Bach 50/Angela Hewitt - Bach Keyboard Concertos Nos. 1-7, BWV 1052-8 etc. (2006) [16B-44.1kHz]/02.flac"
+        );
 
         let _ = fs::remove_dir_all(&test_root);
     }

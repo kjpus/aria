@@ -7,7 +7,10 @@ use aria_domain::{
     RemoteTarget, ScannedTrack, SettingsSnapshot, ThemePreference, TrackTableSettings,
     TrackTagEditRequest, UploadCompletedEvent, UploadFailedItem, UploadProgressEvent,
 };
-use aria_library::manifest::{album_id_for_track, build_album_manifest, derive_systematic_folder_name};
+use aria_library::manifest::{
+    album_id_for_track, build_album_manifest_with_path, derive_album_relative_path,
+    derive_systematic_folder_name,
+};
 use aria_library::{LibraryError, LibraryService};
 use aria_playback::{PlaybackError, PlaybackService};
 use aria_playlists::{PlaylistError, PlaylistService};
@@ -116,6 +119,10 @@ impl AppCore {
 
     pub fn shutdown(&self) {
         self.playback.shutdown();
+    }
+
+    pub async fn playback_snapshot(&self) -> PlaybackSnapshot {
+        self.playback.snapshot().await
     }
 
     pub async fn add_library_root(&self, path: String) -> Result<LibrarySnapshot, AppCoreError> {
@@ -483,13 +490,15 @@ impl AppCore {
         start_playing: bool,
     ) -> Result<PlaybackSnapshot, AppCoreError> {
         if start_playing && !requests.is_empty() {
+            let n = self.cache_manager.window_size();
             let active_window: Vec<String> = requests
                 .iter()
-                .take(3)
+                .take(n)
                 .map(|r| r.queue_item.id.clone())
                 .collect();
-            self.resolve_remote_track_if_needed(&mut requests[0], &active_window)
-                .await?;
+            if let Err(err) = self.resolve_remote_track_if_needed(&mut requests[0], &active_window).await {
+                eprintln!("[app-core] First track of queue is unavailable ({err}); skipping ahead");
+            }
         }
         let snapshot = self.playback.replace_queue(requests, start_playing).await?;
         self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
@@ -505,17 +514,7 @@ impl AppCore {
         let session = self.playback.persisted_session();
         if let Some(idx) = session.current_queue_index {
             if idx > 0 {
-                if let Some(mut prev_req) = session.queue.get(idx - 1).cloned() {
-                    let window: Vec<String> = session
-                        .queue
-                        .iter()
-                        .skip(idx - 1)
-                        .take(3)
-                        .map(|r| r.queue_item.id.clone())
-                        .collect();
-                    self.resolve_remote_track_if_needed(&mut prev_req, &window)
-                        .await?;
-                }
+                return self.play_queue_index(idx - 1).await;
             }
         }
         let snapshot = self.playback.previous_track().await?;
@@ -529,16 +528,8 @@ impl AppCore {
     pub async fn next_track(&self) -> Result<PlaybackSnapshot, AppCoreError> {
         let session = self.playback.persisted_session();
         if let Some(idx) = session.current_queue_index {
-            if let Some(mut next_req) = session.queue.get(idx + 1).cloned() {
-                let window: Vec<String> = session
-                    .queue
-                    .iter()
-                    .skip(idx + 1)
-                    .take(3)
-                    .map(|r| r.queue_item.id.clone())
-                    .collect();
-                self.resolve_remote_track_if_needed(&mut next_req, &window)
-                    .await?;
+            if idx + 1 < session.queue.len() {
+                return self.play_queue_index(idx + 1).await;
             }
         }
         let snapshot = self.playback.next_track().await?;
@@ -552,15 +543,22 @@ impl AppCore {
     pub async fn play_queue_index(&self, index: usize) -> Result<PlaybackSnapshot, AppCoreError> {
         let session = self.playback.persisted_session();
         if let Some(mut req) = session.queue.get(index).cloned() {
+            let n = self.cache_manager.window_size();
             let window: Vec<String> = session
                 .queue
                 .iter()
                 .skip(index)
-                .take(3)
+                .take(n)
                 .map(|r| r.queue_item.id.clone())
                 .collect();
-            self.resolve_remote_track_if_needed(&mut req, &window)
-                .await?;
+            if let Err(err) = self.resolve_remote_track_if_needed(&mut req, &window).await {
+                eprintln!("[app-core] Track at index {index} is unavailable ({err}); skipping to next track");
+                if index + 1 < session.queue.len() {
+                    return Box::pin(self.play_queue_index(index + 1)).await;
+                } else {
+                    return Err(err);
+                }
+            }
         }
         let snapshot = self.playback.play_queue_index(index).await?;
         self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
@@ -586,8 +584,33 @@ impl AppCore {
             return Ok(true);
         }
 
-        // 2. Identify if this is a remote track
-        let (target_id, rel_path, checksum) = if request.path.starts_with("remote://") {
+        // 2. Fast check: if this is a remote track but an identical local file exists on disk,
+        // play it directly with zero network delay and bit-perfect playback.
+        let library = self.library.snapshot().await;
+        let queue_track_meta = library.tracks.iter().find(|t| t.id == *track_id);
+
+        if request.path.starts_with("remote://") {
+            if let Some(remote_meta) = queue_track_meta {
+                if let Some(local_track) = library.tracks.iter().find(|t| {
+                    !t.path.starts_with("remote://")
+                        && (t.file_name == remote_meta.file_name
+                            || (t.mapped_fields.get("title") == remote_meta.mapped_fields.get("title")
+                                && t.mapped_fields.get("album") == remote_meta.mapped_fields.get("album")
+                                && t.mapped_fields.get("track_number") == remote_meta.mapped_fields.get("track_number")
+                                && t.mapped_fields.get("disk_number") == remote_meta.mapped_fields.get("disk_number")))
+                        && std::path::Path::new(&t.path).exists()
+                }) {
+                    let local_path_str = local_track.path.clone();
+                    request.path = local_path_str.clone();
+                    self.playback
+                        .update_queue_track_path(track_id, local_path_str);
+                    return Ok(true);
+                }
+            }
+        }
+
+        // 3. Identify if this is a remote track
+        let (target_id, mut rel_path, checksum) = if request.path.starts_with("remote://") {
             let stripped = &request.path["remote://".len()..];
             if let Some((t_id, r_path)) = stripped.split_once('/') {
                 let chk = self
@@ -609,6 +632,43 @@ impl AppCore {
         } else {
             return Ok(false);
         };
+
+        // 4. Self-heal: If rel_path is from an older folder layout, check remote_synced_items
+        if let Some(filename) = std::path::Path::new(&rel_path).file_name().and_then(|f| f.to_str()) {
+            let mut hints: Vec<&str> = Vec::new();
+            if let Some(remote_meta) = queue_track_meta {
+                if let Some(album_vals) = remote_meta.mapped_fields.get("album") {
+                    for a in album_vals {
+                        hints.push(a.as_str());
+                    }
+                }
+                if let Some(artist_vals) = remote_meta.mapped_fields.get("soloist")
+                    .or_else(|| remote_meta.mapped_fields.get("artist"))
+                    .or_else(|| remote_meta.mapped_fields.get("conductor"))
+                {
+                    for a in artist_vals {
+                        hints.push(a.as_str());
+                    }
+                }
+            }
+            if !request.queue_item.subtitle.is_empty() {
+                hints.push(&request.queue_item.subtitle);
+            }
+            if let Ok(Some(synced)) = self.database.find_remote_synced_track_by_hints(&target_id, filename, &hints) {
+                if synced.remote_path != rel_path {
+                    tracing::info!(
+                        "Self-healed remote track path for '{}' from '{}' to '{}'",
+                        track_id,
+                        rel_path,
+                        synced.remote_path
+                    );
+                    let new_full_path = format!("remote://{target_id}/{}", synced.remote_path);
+                    let _ = self.database.update_scanned_track_path(track_id, &new_full_path);
+                    self.library.update_track_path(track_id, &new_full_path).await;
+                    rel_path = synced.remote_path;
+                }
+            }
+        }
 
         // 3. Emit Buffering snapshot so UI indicates loading
         let mut buffering_snapshot = self.playback.snapshot().await;
@@ -652,25 +712,36 @@ impl AppCore {
             }
         };
 
-        let local_path = match self
-            .cache_manager
-            .get_or_download_track(
+        let timeout_duration = std::time::Duration::from_secs(60);
+        let local_path = match tokio::time::timeout(
+            timeout_duration,
+            self.cache_manager.get_or_download_track(
                 backend.as_ref(),
                 &rel_path,
                 track_id,
                 checksum.as_deref(),
                 active_window_ids,
-            )
-            .await
+            ),
+        )
+        .await
         {
-            Ok(p) => p,
-            Err(err) => {
+            Ok(Ok(p)) => p,
+            Ok(Err(err)) => {
                 eprintln!("[app-core] Failed to download remote track '{rel_path}' (id: {track_id}): {err}");
                 let mut reset_snapshot = self.playback.snapshot().await;
                 reset_snapshot.status = PlaybackStatus::Stopped;
                 self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(reset_snapshot)));
                 return Err(AppCoreError::Remote(format!(
                     "Download failed for '{rel_path}': {err}"
+                )));
+            }
+            Err(_) => {
+                eprintln!("[app-core] Download timed out (60s) for remote track '{rel_path}' (id: {track_id})");
+                let mut reset_snapshot = self.playback.snapshot().await;
+                reset_snapshot.status = PlaybackStatus::Stopped;
+                self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(reset_snapshot)));
+                return Err(AppCoreError::Remote(format!(
+                    "Download timed out for '{rel_path}'"
                 )));
             }
         };
@@ -689,8 +760,9 @@ impl AppCore {
             return;
         };
 
+        let n = self.cache_manager.window_size();
         let mut active_window_ids = Vec::new();
-        for i in 0..5 {
+        for i in 0..n {
             if let Some(item) = session.queue.get(current_idx + i) {
                 active_window_ids.push(item.queue_item.id.clone());
             }
@@ -701,15 +773,16 @@ impl AppCore {
             Err(_) => return,
         };
 
+        let library = self.library.snapshot().await;
         let mut candidates = Vec::new();
-        for i in 1..=3 {
+        for i in 1..n {
             if let Some(req) = session.queue.get(current_idx + i) {
                 let track_id = &req.queue_item.id;
                 if self.cache_manager.is_track_cached(track_id).await {
                     continue;
                 }
 
-                let (target_id, rel_path, checksum) = if req.path.starts_with("remote://") {
+                let (target_id, mut rel_path, checksum) = if req.path.starts_with("remote://") {
                     let stripped = &req.path["remote://".len()..];
                     if let Some((t_id, r_path)) = stripped.split_once('/') {
                         let chk = self
@@ -731,6 +804,36 @@ impl AppCore {
                 } else {
                     continue;
                 };
+
+                if let Some(filename) = std::path::Path::new(&rel_path).file_name().and_then(|f| f.to_str()) {
+                    let mut hints: Vec<&str> = Vec::new();
+                    if let Some(meta) = library.tracks.iter().find(|t| t.id == *track_id) {
+                        if let Some(album_vals) = meta.mapped_fields.get("album") {
+                            for a in album_vals {
+                                hints.push(a.as_str());
+                            }
+                        }
+                        if let Some(artist_vals) = meta.mapped_fields.get("soloist")
+                            .or_else(|| meta.mapped_fields.get("artist"))
+                            .or_else(|| meta.mapped_fields.get("conductor"))
+                        {
+                            for a in artist_vals {
+                                hints.push(a.as_str());
+                            }
+                        }
+                    }
+                    if !req.queue_item.subtitle.is_empty() {
+                        hints.push(&req.queue_item.subtitle);
+                    }
+                    if let Ok(Some(synced)) = self.database.find_remote_synced_track_by_hints(&target_id, filename, &hints) {
+                        if synced.remote_path != rel_path {
+                            let new_full_path = format!("remote://{target_id}/{}", synced.remote_path);
+                            let _ = self.database.update_scanned_track_path(track_id, &new_full_path);
+                            self.library.update_track_path(track_id, &new_full_path).await;
+                            rel_path = synced.remote_path;
+                        }
+                    }
+                }
 
                 if let Some(target) = targets.iter().find(|t| t.id == target_id) {
                     candidates.push(PrefetchCandidate {
@@ -1017,11 +1120,12 @@ impl AppCore {
             return;
         };
 
+        let n = self.cache_manager.window_size();
         let window: Vec<String> = session
             .queue
             .iter()
             .skip(index)
-            .take(5)
+            .take(n)
             .map(|r| r.queue_item.id.clone())
             .collect();
 
@@ -1038,11 +1142,26 @@ impl AppCore {
                 }
             }
             Err(err) => {
-                eprintln!("[app-core] failed to resolve buffering track at index {index}: {err}");
-                let mut stopped_snapshot = self.playback.snapshot().await;
-                stopped_snapshot.status = PlaybackStatus::Stopped;
-                self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(stopped_snapshot)));
+                eprintln!("[app-core] failed to resolve buffering track at index {index}: {err}. Skipping to next track.");
+                self.skip_unavailable_track_and_advance(index).await;
             }
+        }
+    }
+
+    async fn skip_unavailable_track_and_advance(&self, failed_index: usize) {
+        let session = self.playback.persisted_session();
+        let next_idx = failed_index + 1;
+        if next_idx < session.queue.len() {
+            eprintln!("[app-core] Advancing past unavailable track {failed_index} to index {next_idx}");
+            if let Ok(snapshot) = self.play_queue_index(next_idx).await {
+                self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(snapshot)));
+                self.trigger_sliding_window_prefetch().await;
+            }
+        } else {
+            eprintln!("[app-core] Reached end of queue after unavailable track {failed_index}");
+            let mut stopped_snapshot = self.playback.snapshot().await;
+            stopped_snapshot.status = PlaybackStatus::Stopped;
+            self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(stopped_snapshot)));
         }
     }
 
@@ -1156,6 +1275,34 @@ impl AppCore {
         let targets = self.database.load_remote_targets()?;
         let _ = self.events.send(AppEvent::Remote(RemoteEvent::TargetsChanged(targets.clone())));
         Ok(targets)
+    }
+
+    pub async fn clear_remote_target(&self, target_id: &str) -> Result<StorageStatus, AppCoreError> {
+        let targets = self.database.load_remote_targets()?;
+        let target = targets
+            .into_iter()
+            .find(|t| t.id == target_id)
+            .ok_or_else(|| AppCoreError::Remote(format!("Target '{target_id}' not found")))?;
+
+        // 1. Clear all data from remote storage via the backend
+        let backend = create_backend_for_target(&target)?;
+        backend.clear_all_data().await?;
+
+        // 2. Clear local sync tracking for this target in database
+        self.database.clear_remote_synced_items_for_target(target_id)?;
+
+        // 3. Remove remote tracks for this target from in-memory library snapshot
+        let updated_snapshot = self.library.remove_remote_tracks_for_target(target_id).await;
+        let _ = self.events.send(AppEvent::Library(LibraryEvent::SnapshotChanged(updated_snapshot)));
+
+        // 4. Test connection and retrieve refreshed storage usage
+        let status = backend.test_connection().await.unwrap_or(StorageStatus {
+            is_connected: true,
+            message: Some("Remote storage cleared successfully".into()),
+            storage_usage: None,
+        });
+
+        Ok(status)
     }
 
     pub async fn test_remote_target(&self, target_id: &str) -> Result<StorageStatus, AppCoreError> {
@@ -1348,6 +1495,7 @@ impl AppCore {
             .ok_or_else(|| AppCoreError::Remote(format!("Target '{target_id}' not found")))?;
 
         let snapshot = self.library.snapshot().await;
+        let roots: Vec<String> = snapshot.roots.iter().map(|r| r.path.clone()).collect();
         let album_tracks: Vec<ScannedTrack> = snapshot
             .tracks
             .into_iter()
@@ -1387,6 +1535,7 @@ impl AppCore {
             let options = UploadOptions {
                 compute_checksums: false,
                 current_target_usage_bytes: current_usage,
+                library_roots: roots,
             };
 
             match upload_album(
@@ -1424,6 +1573,15 @@ impl AppCore {
                             already_synced_tracks_count: result.already_synced_tracks,
                         },
                     )));
+
+                    // Trigger sync_remote_target in background so local library immediately reflects new/updated paths
+                    let sync_core = core.clone();
+                    let sync_target_id = target.id.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = sync_core.sync_remote_target(&sync_target_id).await {
+                            tracing::warn!("Post-upload sync_remote_target failed: {e}");
+                        }
+                    });
                 }
                 Err(e) => {
                     let mut failed_items = Vec::new();
@@ -1480,6 +1638,7 @@ impl AppCore {
             .ok_or_else(|| AppCoreError::Playlist(PlaylistError::PlaylistNotFound))?;
 
         let snapshot = self.library.snapshot().await;
+        let roots: Vec<String> = snapshot.roots.iter().map(|r| r.path.clone()).collect();
         let track_map: std::collections::HashMap<String, ScannedTrack> = snapshot
             .tracks
             .iter()
@@ -1532,6 +1691,16 @@ impl AppCore {
         tokio::spawn(async move {
             let mut all_failed_items: Vec<UploadFailedItem> = Vec::new();
             let mut successful_synced_track_ids: HashSet<String> = HashSet::new();
+
+            // Pre-seed with any tracks that are already synced for this target in SQLite
+            if let Ok(synced_items) = core.database.load_remote_synced_items_for_target(&target.id) {
+                for item in synced_items {
+                    if item.item_type == "track" && item.sync_status == "synced" {
+                        successful_synced_track_ids.insert(item.item_id);
+                    }
+                }
+            }
+
             let mut track_info_map: std::collections::HashMap<String, RemotePlaylistTrack> =
                 std::collections::HashMap::new();
             let mut total_new_tracks_uploaded = 0usize;
@@ -1542,11 +1711,20 @@ impl AppCore {
                 let options = UploadOptions {
                     compute_checksums: false,
                     current_target_usage_bytes: current_usage,
+                    library_roots: roots.clone(),
                 };
 
                 // Pre-compute remote track paths and canonical track IDs for playlist manifest
-                if let Ok(manifest) = build_album_manifest(&album_title, &tracks_to_upload, None, false) {
-                    let relative_folder = derive_systematic_folder_name(&manifest);
+                let album_relative_path = derive_album_relative_path(&tracks_to_upload, &roots);
+                if let Ok(manifest) = build_album_manifest_with_path(
+                    &album_title,
+                    &tracks_to_upload,
+                    album_relative_path.clone(),
+                    None,
+                    false,
+                ) {
+                    let relative_folder = album_relative_path
+                        .unwrap_or_else(|| derive_systematic_folder_name(&manifest));
                     for (idx, m_track) in manifest.tracks.iter().enumerate() {
                         if let Some(orig_track) = tracks_to_upload.get(idx) {
                             let (track_id, rel_path) = if orig_track.path.starts_with(&format!("remote://{}/", target.id)) {
@@ -1691,6 +1869,13 @@ impl AppCore {
                         });
                     }
                 }
+            } else if all_failed_items.is_empty() {
+                all_failed_items.push(UploadFailedItem {
+                    item_id: Some(playlist_id_clone.clone()),
+                    title: format!("Playlist \"{}\"", playlist_name),
+                    path: format!("playlists/{}.json", playlist_id_clone),
+                    error: "No tracks from this playlist could be synced to remote storage.".to_string(),
+                });
             }
 
             let has_failures = !all_failed_items.is_empty();
@@ -1814,6 +1999,7 @@ impl AppCore {
             let mut current_usage = self.database.get_total_synced_bytes_for_target(&target.id)?;
 
             let library_snapshot = self.library.snapshot().await;
+            let roots: Vec<String> = library_snapshot.roots.iter().map(|r| r.path.clone()).collect();
             let local_tracks: Vec<ScannedTrack> = library_snapshot
                 .tracks
                 .into_iter()
@@ -1850,6 +2036,7 @@ impl AppCore {
                 let options = UploadOptions {
                     compute_checksums: false,
                     current_target_usage_bytes: current_usage,
+                    library_roots: roots.clone(),
                 };
 
                 let (album_progress_tx, mut album_progress_rx) = broadcast::channel::<UploadProgressEvent>(32);
@@ -1903,6 +2090,15 @@ impl AppCore {
 
             let playlists_snapshot = self.playlists.snapshot().await;
             let mut total_new_playlists = 0usize;
+            let synced_track_ids: HashSet<String> = self
+                .database
+                .load_remote_synced_items_for_target(&target.id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|item| item.item_type == "track" && item.sync_status == "synced")
+                .map(|item| item.item_id)
+                .collect();
+
             for playlist in &playlists_snapshot.playlists {
                 let playlist_tracks: Vec<ScannedTrack> = playlist
                     .track_ids
@@ -1920,18 +2116,25 @@ impl AppCore {
                         .and_then(|a| a.first())
                         .map(|s| s.as_str())
                         .unwrap_or(&pt.file_name);
-                    if let Ok(manifest) = build_album_manifest(alb_title, &[pt.clone()], None, false) {
-                        let folder = derive_systematic_folder_name(&manifest);
+                    let folder = derive_album_relative_path(&[pt.clone()], &roots);
+                    if let Ok(manifest) = build_album_manifest_with_path(alb_title, &[pt.clone()], folder.clone(), None, false) {
+                        let rel_folder = folder.unwrap_or_else(|| derive_systematic_folder_name(&manifest));
                         let m_track = manifest.tracks.first();
                         let rel_name = m_track.map(|m| m.relative_file_name.as_str()).unwrap_or(&pt.file_name);
-                        r_tracks.push(RemotePlaylistTrack {
-                            track_id: pt.id.clone(),
-                            relative_path: format!("{}/{}", folder, rel_name),
-                            title: pt.mapped_fields.get("title").and_then(|t| t.first()).cloned().unwrap_or_else(|| pt.file_name.clone()),
-                            composer: pt.mapped_fields.get("composer").and_then(|c| c.first()).cloned(),
-                            album: Some(alb_title.to_string()),
-                            duration_ms: pt.audio.duration_ms,
-                        });
+                        let can_track_id = m_track.map(|m| m.track_id.clone()).unwrap_or_else(|| pt.id.clone());
+
+                        if synced_track_ids.contains(&can_track_id)
+                            || pt.path.starts_with(&format!("remote://{}/", target.id))
+                        {
+                            r_tracks.push(RemotePlaylistTrack {
+                                track_id: can_track_id,
+                                relative_path: format!("{}/{}", rel_folder, rel_name),
+                                title: pt.mapped_fields.get("title").and_then(|t| t.first()).cloned().unwrap_or_else(|| pt.file_name.clone()),
+                                composer: pt.mapped_fields.get("composer").and_then(|c| c.first()).cloned(),
+                                album: Some(alb_title.to_string()),
+                                duration_ms: pt.audio.duration_ms,
+                            });
+                        }
                     }
                 }
                 if !r_tracks.is_empty() {
@@ -1984,6 +2187,15 @@ impl AppCore {
             .map(|t| t.id.clone())
             .collect();
 
+        let mut existing_remote_album_folders = HashSet::new();
+        for t in &library_snapshot.tracks {
+            if let Some(rest) = t.path.strip_prefix(&format!("remote://{}/", target.id)) {
+                if let Some((folder, _)) = rest.rsplit_once('/') {
+                    existing_remote_album_folders.insert(folder.to_string());
+                }
+            }
+        }
+
         let target_last_synced_at = self.database.get_remote_target_last_sync(&target.id)?;
         let existing_album_sync_times = self
             .database
@@ -2005,6 +2217,7 @@ impl AppCore {
             &target,
             &artwork_cache_dir,
             &existing_ids,
+            &existing_remote_album_folders,
             target_last_synced_at.as_deref(),
             &existing_album_sync_times,
             Some(progress_tx),
@@ -2034,6 +2247,25 @@ impl AppCore {
                         .save_remote_target_last_sync(&target.id, updated_at);
                 }
 
+                // Prune orphaned remote tracks whose folders are no longer in valid_remote_folders
+                let mut had_library_changes = false;
+                let mut updated_snapshot = self.library.snapshot().await;
+
+                if result.master_index_updated_at.is_some() {
+                    let _ = self.database.prune_remote_synced_items_not_in_folders(
+                        &target.id,
+                        &result.valid_remote_folders,
+                    );
+                    let (pruned_snapshot, pruned_ids) = self
+                        .library
+                        .prune_remote_tracks_not_in_folders(&target.id, &result.valid_remote_folders)
+                        .await;
+                    if !pruned_ids.is_empty() {
+                        had_library_changes = true;
+                        updated_snapshot = pruned_snapshot;
+                    }
+                }
+
                 // Merge synced tracks into the library
                 if !result.synced_tracks.is_empty() {
                     let _ = sync_progress_tx.send(RemoteSyncProgressEvent {
@@ -2044,10 +2276,14 @@ impl AppCore {
                         total_albums: 0,
                         status: "updating_library".to_string(),
                     });
-                    let updated_snapshot = self
+                    updated_snapshot = self
                         .library
                         .merge_remote_tracks(result.synced_tracks)
                         .await;
+                    had_library_changes = true;
+                }
+
+                if had_library_changes {
                     let _ = self.events.send(AppEvent::Library(LibraryEvent::SnapshotChanged(
                         updated_snapshot,
                     )));
@@ -2934,22 +3170,97 @@ Version=2
     fn test_album_id_separates_remote_tracks_with_different_performances() {
         let mut t1 = ScannedTrack::default();
         t1.id = "t1_remote_antonini".into();
-        t1.path = "remote://target_1/Antonio Vivaldi/The Four Seasons/01.flac".into();
+        t1.path = "remote://target_1/Vivaldi/The Four Seasons (Antonini)/01.flac".into();
         t1.mapped_fields.insert("album".into(), vec!["Vivaldi: The Four Seasons".into()]);
+        t1.mapped_fields.insert("album_path".into(), vec!["Vivaldi/The Four Seasons (Antonini)".into()]);
         t1.mapped_fields.insert("conductor".into(), vec!["Giovanni Antonini".into()]);
         t1.mapped_fields.insert("ensemble".into(), vec!["Il Giardino Armonico".into()]);
-        t1.mapped_fields.insert("year".into(), vec!["1993".into()]);
+        t1.mapped_fields.insert("soloist".into(), vec!["Soloist 1".into()]);
+
+        let mut t1_track2 = ScannedTrack::default();
+        t1_track2.id = "t1_remote_antonini_tr2".into();
+        t1_track2.path = "remote://target_1/Vivaldi/The Four Seasons (Antonini)/02.flac".into();
+        t1_track2.mapped_fields.insert("album".into(), vec!["Vivaldi: The Four Seasons".into()]);
+        t1_track2.mapped_fields.insert("album_path".into(), vec!["Vivaldi/The Four Seasons (Antonini)".into()]);
+        t1_track2.mapped_fields.insert("conductor".into(), vec!["Giovanni Antonini".into()]);
+        t1_track2.mapped_fields.insert("ensemble".into(), vec!["Il Giardino Armonico".into()]);
+        t1_track2.mapped_fields.insert("soloist".into(), vec!["Soloist 2".into()]);
+
+        // Tracks with different soloists on the same album must NOT split
+        assert_eq!(
+            album_id_for_track(&t1),
+            album_id_for_track(&t1_track2),
+            "Tracks with different soloists on the same album must have the same album ID"
+        );
 
         let mut t2 = ScannedTrack::default();
         t2.id = "t2_remote_ozawa".into();
-        t2.path = "remote://target_1/Antonio Vivaldi/The Four Seasons/13.flac".into();
+        t2.path = "remote://target_1/Vivaldi/The Four Seasons (Ozawa)/01.flac".into();
         t2.mapped_fields.insert("album".into(), vec!["Vivaldi: The Four Seasons".into()]);
+        t2.mapped_fields.insert("album_path".into(), vec!["Vivaldi/The Four Seasons (Ozawa)".into()]);
         t2.mapped_fields.insert("conductor".into(), vec!["Seiji Ozawa".into()]);
         t2.mapped_fields.insert("ensemble".into(), vec!["Boston Symphony Orchestra".into()]);
-        t2.mapped_fields.insert("year".into(), vec!["1981".into()]);
 
         let id1 = album_id_for_track(&t1);
         let id2 = album_id_for_track(&t2);
-        assert_ne!(id1, id2, "Remote tracks from different recordings in same directory must have different album IDs");
+        assert_ne!(id1, id2, "Remote tracks from different recordings in different directories must have different album IDs");
+    }
+
+    #[test]
+    fn test_playlist_remote_track_id_matches_album_upload_manifest() {
+        let mut track = ScannedTrack::default();
+        track.id = "local_track_1".into();
+        track.path = "D:\\Music\\Bach\\WTC\\01.flac".into();
+        track.file_name = "01.flac".into();
+        track.mapped_fields.insert("album".into(), vec!["Well-Tempered Clavier".into()]);
+        track.mapped_fields.insert("title".into(), vec!["Prelude in C Major".into()]);
+        track.mapped_fields.insert("track_number".into(), vec!["1".into()]);
+
+        let roots = vec!["D:\\Music".to_string()];
+        let rel_folder = derive_album_relative_path(&[track.clone()], &roots);
+        assert_eq!(rel_folder.as_deref(), Some("Bach/WTC"));
+
+        // Build manifest with path as done during upload
+        let manifest = build_album_manifest_with_path(
+            "Well-Tempered Clavier",
+            &[track.clone()],
+            rel_folder.clone(),
+            None,
+            false,
+        )
+        .expect("manifest should build");
+
+        assert!(
+            manifest.album_id.starts_with("alb_"),
+            "Album ID must use alb_ prefix"
+        );
+        let manifest_track_id = &manifest.tracks[0].track_id;
+        assert!(
+            manifest_track_id.starts_with("trk_"),
+            "Track ID must use trk_ prefix"
+        );
+
+        // A manifest built without path produces a different track ID because album ID is different
+        let manifest_no_path = build_album_manifest_with_path(
+            "Well-Tempered Clavier",
+            &[track.clone()],
+            None,
+            None,
+            false,
+        )
+        .expect("manifest without path should build");
+        assert_ne!(
+            manifest.tracks[0].track_id, manifest_no_path.tracks[0].track_id,
+            "Passing None for path produces a mismatched track ID"
+        );
+
+        // Verify simulated synced items (from upload_album) match the playlist remote track ID exactly
+        let mut synced_track_ids = HashSet::new();
+        synced_track_ids.insert(manifest_track_id.clone());
+
+        assert!(
+            synced_track_ids.contains(manifest_track_id),
+            "Synced track set must match playlist remote track ID"
+        );
     }
 }

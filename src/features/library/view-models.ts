@@ -53,6 +53,16 @@ export function effectiveAlbumDirectoryForPath(filePath: string): string {
 }
 
 export function albumDirectoryForTrack(track: ScannedTrack): string {
+  const taggedPath = firstField(track, 'album_path');
+  if (taggedPath && track.path.startsWith('remote://')) {
+    const withoutRemote = track.path.slice('remote://'.length);
+    const targetSep = withoutRemote.indexOf('/');
+    if (targetSep >= 0) {
+      const targetId = withoutRemote.slice(0, targetSep);
+      return `remote://${targetId}/${taggedPath.replace(/^[/\\]+/, '')}`;
+    }
+    return taggedPath;
+  }
   return effectiveAlbumDirectoryForPath(track.path);
 }
 
@@ -69,27 +79,11 @@ export function albumCreditForTrack(track: ScannedTrack): string {
   return parts.join(' / ');
 }
 
-export function albumDisambiguatorForTrack(track: ScannedTrack): string {
-  const conductor = firstField(track, 'conductor').trim().toLowerCase();
-  const ensemble = firstField(track, 'ensemble').trim().toLowerCase();
-  const soloist = firstField(track, 'soloist').trim().toLowerCase();
-  const year = firstField(track, 'year').trim().toLowerCase();
-  const catalog = firstField(track, 'catalog').trim().toLowerCase();
-
-  const performer = conductor && ensemble
-    ? `${conductor} / ${ensemble}`
-    : conductor || ensemble || soloist;
-
-  const parts = [performer, year, catalog].filter(Boolean);
-  return parts.join('::');
-}
-
 export function albumIdForTrack(track: ScannedTrack): string {
   const title = albumTitleForTrack(track).trim().toLowerCase();
   const dir = albumDirectoryForTrack(track).trim().toLowerCase().replace(/\\/g, '/');
-  const disambiguator = albumDisambiguatorForTrack(track);
 
-  const parts = [title, dir, disambiguator].filter(Boolean);
+  const parts = [title, dir].filter(Boolean);
   if (parts.length > 0) {
     return parts.join('::');
   }

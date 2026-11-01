@@ -181,6 +181,7 @@ async fn test_sync_remote_library_full_pipeline() {
     let upload_options = UploadOptions {
         compute_checksums: false,
         current_target_usage_bytes: 0,
+        ..Default::default()
     };
     let upload_res = upload_album(
         backend.clone(),
@@ -196,12 +197,14 @@ async fn test_sync_remote_library_full_pipeline() {
 
     // 3. Now simulate computer 2 syncing the remote library
     let mut known_tracks = HashSet::new();
+    let mut known_folders = HashSet::new();
     let empty_album_times = std::collections::HashMap::new();
     let sync_res = sync_remote_library(
         backend.clone(),
         &target,
         &artwork_cache_dir,
         &known_tracks,
+        &known_folders,
         None,
         &empty_album_times,
         None,
@@ -225,6 +228,9 @@ async fn test_sync_remote_library_full_pipeline() {
     for t in &sync_res.synced_tracks {
         known_tracks.insert(t.id.clone());
     }
+    for f in &sync_res.valid_remote_folders {
+        known_folders.insert(f.clone());
+    }
     let mut album_times = std::collections::HashMap::new();
     if let Some(album_item) = sync_res.synced_items.iter().find(|i| i.item_type == "album") {
         album_times.insert(album_item.item_id.clone(), album_item.last_synced_at.clone());
@@ -234,6 +240,7 @@ async fn test_sync_remote_library_full_pipeline() {
         &target,
         &artwork_cache_dir,
         &known_tracks,
+        &known_folders,
         None,
         &album_times,
         None,
@@ -249,6 +256,7 @@ async fn test_sync_remote_library_full_pipeline() {
         &target,
         &artwork_cache_dir,
         &known_tracks,
+        &known_folders,
         sync_res.master_index_updated_at.as_deref(),
         &album_times,
         None,
@@ -407,6 +415,7 @@ async fn test_deduplication_and_skip_unchanged_tracks_and_playlists() {
     let upload_options = UploadOptions {
         compute_checksums: false,
         current_target_usage_bytes: 0,
+        ..Default::default()
     };
     let upload_res_1 = upload_album(
         backend.clone(),
@@ -437,6 +446,7 @@ async fn test_deduplication_and_skip_unchanged_tracks_and_playlists() {
     let upload_options_2 = UploadOptions {
         compute_checksums: false,
         current_target_usage_bytes: 50_000,
+        ..Default::default()
     };
     let upload_res_2 = upload_album(
         backend.clone(),
@@ -465,6 +475,7 @@ async fn test_deduplication_and_skip_unchanged_tracks_and_playlists() {
     let near_limit_options = UploadOptions {
         compute_checksums: false,
         current_target_usage_bytes: 999_900, // Near 1MB limit; new bytes would exceed it
+        ..Default::default()
     };
     let upload_res_3 = upload_album(
         backend.clone(),
@@ -610,6 +621,7 @@ async fn test_upload_album_continues_on_track_failure() {
     let upload_options = UploadOptions {
         compute_checksums: false,
         current_target_usage_bytes: 0,
+        ..Default::default()
     };
 
     let result = upload_album(
@@ -644,6 +656,149 @@ async fn test_upload_album_continues_on_track_failure() {
     assert_eq!(manifest.tracks.len(), 1);
     assert_eq!(manifest.tracks[0].relative_file_name, "01 - Valid Movement.flac");
     assert_eq!(result.synced_items[0].item_id, manifest.tracks[0].track_id);
+
+    // Cleanup
+    let _ = tokio::fs::remove_dir_all(&temp_root).await;
+}
+
+#[tokio::test]
+async fn test_upload_album_with_library_roots_and_multi_disc() {
+    use std::sync::Arc;
+    use aria_domain::{RemoteBackendType, RemoteTarget};
+    use aria_library::manifest::album_id_for_track;
+    use aria_remote_storage::{sync_remote_library, upload_album, FilesystemBackend, UploadOptions};
+
+    let temp_root = std::env::temp_dir().join(format!("aria_roots_test_{}", std::process::id()));
+    let library_root = temp_root.join("Music");
+    let disc1_dir = library_root.join("Classical").join("Vivaldi - Four Seasons (Carmignola)").join("Disc 1");
+    let disc2_dir = library_root.join("Classical").join("Vivaldi - Four Seasons (Carmignola)").join("Disc 2");
+    let remote_dir = temp_root.join("remote");
+
+    tokio::fs::create_dir_all(&disc1_dir).await.expect("create disc 1");
+    tokio::fs::create_dir_all(&disc2_dir).await.expect("create disc 2");
+    tokio::fs::create_dir_all(&remote_dir).await.expect("create remote");
+
+    let t1_path = disc1_dir.join("01.flac");
+    let t2_path = disc2_dir.join("01.flac");
+    tokio::fs::write(&t1_path, b"dummy audio disc 1").await.expect("write t1");
+    tokio::fs::write(&t2_path, b"dummy audio disc 2").await.expect("write t2");
+
+    let backend = Arc::new(FilesystemBackend::new(&remote_dir));
+    let target = RemoteTarget {
+        id: "target_roots".to_string(),
+        name: "Test Target".to_string(),
+        backend_type: RemoteBackendType::Filesystem,
+        is_enabled: true,
+        storage_limit_bytes: None,
+        config_json: String::new(),
+    };
+
+    let mut mapped1 = BTreeMap::new();
+    mapped1.insert("album".to_string(), vec!["Four Seasons".to_string()]);
+    mapped1.insert("title".to_string(), vec!["Spring - I. Allegro".to_string()]);
+    mapped1.insert("disk_number".to_string(), vec!["1".to_string()]);
+    mapped1.insert("track_number".to_string(), vec!["1".to_string()]);
+    mapped1.insert("soloist".to_string(), vec!["Carmignola".to_string()]);
+
+    let track1 = ScannedTrack {
+        id: "local_t1".to_string(),
+        path: t1_path.to_string_lossy().to_string(),
+        file_name: "01.flac".to_string(),
+        album_art_path: None,
+        audio: AudioPropertiesSnapshot {
+            duration_ms: 180_000,
+            sample_rate: Some(44100),
+            bit_depth: Some(16),
+            channels: Some(2),
+            format: "FLAC".to_string(),
+        },
+        raw_tags: BTreeMap::new(),
+        mapped_fields: mapped1,
+    };
+
+    let mut mapped2 = BTreeMap::new();
+    mapped2.insert("album".to_string(), vec!["Four Seasons".to_string()]);
+    mapped2.insert("title".to_string(), vec!["Summer - I. Allegro".to_string()]);
+    mapped2.insert("disk_number".to_string(), vec!["2".to_string()]);
+    mapped2.insert("track_number".to_string(), vec!["1".to_string()]);
+    mapped2.insert("soloist".to_string(), vec!["Brunello".to_string()]); // different soloist!
+
+    let track2 = ScannedTrack {
+        id: "local_t2".to_string(),
+        path: t2_path.to_string_lossy().to_string(),
+        file_name: "01.flac".to_string(),
+        album_art_path: None,
+        audio: AudioPropertiesSnapshot {
+            duration_ms: 200_000,
+            sample_rate: Some(44100),
+            bit_depth: Some(16),
+            channels: Some(2),
+            format: "FLAC".to_string(),
+        },
+        raw_tags: BTreeMap::new(),
+        mapped_fields: mapped2,
+    };
+
+    let upload_options = UploadOptions {
+        compute_checksums: false,
+        current_target_usage_bytes: 0,
+        library_roots: vec![library_root.to_string_lossy().to_string()],
+    };
+
+    let res = upload_album(
+        backend.clone(),
+        &target,
+        "Four Seasons",
+        &[track1.clone(), track2.clone()],
+        upload_options,
+        None,
+    )
+    .await
+    .expect("upload album");
+
+    assert_eq!(res.new_tracks_uploaded, 2);
+
+    // Verify remote manifest is located at the relative path from library root (ignoring Disc 1/Disc 2)
+    let manifest_bytes = backend
+        .read_bytes("Classical/Vivaldi - Four Seasons (Carmignola)/aria-manifest.json")
+        .await
+        .expect("read manifest");
+    let manifest: aria_domain::AlbumManifest =
+        deserialize_manifest(&String::from_utf8_lossy(&manifest_bytes)).expect("deserialize manifest");
+    assert_eq!(manifest.album_path, Some("Classical/Vivaldi - Four Seasons (Carmignola)".to_string()));
+    assert_eq!(manifest.tracks.len(), 2);
+
+    // Verify sync_remote_library tags the remote tracks with album_path
+    let art_cache_dir = temp_root.join("art_cache");
+    let sync_res = sync_remote_library(
+        backend.clone(),
+        &target,
+        &art_cache_dir,
+        &std::collections::HashSet::new(),
+        &std::collections::HashSet::new(),
+        None,
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await
+    .expect("sync remote library");
+
+    assert_eq!(sync_res.synced_tracks.len(), 2);
+    let r1 = &sync_res.synced_tracks[0];
+    let r2 = &sync_res.synced_tracks[1];
+    assert_eq!(
+        r1.mapped_fields.get("album_path").and_then(|v| v.first()).map(|s| s.as_str()),
+        Some("Classical/Vivaldi - Four Seasons (Carmignola)")
+    );
+    assert_eq!(
+        r2.mapped_fields.get("album_path").and_then(|v| v.first()).map(|s| s.as_str()),
+        Some("Classical/Vivaldi - Four Seasons (Carmignola)")
+    );
+
+    // Verify album_id_for_track produces the SAME album ID for both tracks even though they have different soloists
+    let id1 = album_id_for_track(r1);
+    let id2 = album_id_for_track(r2);
+    assert_eq!(id1, id2, "Remote tracks from the same album with different soloists must NOT split");
 
     // Cleanup
     let _ = tokio::fs::remove_dir_all(&temp_root).await;

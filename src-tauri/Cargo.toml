@@ -20,3 +20,6 @@ tauri = { workspace = true, features = ["protocol-asset"] }
 thiserror.workspace = true
 tokio.workspace = true
 url.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"

@@ -178,6 +178,11 @@ class AriaBitPerfectPlayer {
 
             var chosenEncoding = when {
                 bitDepth <= 16 -> AudioFormat.ENCODING_PCM_16BIT
+                isBluetooth -> {
+                    // For Bluetooth devices, AudioFlinger processes ENCODING_PCM_FLOAT with 32-bit float
+                    // fidelity to feed the Bluetooth audio encoder cleanly without byte packing driver noise.
+                    AudioFormat.ENCODING_PCM_FLOAT
+                }
                 bitDepth <= 24 -> {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                         AudioFormat.ENCODING_PCM_24BIT_PACKED

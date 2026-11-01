@@ -28,6 +28,14 @@ pub async fn delete_remote_target(
 }
 
 #[tauri::command]
+pub async fn clear_remote_target(
+    state: State<'_, AppState>,
+    target_id: String,
+) -> Result<StorageStatus, CommandError> {
+    Ok(state.core.clear_remote_target(&target_id).await?)
+}
+
+#[tauri::command]
 pub async fn test_remote_target(
     state: State<'_, AppState>,
     target_id: String,

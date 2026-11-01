@@ -39,4 +39,7 @@ pub trait RemoteStorageBackend: Send + Sync {
 
     /// Deletes a remote directory and its contents recursively.
     async fn delete_directory(&self, remote_path: &str) -> Result<(), RemoteStorageError>;
+
+    /// Clears all synced data (files and subdirectories) stored inside the configured root directory.
+    async fn clear_all_data(&self) -> Result<(), RemoteStorageError>;
 }

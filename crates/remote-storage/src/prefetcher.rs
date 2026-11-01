@@ -47,75 +47,106 @@ impl PlaybackPrefetcher {
         let (command_tx, mut command_rx) = mpsc::channel::<PrefetchCommand>(32);
 
         let worker = async move {
-            while let Some(command) = command_rx.recv().await {
-                match command {
-                    PrefetchCommand::PrefetchTracks {
-                        candidates,
-                        active_window_track_ids,
-                    } => {
-                        for candidate in candidates {
-                            // Skip if already in cache
-                            if cache_manager.is_track_cached(&candidate.track_id).await {
-                                if let Some(path) = cache_manager.get_cached_path(&candidate.track_id).await {
-                                    if let Some(updater) = &path_updater {
-                                        updater(&candidate.track_id, &path.to_string_lossy());
-                                    }
-                                }
-                                continue;
-                            }
+            let mut current_candidates: Vec<PrefetchCandidate> = Vec::new();
+            let mut current_window_ids: Vec<String> = Vec::new();
 
-                            info!(
-                                "Prefetching remote track: '{}' ({})",
-                                candidate.title, candidate.track_id
-                            );
+            loop {
+                // If there are no candidates left in the current window, wait for a new command
+                if current_candidates.is_empty() {
+                    match command_rx.recv().await {
+                        Some(PrefetchCommand::PrefetchTracks {
+                            candidates,
+                            active_window_track_ids,
+                        }) => {
+                            current_candidates = candidates;
+                            current_window_ids = active_window_track_ids;
+                        }
+                        Some(PrefetchCommand::Cancel) => {
+                            current_candidates.clear();
+                            current_window_ids.clear();
+                        }
+                        None => break,
+                    }
+                    continue;
+                }
 
-                            if let Some(events) = &event_tx {
-                                let _ = events.send(AppEvent::Remote(RemoteEvent::CachePrefetchProgress(
-                                    CachePrefetchEvent {
-                                        track_id: candidate.track_id.clone(),
-                                        title: candidate.title.clone(),
-                                        bytes_downloaded: 0,
-                                        total_bytes: 0,
-                                        is_completed: false,
-                                        error_message: None,
-                                    },
-                                )));
-                            }
+                let candidate = current_candidates.remove(0);
 
-                            let backend = match create_backend_for_target(&candidate.target) {
-                                Ok(backend) => backend,
-                                Err(err) => {
-                                    error!(
-                                        "Failed to create backend for target '{}': {err}",
-                                        candidate.target.id
-                                    );
-                                    if let Some(events) = &event_tx {
-                                        let _ = events.send(AppEvent::Remote(RemoteEvent::CachePrefetchProgress(
-                                            CachePrefetchEvent {
-                                                track_id: candidate.track_id.clone(),
-                                                title: candidate.title.clone(),
-                                                bytes_downloaded: 0,
-                                                total_bytes: 0,
-                                                is_completed: true,
-                                                error_message: Some(err.to_string()),
-                                            },
-                                        )));
-                                    }
-                                    continue;
-                                }
-                            };
+                // Skip if already in cache
+                if cache_manager.is_track_cached(&candidate.track_id).await {
+                    if let Some(path) = cache_manager.get_cached_path(&candidate.track_id).await {
+                        if let Some(updater) = &path_updater {
+                            updater(&candidate.track_id, &path.to_string_lossy());
+                        }
+                    }
+                    continue;
+                }
 
-                            match cache_manager
-                                .get_or_download_track(
-                                    backend.as_ref(),
-                                    &candidate.remote_path,
-                                    &candidate.track_id,
-                                    candidate.expected_checksum.as_deref(),
-                                    &active_window_track_ids,
-                                )
-                                .await
-                            {
-                                Ok(cached_path) => {
+                info!(
+                    "Preemptively prefetching remote track: '{}' ({})",
+                    candidate.title, candidate.track_id
+                );
+
+                if let Some(events) = &event_tx {
+                    let _ = events.send(AppEvent::Remote(RemoteEvent::CachePrefetchProgress(
+                        CachePrefetchEvent {
+                            track_id: candidate.track_id.clone(),
+                            title: candidate.title.clone(),
+                            bytes_downloaded: 0,
+                            total_bytes: 0,
+                            is_completed: false,
+                            error_message: None,
+                        },
+                    )));
+                }
+
+                let backend = match create_backend_for_target(&candidate.target) {
+                    Ok(backend) => backend,
+                    Err(err) => {
+                        error!(
+                            "Failed to create backend for target '{}': {err}",
+                            candidate.target.id
+                        );
+                        if let Some(events) = &event_tx {
+                            let _ = events.send(AppEvent::Remote(RemoteEvent::CachePrefetchProgress(
+                                CachePrefetchEvent {
+                                    track_id: candidate.track_id.clone(),
+                                    title: candidate.title.clone(),
+                                    bytes_downloaded: 0,
+                                    total_bytes: 0,
+                                    is_completed: true,
+                                    error_message: Some(err.to_string()),
+                                },
+                            )));
+                        }
+                        continue;
+                    }
+                };
+
+                let window_ids = current_window_ids.clone();
+                let candidate_clone = candidate.clone();
+                let cache_mgr = cache_manager.clone();
+                let download_fut = async move {
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(90),
+                        cache_mgr.get_or_download_track(
+                            backend.as_ref(),
+                            &candidate_clone.remote_path,
+                            &candidate_clone.track_id,
+                            candidate_clone.expected_checksum.as_deref(),
+                            &window_ids,
+                        ),
+                    )
+                    .await
+                };
+
+                tokio::pin!(download_fut);
+
+                loop {
+                    tokio::select! {
+                        download_res = &mut download_fut => {
+                            match download_res {
+                                Ok(Ok(cached_path)) => {
                                     info!(
                                         "Successfully prefetched track '{}' ({})",
                                         candidate.title, candidate.track_id
@@ -140,7 +171,7 @@ impl PlaybackPrefetcher {
                                         )));
                                     }
                                 }
-                                Err(err) => {
+                                Ok(Err(err)) => {
                                     error!(
                                         "Failed to prefetch track '{}' ({}): {err}",
                                         candidate.title, candidate.track_id
@@ -158,12 +189,58 @@ impl PlaybackPrefetcher {
                                         )));
                                     }
                                 }
+                                Err(_) => {
+                                    error!(
+                                        "Prefetch download timed out for track '{}' ({})",
+                                        candidate.title, candidate.track_id
+                                    );
+                                    if let Some(events) = &event_tx {
+                                        let _ = events.send(AppEvent::Remote(RemoteEvent::CachePrefetchProgress(
+                                            CachePrefetchEvent {
+                                                track_id: candidate.track_id.clone(),
+                                                title: candidate.title.clone(),
+                                                bytes_downloaded: 0,
+                                                total_bytes: 0,
+                                                is_completed: true,
+                                                error_message: Some("Download timed out".into()),
+                                            },
+                                        )));
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        cmd = command_rx.recv() => {
+                            match cmd {
+                                Some(PrefetchCommand::PrefetchTracks {
+                                    candidates: mut new_candidates,
+                                    active_window_track_ids: new_window_ids,
+                                }) => {
+                                    new_candidates.retain(|c| c.track_id != candidate.track_id);
+                                    current_candidates = new_candidates;
+                                    current_window_ids = new_window_ids;
+
+                                    if !current_window_ids.contains(&candidate.track_id) {
+                                        info!(
+                                            "Prefetch for track '{}' cancelled (no longer in active window)",
+                                            candidate.title
+                                        );
+                                        break;
+                                    }
+                                    info!(
+                                        "Prefetch for track '{}' kept in-flight despite sliding window shift",
+                                        candidate.title
+                                    );
+                                }
+                                Some(PrefetchCommand::Cancel) => {
+                                    info!("Prefetch worker cancelled");
+                                    current_candidates.clear();
+                                    current_window_ids.clear();
+                                    break;
+                                }
+                                None => return,
                             }
                         }
-                    }
-                    PrefetchCommand::Cancel => {
-                        // Clear pending commands in channel
-                        while command_rx.try_recv().is_ok() {}
                     }
                 }
             }

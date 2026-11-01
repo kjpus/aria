@@ -76,6 +76,7 @@ dependencies = [
  "aria-app-core",
  "aria-domain",
  "aria-remote-storage",
+ "jni",
  "serde",
  "tauri",
  "tauri-build",

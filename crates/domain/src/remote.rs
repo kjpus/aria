@@ -71,6 +71,8 @@ pub struct AlbumManifest {
     pub album_id: String,
     pub title: String,
     #[serde(default)]
+    pub album_path: Option<String>,
+    #[serde(default)]
     pub composers: Vec<String>,
     #[serde(default)]
     pub conductors: Vec<String>,

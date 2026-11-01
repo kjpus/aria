@@ -34,7 +34,11 @@ impl WebDavBackend {
         Self {
             config,
             base_url,
-            client: Client::builder().build().unwrap_or_default(),
+            client: Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
         }
     }
 
@@ -401,6 +405,89 @@ impl RemoteStorageBackend for WebDavBackend {
 
         Ok(())
     }
+
+    async fn clear_all_data(&self) -> Result<(), RemoteStorageError> {
+        let req = self
+            .client
+            .request(
+                Method::from_bytes(b"PROPFIND").unwrap_or(Method::GET),
+                &self.base_url,
+            )
+            .header("Depth", "1");
+
+        let res = self
+            .auth_request(req)
+            .send()
+            .await
+            .map_err(|e| RemoteStorageError::ConnectionFailed(e.to_string()))?;
+
+        if res.status().is_success() || res.status().as_u16() == 207 {
+            let body = res.text().await.unwrap_or_default();
+            let hrefs = extract_all_tag_values(&body, "href");
+            let base_url_parsed = reqwest::Url::parse(&self.base_url)
+                .map_err(|e| RemoteStorageError::ProviderError(e.to_string()))?;
+            let base_path = base_url_parsed.path().trim_end_matches('/');
+
+            for href in hrefs {
+                let target_url = if href.starts_with("http://") || href.starts_with("https://") {
+                    if let Ok(parsed) = reqwest::Url::parse(href) {
+                        if parsed.path().trim_end_matches('/') == base_path {
+                            continue;
+                        }
+                    }
+                    href.to_string()
+                } else {
+                    let decoded_href = href.trim_end_matches('/');
+                    if decoded_href == base_path || decoded_href.is_empty() {
+                        continue;
+                    }
+                    if let Ok(joined) = base_url_parsed.join(href) {
+                        joined.to_string()
+                    } else {
+                        continue;
+                    }
+                };
+
+                let del_req = self.client.delete(&target_url);
+                let _ = self.auth_request(del_req).send().await;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn extract_all_tag_values<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
+    let mut results = Vec::new();
+    let mut cursor = 0;
+    while cursor < xml.len() {
+        let slice = &xml[cursor..];
+        let open_tag_needle = format!("<D:{}", tag);
+        let open_tag_needle2 = format!("<d:{}", tag);
+        let open_tag_needle3 = format!("<{}", tag);
+
+        let match_idx = slice
+            .find(&open_tag_needle)
+            .or_else(|| slice.find(&open_tag_needle2))
+            .or_else(|| slice.find(&open_tag_needle3));
+
+        if let Some(rel_start) = match_idx {
+            let start_idx = cursor + rel_start;
+            if let Some(rel_close) = xml[start_idx..].find('>') {
+                let close_bracket = start_idx + rel_close + 1;
+                if let Some(rel_end) = xml[close_bracket..].find('<') {
+                    let end_bracket = close_bracket + rel_end;
+                    let val = xml[close_bracket..end_bracket].trim();
+                    if !val.is_empty() {
+                        results.push(val);
+                    }
+                    cursor = end_bracket;
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    results
 }
 
 #[cfg(test)]

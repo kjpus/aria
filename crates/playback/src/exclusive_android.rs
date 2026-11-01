@@ -409,10 +409,11 @@ fn write_audio_buffer_bytes(
         }
         ActivePcmFormat::Pcm24Packed => {
             let mut buffer =
-                SampleBuffer::<i32>::new(audio_buffer.frames() as u64, *audio_buffer.spec());
+                SampleBuffer::<f32>::new(audio_buffer.frames() as u64, *audio_buffer.spec());
             buffer.copy_interleaved_ref(audio_buffer);
             for &sample in buffer.samples() {
-                let bytes = sample.to_le_bytes();
+                let clamped = (sample * 8388607.0).round().clamp(-8388608.0, 8388607.0) as i32;
+                let bytes = clamped.to_le_bytes();
                 destination.extend_from_slice(&bytes[0..3]);
             }
         }

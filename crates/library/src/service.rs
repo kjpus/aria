@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::File as StdFile,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
@@ -161,6 +161,41 @@ impl LibraryService {
         state.tag_inventory = build_tag_inventory(&state.tracks);
         state.indexed_files = state.tracks.len() as u64;
         state.clone()
+    }
+
+    pub async fn prune_remote_tracks_not_in_folders(
+        &self,
+        target_id: &str,
+        valid_folders: &HashSet<String>,
+    ) -> (LibrarySnapshot, Vec<String>) {
+        let prefix = format!("remote://{target_id}/");
+        let mut state = self.state.write().await;
+        let mut removed_ids = Vec::new();
+        state.tracks.retain(|t| {
+            if let Some(rel) = t.path.strip_prefix(&prefix) {
+                if let Some((folder, _)) = rel.rsplit_once('/') {
+                    if valid_folders.contains(folder) {
+                        return true;
+                    }
+                }
+                removed_ids.push(t.id.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if !removed_ids.is_empty() {
+            state.tag_inventory = build_tag_inventory(&state.tracks);
+            state.indexed_files = state.tracks.len() as u64;
+        }
+        (state.clone(), removed_ids)
+    }
+
+    pub async fn update_track_path(&self, track_id: &str, new_path: &str) {
+        let mut state = self.state.write().await;
+        if let Some(track) = state.tracks.iter_mut().find(|t| t.id == track_id) {
+            track.path = new_path.to_string();
+        }
     }
 
     pub async fn set_field_mappings(&self, mappings: Vec<LibraryFieldMapping>) -> LibrarySnapshot {

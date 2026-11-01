@@ -279,6 +279,10 @@ impl RemoteStorageBackend for SmbBackend {
     async fn delete_directory(&self, remote_path: &str) -> Result<(), RemoteStorageError> {
         self.fs_backend.delete_directory(remote_path).await
     }
+
+    async fn clear_all_data(&self) -> Result<(), RemoteStorageError> {
+        self.fs_backend.clear_all_data().await
+    }
 }
 
 #[cfg(test)]

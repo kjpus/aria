@@ -10,9 +10,16 @@ pub struct AppState {
     pub core: Arc<AppCore>,
 }
 
+static GLOBAL_APP_CORE: std::sync::OnceLock<Arc<AppCore>> = std::sync::OnceLock::new();
+
+pub fn get_app_core() -> Option<Arc<AppCore>> {
+    GLOBAL_APP_CORE.get().cloned()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let core = Arc::new(AppCore::new().expect("failed to initialize Aria core"));
+    let _ = GLOBAL_APP_CORE.set(core.clone());
     let setup_core = core.clone();
     let run_core = core.clone();
 
@@ -92,6 +99,7 @@ pub fn run() {
             commands::remote::get_remote_targets,
             commands::remote::save_remote_target,
             commands::remote::delete_remote_target,
+            commands::remote::clear_remote_target,
             commands::remote::test_remote_target,
             commands::remote::start_gdrive_auth_flow,
             commands::remote::complete_gdrive_auth_flow,
@@ -118,4 +126,48 @@ pub fn run() {
             }
             _ => {}
         });
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_com_aria_player_AriaPlaybackService_nativePlayPause(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) {
+    if let Some(core) = get_app_core() {
+        tauri::async_runtime::spawn(async move {
+            let snapshot = core.playback_snapshot().await;
+            if snapshot.status == aria_domain::PlaybackStatus::Playing {
+                let _ = core.pause().await;
+            } else {
+                let _ = core.play().await;
+            }
+        });
+    }
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_com_aria_player_AriaPlaybackService_nativeNext(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) {
+    if let Some(core) = get_app_core() {
+        tauri::async_runtime::spawn(async move {
+            let _ = core.next_track().await;
+        });
+    }
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_com_aria_player_AriaPlaybackService_nativePrevious(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) {
+    if let Some(core) = get_app_core() {
+        tauri::async_runtime::spawn(async move {
+            let _ = core.previous_track().await;
+        });
+    }
 }

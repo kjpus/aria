@@ -1147,6 +1147,21 @@ export async function deleteRemoteTarget(targetId: string): Promise<RemoteTarget
   return invoke<RemoteTarget[]>('delete_remote_target', { targetId });
 }
 
+export async function clearRemoteTarget(targetId: string): Promise<StorageStatus> {
+  if (!isTauriRuntime) {
+    return {
+      isConnected: true,
+      message: 'Preview mode: cleared remote storage',
+      storageUsage: {
+        usedBytes: 0,
+        totalBytes: 1024 * 1024 * 1024 * 15,
+        freeBytes: 1024 * 1024 * 1024 * 15,
+      },
+    };
+  }
+  return invoke<StorageStatus>('clear_remote_target', { targetId });
+}
+
 export async function testRemoteTarget(targetId: string): Promise<StorageStatus> {
   if (!isTauriRuntime) {
     return {

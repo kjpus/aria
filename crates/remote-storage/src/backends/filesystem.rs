@@ -256,6 +256,24 @@ impl RemoteStorageBackend for FilesystemBackend {
         }
         Ok(())
     }
+
+    async fn clear_all_data(&self) -> Result<(), RemoteStorageError> {
+        if !self.root_path.exists() {
+            return Ok(());
+        }
+        let mut entries = fs::read_dir(&self.root_path)
+            .await
+            .map_err(RemoteStorageError::Io)?;
+        while let Some(entry) = entries.next_entry().await.map_err(RemoteStorageError::Io)? {
+            let path = entry.path();
+            if path.is_dir() {
+                let _ = fs::remove_dir_all(&path).await;
+            } else if path.is_file() {
+                let _ = fs::remove_file(&path).await;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -372,5 +390,32 @@ mod tests {
         assert!(backend.delete_directory("").await.is_err());
         assert!(backend.delete_directory("/").await.is_err());
         assert!(backend.delete_directory("\\").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_filesystem_clear_all_data() {
+        let temp_dir = std::env::temp_dir().join(format!("aria_fs_clear_test_{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+
+        let backend = FilesystemBackend::new(&temp_dir);
+        backend.ensure_directory("Bach/Album1").await.unwrap();
+        backend.write_bytes("Bach/Album1/track.flac", b"music").await.unwrap();
+        backend.write_bytes("aria-library-index.json", b"{}").await.unwrap();
+
+        assert!(temp_dir.join("Bach").exists());
+        assert!(temp_dir.join("aria-library-index.json").exists());
+
+        backend.clear_all_data().await.unwrap();
+
+        // Root exists but all children are gone
+        assert!(temp_dir.exists());
+        assert!(!temp_dir.join("Bach").exists());
+        assert!(!temp_dir.join("aria-library-index.json").exists());
+
+        // Idempotent call on empty root
+        backend.clear_all_data().await.unwrap();
+        assert!(temp_dir.exists());
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
 }

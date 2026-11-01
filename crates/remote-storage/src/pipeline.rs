@@ -10,12 +10,13 @@ use aria_domain::{
     RemoteTarget, ScannedTrack, UploadFailedItem, UploadProgressEvent,
 };
 use aria_library::manifest::{
-    build_album_manifest, build_master_album_summary, build_master_library_index,
-    build_master_playlist_index, build_remote_playlist_manifest, build_remote_playlist_m3u8,
-    compute_file_sha256, derive_systematic_folder_name, deserialize_manifest,
-    deserialize_master_index, deserialize_master_playlist_index, deserialize_playlist_manifest,
-    sanitize_path_segment, serialize_manifest, serialize_master_index,
-    serialize_master_playlist_index, serialize_playlist_manifest,
+    build_album_manifest_with_path, build_master_album_summary,
+    build_master_library_index, build_master_playlist_index, build_remote_playlist_manifest,
+    build_remote_playlist_m3u8, compute_file_sha256, derive_album_relative_path,
+    derive_systematic_folder_name, deserialize_manifest, deserialize_master_index,
+    deserialize_master_playlist_index, deserialize_playlist_manifest, sanitize_path_segment,
+    serialize_manifest, serialize_master_index, serialize_master_playlist_index,
+    serialize_playlist_manifest,
 };
 use chrono::Utc;
 use tokio::sync::broadcast;
@@ -24,9 +25,11 @@ use crate::error::RemoteStorageError;
 use crate::quota::ensure_within_quota;
 use crate::traits::RemoteStorageBackend;
 
+#[derive(Debug, Clone, Default)]
 pub struct UploadOptions {
     pub compute_checksums: bool,
     pub current_target_usage_bytes: u64,
+    pub library_roots: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -66,16 +69,21 @@ pub async fn upload_album(
         None
     };
 
-    // 2. Build initial album manifest for current tracks
-    let mut manifest: AlbumManifest = build_album_manifest(
+    // 2. Derive album relative path from library roots
+    let album_relative_path = derive_album_relative_path(tracks, &options.library_roots);
+
+    // 3. Build initial album manifest for current tracks
+    let mut manifest: AlbumManifest = build_album_manifest_with_path(
         album_title,
         tracks,
+        album_relative_path.clone(),
         artwork_file_name.clone(),
         options.compute_checksums,
     )
     .map_err(RemoteStorageError::Io)?;
 
-    let relative_folder = derive_systematic_folder_name(&manifest);
+    let relative_folder = album_relative_path.unwrap_or_else(|| derive_systematic_folder_name(&manifest));
+    manifest.album_path = Some(relative_folder.clone());
 
     // Emit initial progress event so UI immediately shows active upload
     let initial_total_files = manifest.tracks.len() + if artwork_path.is_some() { 1 } else { 0 } + 1;
@@ -850,6 +858,7 @@ pub struct SyncRemoteResult {
     pub target_name: String,
     pub synced_tracks: Vec<ScannedTrack>,
     pub synced_items: Vec<RemoteSyncedItem>,
+    pub valid_remote_folders: HashSet<String>,
     pub new_albums_count: usize,
     pub new_tracks_count: usize,
     pub master_index_updated_at: Option<String>,
@@ -869,6 +878,7 @@ pub async fn sync_remote_library(
     target: &RemoteTarget,
     artwork_cache_dir: &Path,
     existing_remote_track_ids: &HashSet<String>,
+    existing_remote_album_folders: &HashSet<String>,
     target_last_synced_at: Option<&str>,
     existing_album_sync_times: &HashMap<String, String>,
     progress_tx: Option<broadcast::Sender<RemoteSyncProgressEvent>>,
@@ -886,6 +896,7 @@ pub async fn sync_remote_library(
                 target_name: target.name.clone(),
                 synced_tracks: Vec::new(),
                 synced_items: Vec::new(),
+                valid_remote_folders: HashSet::new(),
                 new_albums_count: 0,
                 new_tracks_count: 0,
                 master_index_updated_at: None,
@@ -899,6 +910,11 @@ pub async fn sync_remote_library(
         .map_err(|e| RemoteStorageError::Serialization(e.to_string()))?;
 
     let total_albums = master_index.albums.len();
+    let valid_remote_folders: HashSet<String> = master_index
+        .albums
+        .iter()
+        .map(|a| a.relative_folder.clone())
+        .collect();
 
     // Ensure artwork cache directory exists
     let _ = tokio::fs::create_dir_all(artwork_cache_dir).await;
@@ -941,6 +957,7 @@ pub async fn sync_remote_library(
                 target_name: target.name.clone(),
                 synced_tracks: Vec::new(),
                 synced_items: Vec::new(),
+                valid_remote_folders,
                 new_albums_count: 0,
                 new_tracks_count: 0,
                 master_index_updated_at: Some(master_index.updated_at.clone()),
@@ -954,6 +971,8 @@ pub async fn sync_remote_library(
 
     for summary in &master_index.albums {
         let can_skip = if existing_remote_track_ids.is_empty() {
+            false
+        } else if !existing_remote_album_folders.contains(&summary.relative_folder) {
             false
         } else if let (Some(synced_at), Some(summary_updated_at)) = (
             existing_album_sync_times.get(&summary.album_id),
@@ -1001,6 +1020,7 @@ pub async fn sync_remote_library(
             target_name: target.name.clone(),
             synced_tracks: Vec::new(),
             synced_items: Vec::new(),
+            valid_remote_folders,
             new_albums_count: 0,
             new_tracks_count: 0,
             master_index_updated_at: Some(master_index.updated_at.clone()),
@@ -1128,6 +1148,9 @@ pub async fn sync_remote_library(
                 target.id, summary.relative_folder, track.relative_file_name
             );
 
+            let mut mapped_fields = track.mapped_fields.clone();
+            mapped_fields.insert("album_path".to_string(), vec![summary.relative_folder.clone()]);
+
             synced_tracks.push(ScannedTrack {
                 id: track.track_id.clone(),
                 path: remote_track_path,
@@ -1135,7 +1158,7 @@ pub async fn sync_remote_library(
                 album_art_path: local_art_path.clone(),
                 audio: track.audio.clone(),
                 raw_tags: track.raw_tags.clone(),
-                mapped_fields: track.mapped_fields.clone(),
+                mapped_fields,
             });
 
             synced_items.push(RemoteSyncedItem {
@@ -1184,6 +1207,7 @@ pub async fn sync_remote_library(
         target_name: target.name.clone(),
         synced_tracks,
         synced_items,
+        valid_remote_folders,
         new_albums_count,
         new_tracks_count,
         master_index_updated_at: Some(master_index.updated_at),

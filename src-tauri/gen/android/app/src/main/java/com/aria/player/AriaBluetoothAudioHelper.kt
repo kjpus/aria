@@ -329,7 +329,20 @@ object AriaBluetoothAudioHelper {
                 Log.i(TAG, "Never-upsample policy: source=${sourceSampleRate}Hz -> Bluetooth codec=${formatCodecName(bestType, bestConfig)} @ ${negotiatedHz}Hz (flag=0x${Integer.toHexString(targetSampleRateFlag)}), " +
                     "bitsPerSampleMask=0x${Integer.toHexString(targetBitsPerSampleFlag)}, codecSpecific1=$targetCodecSpecific1")
 
-                tryApplyCodecPreference(a2dp, btDevice, bestType, targetSampleRateFlag, targetBitsPerSampleFlag, targetCodecSpecific1)
+                val currentActiveConfig = getActiveCodecConfig(a2dp, btDevice)
+                val currentType = currentActiveConfig?.let { getCodecType(it) } ?: -1
+                val currentSr = currentActiveConfig?.let { getSampleRateMask(it) } ?: -1
+                val currentBps = currentActiveConfig?.let { getBitsPerSampleMask(it) } ?: -1
+
+                val alreadyConfigured = (currentType == bestType &&
+                    currentSr == targetSampleRateFlag &&
+                    currentBps == targetBitsPerSampleFlag)
+
+                if (alreadyConfigured) {
+                    Log.i(TAG, "Bluetooth codec already configured optimally (${formatCodecName(bestType, bestConfig)} @ ${negotiatedHz}Hz); skipping re-negotiation to avoid stream glitches")
+                } else {
+                    tryApplyCodecPreference(a2dp, btDevice, bestType, targetSampleRateFlag, targetBitsPerSampleFlag, targetCodecSpecific1)
+                }
             }
         } else {
             Log.i(TAG, "No explicit selectable codec capabilities returned; ensuring HD audio preference is applied")
