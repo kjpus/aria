@@ -1712,6 +1712,8 @@ button:disabled {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   grid-template-rows: repeat(2, minmax(0, 1fr));
   gap: 0.25rem;
+  pointer-events: none;
+  user-select: none;
 }
 
 .playlist-card__tile {
@@ -1721,6 +1723,9 @@ button:disabled {
   border-radius: 4px;
   object-fit: cover;
   display: block;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .playlist-card__tile--empty {

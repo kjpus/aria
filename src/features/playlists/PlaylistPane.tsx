@@ -891,6 +891,7 @@ export function PlaylistPane({
                           <img
                             alt=""
                             className="playlist-card__tile"
+                            draggable={false}
                             key={`${playlist.id}-art-${index}`}
                             src={src}
                           />

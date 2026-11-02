@@ -2340,6 +2340,20 @@ impl AppCore {
                                 title_match && album_match
                             }) {
                                 resolved_track_ids.push(track.id.clone());
+                                continue;
+                            }
+                            // 4. Match by relative path filename
+                            let rpt_filename = std::path::Path::new(&rpt.relative_path)
+                                .file_name()
+                                .and_then(|f| f.to_str())
+                                .unwrap_or("");
+                            if !rpt_filename.is_empty() {
+                                if let Some(track) = library_snapshot.tracks.iter().find(|t| {
+                                    t.file_name.eq_ignore_ascii_case(rpt_filename)
+                                }) {
+                                    resolved_track_ids.push(track.id.clone());
+                                    continue;
+                                }
                             }
                         }
 
@@ -2356,12 +2370,14 @@ impl AppCore {
                         };
                         let _ = self.database.save_remote_synced_item(&playlist_synced_item);
 
-                        if let Some(existing) = current_playlists.playlists.iter().find(|p| p.id == remote_pl.playlist_id) {
-                            if existing.track_ids.is_empty() && !resolved_track_ids.is_empty() {
-                                let _ = self.playlists.add_tracks(existing.id.clone(), resolved_track_ids).await;
-                                playlist_changed = true;
-                            }
+                        let needs_update = if let Some(existing) = current_playlists.playlists.iter().find(|p| p.id == remote_pl.playlist_id) {
+                            existing.track_ids != resolved_track_ids || existing.name != remote_pl.name
                         } else {
+                            new_playlists_count += 1;
+                            true
+                        };
+
+                        if needs_update {
                             let _ = self.playlists.import_synced_playlist(Playlist {
                                 id: remote_pl.playlist_id.clone(),
                                 name: remote_pl.name.clone(),
@@ -2369,7 +2385,6 @@ impl AppCore {
                                 track_ids: resolved_track_ids,
                                 created_at: remote_pl.created_at.clone(),
                             }).await;
-                            new_playlists_count += 1;
                             playlist_changed = true;
                         }
                     }
