@@ -1162,6 +1162,7 @@ mod tests {
             },
             auto_sync_on_startup: false,
             remote_storage_only: false,
+            logging: aria_domain::LoggingSettings::default(),
         };
         let playback = PlaybackSessionSnapshot {
             queue: vec![PlayTrackRequest {

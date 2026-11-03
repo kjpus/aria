@@ -1,5 +1,7 @@
 mod commands;
 mod error;
+#[cfg(target_os = "android")]
+mod auto_jni;
 
 use std::sync::Arc;
 
@@ -13,8 +15,18 @@ pub struct AppState {
 static GLOBAL_APP_CORE: std::sync::OnceLock<Arc<AppCore>> = std::sync::OnceLock::new();
 static MAIN_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
 
+pub fn get_or_init_app_core() -> Arc<AppCore> {
+    GLOBAL_APP_CORE
+        .get_or_init(|| {
+            let rt = get_main_runtime();
+            let _guard = rt.enter();
+            Arc::new(AppCore::new().expect("failed to initialize Aria core"))
+        })
+        .clone()
+}
+
 pub fn get_app_core() -> Option<Arc<AppCore>> {
-    GLOBAL_APP_CORE.get().cloned()
+    Some(get_or_init_app_core())
 }
 
 pub fn get_main_runtime() -> &'static tokio::runtime::Runtime {
@@ -32,8 +44,7 @@ pub fn run() {
     let rt = get_main_runtime();
     let _guard = rt.enter();
 
-    let core = Arc::new(AppCore::new().expect("failed to initialize Aria core"));
-    let _ = GLOBAL_APP_CORE.set(core.clone());
+    let core = get_or_init_app_core();
     let setup_core = core.clone();
     let run_core = core.clone();
 

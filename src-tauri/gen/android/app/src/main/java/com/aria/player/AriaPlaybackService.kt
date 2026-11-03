@@ -4,30 +4,50 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
-import android.media.MediaMetadata
-import android.media.session.MediaSession
-import android.media.session.PlaybackState
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Bundle
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
+import android.support.v4.media.MediaBrowserCompat
+import android.support.v4.media.MediaDescriptionCompat
+import android.support.v4.media.MediaMetadataCompat
+import android.support.v4.media.session.MediaSessionCompat
+import android.support.v4.media.session.PlaybackStateCompat
 import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.media.MediaBrowserServiceCompat
+import androidx.media.app.NotificationCompat as MediaNotificationCompat
+import androidx.media.session.MediaButtonReceiver
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.util.concurrent.Executors
 
-class AriaPlaybackService : Service() {
+class AriaPlaybackService : MediaBrowserServiceCompat() {
     companion object {
         private const val TAG = "AriaPlaybackService"
         private const val NOTIFICATION_ID = 40401
         private const val CHANNEL_ID = "aria_playback_channel_v4"
+
+        const val MEDIA_ID_ROOT = "root"
+        const val MEDIA_ID_QUEUE = "queue"
+        const val MEDIA_ID_ALBUMS = "albums"
+        const val MEDIA_ID_PLAYLISTS = "playlists"
+        const val MEDIA_ID_COMPOSERS = "composers"
 
         const val ACTION_START = "com.aria.player.action.START"
         const val ACTION_UPDATE = "com.aria.player.action.UPDATE"
@@ -50,6 +70,8 @@ class AriaPlaybackService : Service() {
         @Volatile
         var isServiceRunning = false
             private set
+
+        private val backgroundExecutor = Executors.newSingleThreadExecutor()
 
         init {
             try {
@@ -90,6 +112,70 @@ class AriaPlaybackService : Service() {
 
         @JvmStatic
         private external fun nativeStopPlayback()
+
+        // Automotive native functions
+        @JvmStatic
+        external fun nativeAutoEnsureAppCore(context: Context)
+
+        @JvmStatic
+        external fun nativeAutoGetQueue(): String
+
+        @JvmStatic
+        external fun nativeAutoGetAlbums(): String
+
+        @JvmStatic
+        external fun nativeAutoGetAlbumTracks(albumId: String): String
+
+        @JvmStatic
+        external fun nativeAutoGetPlaylists(): String
+
+        @JvmStatic
+        external fun nativeAutoGetPlaylistTracks(playlistId: String): String
+
+        @JvmStatic
+        external fun nativeAutoGetComposers(): String
+
+        @JvmStatic
+        external fun nativeAutoGetComposerAlbums(composer: String): String
+
+        @JvmStatic
+        external fun nativeAutoPlay()
+
+        @JvmStatic
+        external fun nativeAutoPause()
+
+        @JvmStatic
+        external fun nativeAutoPlayPause()
+
+        @JvmStatic
+        external fun nativeAutoNext()
+
+        @JvmStatic
+        external fun nativeAutoPrevious()
+
+        @JvmStatic
+        external fun nativeAutoStop()
+
+        @JvmStatic
+        external fun nativeAutoSeekTo(positionMs: Long)
+
+        @JvmStatic
+        external fun nativeAutoPlayQueueIndex(index: Int)
+
+        @JvmStatic
+        external fun nativeAutoPlayAlbum(albumId: String)
+
+        @JvmStatic
+        external fun nativeAutoPlayPlaylist(playlistId: String)
+
+        @JvmStatic
+        external fun nativeAutoPlayTrack(trackId: String, albumId: String?)
+
+        @JvmStatic
+        external fun nativeAutoPlayFromSearch(query: String)
+
+        @JvmStatic
+        external fun nativeAutoGetNowPlaying(): String?
 
         @JvmStatic
         fun hasExternalAudioOutput(context: Context): Boolean {
@@ -188,14 +274,45 @@ class AriaPlaybackService : Service() {
                 Log.e(TAG, "Failed to stop AriaPlaybackService", e)
             }
         }
+
+        fun loadArtworkBitmap(path: String?, maxDimension: Int = 384): Bitmap? {
+            if (path.isNullOrBlank()) return null
+            return try {
+                val file = File(path)
+                if (!file.exists() || !file.canRead()) return null
+                val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(path, boundsOptions)
+                val origWidth = boundsOptions.outWidth
+                val origHeight = boundsOptions.outHeight
+                if (origWidth <= 0 || origHeight <= 0) return null
+
+                var sampleSize = 1
+                while (origWidth / (sampleSize * 2) >= maxDimension && origHeight / (sampleSize * 2) >= maxDimension) {
+                    sampleSize *= 2
+                }
+                val decodeOptions = BitmapFactory.Options().apply {
+                    inSampleSize = sampleSize
+                    inPreferredConfig = Bitmap.Config.RGB_565
+                }
+                BitmapFactory.decodeFile(path, decodeOptions)
+            } catch (e: Throwable) {
+                Log.w(TAG, "Failed to decode artwork from $path", e)
+                null
+            }
+        }
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
-    private var mediaSession: MediaSession? = null
+    private var mediaSession: MediaSessionCompat? = null
     private var currentTitle: String = "Aria"
     private var currentArtist: String = "Playing audio"
+    private var currentAlbum: String = "Aria"
     private var currentAudioSpec: String = ""
+    private var currentPositionMs: Long = 0L
+    private var currentDurationMs: Long = 0L
+    private var currentArtworkPath: String? = null
+    private var currentCachedArtBitmap: Bitmap? = null
     private var isPlaying: Boolean = false
     private var noisyReceiverRegistered = false
     private var audioDeviceCallback: AudioDeviceCallback? = null
@@ -209,23 +326,416 @@ class AriaPlaybackService : Service() {
         }
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
-
     override fun onCreate() {
         super.onCreate()
         instance = this
         isServiceRunning = true
+
         try {
             nativeRegisterContext(applicationContext)
         } catch (e: Throwable) {
             Log.w(TAG, "nativeRegisterContext failed", e)
         }
+
+        try {
+            nativeAutoEnsureAppCore(applicationContext)
+        } catch (e: Throwable) {
+            Log.w(TAG, "nativeAutoEnsureAppCore failed", e)
+        }
+
         createNotificationChannel()
         initMediaSession()
+        sessionToken = mediaSession?.sessionToken
+
         registerNoisyReceiver()
         registerAudioDeviceCallback()
         acquireLocks()
-        Log.i(TAG, "AriaPlaybackService created")
+
+        syncWithNowPlaying()
+
+        Log.i(TAG, "AriaPlaybackService created as MediaBrowserService")
+    }
+
+    override fun onBind(intent: Intent?): IBinder? {
+        if (SERVICE_INTERFACE == intent?.action) {
+            return super.onBind(intent)
+        }
+        return super.onBind(intent)
+    }
+
+    override fun onGetRoot(clientPackageName: String, clientUid: Int, rootHints: Bundle?): BrowserRoot? {
+        Log.i(TAG, "onGetRoot called by $clientPackageName (uid=$clientUid)")
+        val extras = Bundle().apply {
+            putBoolean("android.service.media.extra.RECENT", true)
+            putBoolean("android.service.media.extra.OFFLINE", true)
+        }
+        return BrowserRoot(MEDIA_ID_ROOT, extras)
+    }
+
+    override fun onLoadChildren(
+        parentId: String,
+        result: Result<MutableList<MediaBrowserCompat.MediaItem>>
+    ) {
+        result.detach()
+        backgroundExecutor.execute {
+            try {
+                val items = mutableListOf<MediaBrowserCompat.MediaItem>()
+                when (parentId) {
+                    MEDIA_ID_ROOT -> {
+                        items.add(
+                            createCategoryItem(
+                                MEDIA_ID_QUEUE,
+                                "Current Queue",
+                                "Now playing and queued tracks"
+                            )
+                        )
+                        items.add(
+                            createCategoryItem(
+                                MEDIA_ID_ALBUMS,
+                                "Albums",
+                                "Classical albums in library"
+                            )
+                        )
+                        items.add(
+                            createCategoryItem(
+                                MEDIA_ID_PLAYLISTS,
+                                "Playlists",
+                                "Saved playlists"
+                            )
+                        )
+                        items.add(
+                            createCategoryItem(
+                                MEDIA_ID_COMPOSERS,
+                                "Composers",
+                                "Browse by classical composer"
+                            )
+                        )
+                    }
+                    MEDIA_ID_QUEUE -> {
+                        val json = try {
+                            nativeAutoGetQueue()
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "nativeAutoGetQueue error", e)
+                            "[]"
+                        }
+                        parseAndAddAutoItems(json, items, isPlayable = true)
+                    }
+                    MEDIA_ID_ALBUMS -> {
+                        val json = try {
+                            nativeAutoGetAlbums()
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "nativeAutoGetAlbums error", e)
+                            "[]"
+                        }
+                        parseAndAddAutoItems(json, items, isPlayable = false)
+                    }
+                    MEDIA_ID_PLAYLISTS -> {
+                        val json = try {
+                            nativeAutoGetPlaylists()
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "nativeAutoGetPlaylists error", e)
+                            "[]"
+                        }
+                        parseAndAddAutoItems(json, items, isPlayable = false)
+                    }
+                    MEDIA_ID_COMPOSERS -> {
+                        val json = try {
+                            nativeAutoGetComposers()
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "nativeAutoGetComposers error", e)
+                            "[]"
+                        }
+                        parseAndAddAutoItems(json, items, isPlayable = false)
+                    }
+                    else -> {
+                        if (parentId.startsWith("album:")) {
+                            val albumId = parentId.removePrefix("album:")
+                            val json = try {
+                                nativeAutoGetAlbumTracks(albumId)
+                            } catch (e: Throwable) {
+                                Log.e(TAG, "nativeAutoGetAlbumTracks error", e)
+                                "[]"
+                            }
+                            parseAndAddAutoItems(json, items, isPlayable = true)
+                        } else if (parentId.startsWith("playlist:")) {
+                            val playlistId = parentId.removePrefix("playlist:")
+                            val json = try {
+                                nativeAutoGetPlaylistTracks(playlistId)
+                            } catch (e: Throwable) {
+                                Log.e(TAG, "nativeAutoGetPlaylistTracks error", e)
+                                "[]"
+                            }
+                            parseAndAddAutoItems(json, items, isPlayable = true)
+                        } else if (parentId.startsWith("composer:")) {
+                            val composer = parentId.removePrefix("composer:")
+                            val json = try {
+                                nativeAutoGetComposerAlbums(composer)
+                            } catch (e: Throwable) {
+                                Log.e(TAG, "nativeAutoGetComposerAlbums error", e)
+                                "[]"
+                            }
+                            parseAndAddAutoItems(json, items, isPlayable = false)
+                        }
+                    }
+                }
+                result.sendResult(items)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in onLoadChildren for parentId=$parentId", e)
+                result.sendResult(mutableListOf())
+            }
+        }
+    }
+
+    private fun createCategoryItem(
+        id: String,
+        title: String,
+        subtitle: String
+    ): MediaBrowserCompat.MediaItem {
+        val desc = MediaDescriptionCompat.Builder()
+            .setMediaId(id)
+            .setTitle(title)
+            .setSubtitle(subtitle)
+            .build()
+        return MediaBrowserCompat.MediaItem(desc, MediaBrowserCompat.MediaItem.FLAG_BROWSABLE)
+    }
+
+    private fun parseAndAddAutoItems(
+        json: String,
+        items: MutableList<MediaBrowserCompat.MediaItem>,
+        isPlayable: Boolean
+    ) {
+        val array = JSONArray(json)
+        for (i in 0 until array.length()) {
+            val obj = array.getJSONObject(i)
+            val id = obj.optString("id")
+            val title = obj.optString("title")
+            val subtitle = obj.optString("subtitle")
+            val artPath = if (obj.has("artworkPath") && !obj.isNull("artworkPath")) obj.getString("artworkPath") else null
+            val durationMs = obj.optLong("durationMs", 0L)
+
+            val descBuilder = MediaDescriptionCompat.Builder()
+                .setMediaId(id)
+                .setTitle(title)
+                .setSubtitle(subtitle)
+
+            if (!artPath.isNullOrBlank()) {
+                val artFile = File(artPath)
+                if (artFile.exists()) {
+                    descBuilder.setIconUri(Uri.fromFile(artFile))
+                }
+            }
+
+            val extras = Bundle().apply {
+                if (durationMs > 0) {
+                    putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs)
+                }
+                putInt("android.service.media.extra.DOWNLOAD_STATUS", 2)
+            }
+            descBuilder.setExtras(extras)
+
+            val flag = if (isPlayable) {
+                MediaBrowserCompat.MediaItem.FLAG_PLAYABLE
+            } else {
+                MediaBrowserCompat.MediaItem.FLAG_BROWSABLE
+            }
+            items.add(MediaBrowserCompat.MediaItem(descBuilder.build(), flag))
+        }
+    }
+
+    private fun initMediaSession() {
+        try {
+            val session = MediaSessionCompat(this, "AriaPlaybackSession")
+            session.setCallback(object : MediaSessionCompat.Callback() {
+                override fun onPlay() {
+                    triggerPlay()
+                }
+
+                override fun onPause() {
+                    triggerPause()
+                }
+
+                override fun onSkipToNext() {
+                    triggerNext()
+                }
+
+                override fun onSkipToPrevious() {
+                    triggerPrevious()
+                }
+
+                override fun onStop() {
+                    triggerStop()
+                }
+
+                override fun onSeekTo(pos: Long) {
+                    triggerSeekTo(pos)
+                }
+
+                override fun onPlayFromMediaId(mediaId: String?, extras: Bundle?) {
+                    handlePlayFromMediaId(mediaId)
+                }
+
+                override fun onPlayFromSearch(query: String?, extras: Bundle?) {
+                    handlePlayFromSearch(query)
+                }
+
+                override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
+                    return super.onMediaButtonEvent(mediaButtonEvent)
+                }
+            })
+
+            val launchIntent = packageManager.getLaunchIntentForPackage(packageName) ?: Intent(this, MainActivity::class.java)
+            launchIntent.flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            val sessionActivityPendingIntent = PendingIntent.getActivity(
+                this,
+                0,
+                launchIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            session.setSessionActivity(sessionActivityPendingIntent)
+            session.isActive = true
+            mediaSession = session
+        } catch (e: Exception) {
+            Log.w(TAG, "MediaSessionCompat initialization error", e)
+        }
+    }
+
+    private fun handlePlayFromMediaId(mediaId: String?) {
+        if (mediaId.isNullOrBlank()) return
+        Log.i(TAG, "handlePlayFromMediaId: $mediaId")
+        backgroundExecutor.execute {
+            try {
+                if (mediaId.startsWith("queue:")) {
+                    val idx = mediaId.removePrefix("queue:").toIntOrNull() ?: 0
+                    nativeAutoPlayQueueIndex(idx)
+                } else if (mediaId.startsWith("album:")) {
+                    val albumId = mediaId.removePrefix("album:")
+                    nativeAutoPlayAlbum(albumId)
+                } else if (mediaId.startsWith("playlist:")) {
+                    val playlistId = mediaId.removePrefix("playlist:")
+                    nativeAutoPlayPlaylist(playlistId)
+                } else if (mediaId.startsWith("track:")) {
+                    if (mediaId.contains(":album:")) {
+                        val parts = mediaId.split(":album:")
+                        val trackId = parts[0].removePrefix("track:")
+                        val albumId = parts.getOrNull(1)
+                        nativeAutoPlayTrack(trackId, albumId)
+                    } else if (mediaId.contains(":playlist:")) {
+                        val parts = mediaId.split(":playlist:")
+                        val trackId = parts[0].removePrefix("track:")
+                        nativeAutoPlayTrack(trackId, null)
+                    } else {
+                        val trackId = mediaId.removePrefix("track:")
+                        nativeAutoPlayTrack(trackId, null)
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.e(TAG, "handlePlayFromMediaId failed for $mediaId", e)
+            }
+        }
+    }
+
+    private fun handlePlayFromSearch(query: String?) {
+        val q = query?.trim() ?: ""
+        Log.i(TAG, "handlePlayFromSearch: '$q'")
+        backgroundExecutor.execute {
+            try {
+                nativeAutoPlayFromSearch(q)
+            } catch (e: Throwable) {
+                Log.e(TAG, "handlePlayFromSearch failed for '$q'", e)
+            }
+        }
+    }
+
+    private fun triggerPlay() {
+        try {
+            nativeAutoPlay()
+        } catch (e: Throwable) {
+            Log.e(TAG, "nativeAutoPlay call failed", e)
+        }
+    }
+
+    private fun triggerPause() {
+        try {
+            nativeAutoPause()
+        } catch (e: Throwable) {
+            Log.e(TAG, "nativeAutoPause call failed", e)
+        }
+    }
+
+    private fun triggerPlayPause() {
+        try {
+            nativeAutoPlayPause()
+        } catch (e: Throwable) {
+            Log.e(TAG, "nativeAutoPlayPause call failed", e)
+        }
+    }
+
+    private fun triggerNext() {
+        try {
+            nativeAutoNext()
+        } catch (e: Throwable) {
+            Log.e(TAG, "nativeAutoNext call failed", e)
+        }
+    }
+
+    private fun triggerPrevious() {
+        try {
+            nativeAutoPrevious()
+        } catch (e: Throwable) {
+            Log.e(TAG, "nativeAutoPrevious call failed", e)
+        }
+    }
+
+    private fun triggerStop() {
+        try {
+            nativeAutoStop()
+        } catch (e: Throwable) {
+            Log.e(TAG, "nativeAutoStop call failed", e)
+        }
+    }
+
+    private fun triggerSeekTo(pos: Long) {
+        try {
+            nativeAutoSeekTo(pos)
+        } catch (e: Throwable) {
+            Log.e(TAG, "nativeAutoSeekTo call failed", e)
+        }
+    }
+
+    private fun syncWithNowPlaying() {
+        backgroundExecutor.execute {
+            try {
+                val jsonStr = nativeAutoGetNowPlaying()
+                if (!jsonStr.isNullOrBlank()) {
+                    val obj = JSONObject(jsonStr)
+                    val title = obj.optString("title", currentTitle)
+                    val artist = obj.optString("artist", currentArtist)
+                    val album = obj.optString("album", currentAlbum)
+                    val spec = obj.optString("spec", currentAudioSpec)
+                    val pos = obj.optLong("positionMs", currentPositionMs)
+                    val dur = obj.optLong("durationMs", currentDurationMs)
+                    val playing = obj.optBoolean("isPlaying", isPlaying)
+                    val artPath = if (obj.has("artworkPath") && !obj.isNull("artworkPath")) obj.getString("artworkPath") else null
+
+                    if (!title.isNullOrBlank() && title != "Aria") currentTitle = title
+                    if (!artist.isNullOrBlank() && artist != "Playing audio") currentArtist = artist
+                    if (!album.isNullOrBlank()) currentAlbum = album
+                    if (!spec.isNullOrBlank()) currentAudioSpec = spec
+                    currentPositionMs = pos
+                    currentDurationMs = dur
+                    isPlaying = playing
+
+                    if (artPath != currentArtworkPath) {
+                        currentArtworkPath = artPath
+                        currentCachedArtBitmap = loadArtworkBitmap(artPath)
+                    }
+
+                    updateSessionAndNotification()
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "syncWithNowPlaying error", e)
+            }
+        }
     }
 
     private fun registerNoisyReceiver() {
@@ -286,97 +796,16 @@ class AriaPlaybackService : Service() {
             Log.w(TAG, "silenceActivePlayback failed", e)
         }
         try {
-            nativeStopPlayback()
+            nativeAutoStop()
         } catch (e: Throwable) {
-            Log.e(TAG, "nativeStopPlayback failed", e)
+            Log.e(TAG, "nativeAutoStop failed", e)
         }
-        updatePlayback(this, currentTitle, currentArtist, currentAudioSpec, false)
-    }
-
-    private fun initMediaSession() {
-        try {
-            val session = MediaSession(this, "AriaPlaybackSession")
-            session.setCallback(object : MediaSession.Callback() {
-                override fun onPlay() {
-                    triggerPlayPause()
-                }
-
-                override fun onPause() {
-                    triggerPlayPause()
-                }
-
-                override fun onSkipToNext() {
-                    triggerNext()
-                }
-
-                override fun onSkipToPrevious() {
-                    triggerPrevious()
-                }
-
-                override fun onStop() {
-                    triggerStop()
-                }
-            })
-            val audioAttributes = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                .build()
-            session.setPlaybackToLocal(audioAttributes)
-            session.setFlags(
-                MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or
-                    MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
-            )
-
-            val launchIntent = packageManager.getLaunchIntentForPackage(packageName) ?: Intent(this, MainActivity::class.java)
-            launchIntent.flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            val sessionActivityPendingIntent = PendingIntent.getActivity(
-                this,
-                0,
-                launchIntent,
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            )
-            session.setSessionActivity(sessionActivityPendingIntent)
-
-            session.isActive = true
-            mediaSession = session
-        } catch (e: Exception) {
-            Log.w(TAG, "MediaSession initialization error", e)
-        }
-    }
-
-    private fun triggerStop() {
-        try {
-            nativeStopPlayback()
-        } catch (e: Throwable) {
-            Log.e(TAG, "nativeStopPlayback call failed", e)
-        }
-    }
-
-    private fun triggerPlayPause() {
-        try {
-            nativePlayPause()
-        } catch (e: Throwable) {
-            Log.e(TAG, "nativePlayPause call failed", e)
-        }
-    }
-
-    private fun triggerNext() {
-        try {
-            nativeNext()
-        } catch (e: Throwable) {
-            Log.e(TAG, "nativeNext call failed", e)
-        }
-    }
-
-    private fun triggerPrevious() {
-        try {
-            nativePrevious()
-        } catch (e: Throwable) {
-            Log.e(TAG, "nativePrevious call failed", e)
-        }
+        updateSessionAndNotification()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        MediaButtonReceiver.handleIntent(mediaSession, intent)
+
         val action = intent?.action ?: ACTION_START
         when (action) {
             ACTION_PLAY_PAUSE -> {
@@ -446,34 +875,96 @@ class AriaPlaybackService : Service() {
                     releaseWakeLock()
                 }
 
-                val notification = buildNotification(currentTitle, currentArtist, currentAudioSpec, isPlaying)
-                val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-                try {
-                    if (isPlaying) {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            startForeground(
-                                NOTIFICATION_ID,
-                                notification,
-                                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-                            )
-                        } else {
-                            startForeground(NOTIFICATION_ID, notification)
-                        }
-                    } else {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                            stopForeground(STOP_FOREGROUND_DETACH)
-                        } else {
-                            @Suppress("DEPRECATION")
-                            stopForeground(false)
-                        }
-                        notificationManager?.notify(NOTIFICATION_ID, notification)
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Notification / Foreground state error", e)
-                }
+                syncWithNowPlaying()
+                updateSessionAndNotification()
             }
         }
         return START_NOT_STICKY
+    }
+
+    private fun updateSessionAndNotification() {
+        val session = mediaSession
+        if (session != null) {
+            val state = if (isPlaying) {
+                PlaybackStateCompat.STATE_PLAYING
+            } else {
+                PlaybackStateCompat.STATE_PAUSED
+            }
+            val stateBuilder = PlaybackStateCompat.Builder()
+                .setActions(
+                    PlaybackStateCompat.ACTION_PLAY or
+                        PlaybackStateCompat.ACTION_PAUSE or
+                        PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                        PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                        PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                        PlaybackStateCompat.ACTION_SEEK_TO or
+                        PlaybackStateCompat.ACTION_STOP
+                )
+                .setState(
+                    state,
+                    currentPositionMs,
+                    1.0f,
+                    SystemClock.elapsedRealtime()
+                )
+            session.setPlaybackState(stateBuilder.build())
+
+            val contentText = if (currentAudioSpec.isNotBlank()) {
+                "$currentArtist • $currentAudioSpec"
+            } else {
+                currentArtist
+            }
+
+            val metaBuilder = MediaMetadataCompat.Builder()
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, currentTitle)
+                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, contentText)
+                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, currentAlbum)
+                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM_ARTIST, currentArtist)
+                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, currentTitle)
+                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, contentText)
+                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_DESCRIPTION, currentAudioSpec)
+
+            if (currentDurationMs > 0) {
+                metaBuilder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, currentDurationMs)
+            }
+
+            val art = currentCachedArtBitmap
+            if (art != null) {
+                metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, art)
+                metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, art)
+            }
+
+            session.setMetadata(metaBuilder.build())
+        }
+
+        try {
+            notifyChildrenChanged(MEDIA_ID_QUEUE)
+        } catch (_: Exception) {}
+
+        val notification = buildNotification()
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        try {
+            if (isPlaying) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                    )
+                } else {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+            } else {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    stopForeground(STOP_FOREGROUND_DETACH)
+                } else {
+                    @Suppress("DEPRECATION")
+                    stopForeground(false)
+                }
+                notificationManager?.notify(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Notification / Foreground state error", e)
+        }
     }
 
     private fun createNotificationChannel() {
@@ -500,7 +991,7 @@ class AriaPlaybackService : Service() {
         }
     }
 
-    private fun buildNotification(title: String, artist: String, audioSpec: String, isPlaying: Boolean): Notification {
+    private fun buildNotification(): Notification {
         val launchIntent = packageManager.getLaunchIntentForPackage(packageName) ?: Intent(this, MainActivity::class.java)
         launchIntent.flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         val contentPendingIntent = PendingIntent.getActivity(
@@ -535,93 +1026,71 @@ class AriaPlaybackService : Service() {
         }
         val playPauseTitle = if (isPlaying) "Pause" else "Play"
 
-        val contentText = if (audioSpec.isNotBlank()) {
-            "$artist • $audioSpec"
+        val contentText = if (currentAudioSpec.isNotBlank()) {
+            "$currentArtist • $currentAudioSpec"
         } else {
-            artist
+            currentArtist
         }
 
-        val builder = Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle(title)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(currentTitle)
             .setContentText(contentText)
             .setSmallIcon(R.drawable.ic_player_notification)
             .setOngoing(isPlaying)
             .setOnlyAlertOnce(true)
-            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setContentIntent(contentPendingIntent)
-            .setCategory(Notification.CATEGORY_TRANSPORT)
+            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .addAction(
-                Notification.Action.Builder(
+                NotificationCompat.Action.Builder(
                     android.R.drawable.ic_media_previous,
                     "Previous",
                     prevPendingIntent
                 ).build()
             )
             .addAction(
-                Notification.Action.Builder(
+                NotificationCompat.Action.Builder(
                     playPauseIcon,
                     playPauseTitle,
                     playPausePendingIntent
                 ).build()
             )
             .addAction(
-                Notification.Action.Builder(
+                NotificationCompat.Action.Builder(
                     android.R.drawable.ic_media_next,
                     "Next",
                     nextPendingIntent
                 ).build()
             )
             .addAction(
-                Notification.Action.Builder(
+                NotificationCompat.Action.Builder(
                     R.drawable.ic_vol_down,
                     "Vol -",
                     volDownPendingIntent
                 ).build()
             )
             .addAction(
-                Notification.Action.Builder(
+                NotificationCompat.Action.Builder(
                     R.drawable.ic_vol_up,
                     "Vol +",
                     volUpPendingIntent
                 ).build()
             )
 
-        if (audioSpec.isNotBlank()) {
-            builder.setSubText(audioSpec)
+        if (currentAudioSpec.isNotBlank()) {
+            builder.setSubText(currentAudioSpec)
+        }
+
+        val art = currentCachedArtBitmap
+        if (art != null) {
+            builder.setLargeIcon(art)
         }
 
         mediaSession?.let { session ->
-            val stateBuilder = PlaybackState.Builder()
-                .setActions(
-                    PlaybackState.ACTION_PLAY or
-                        PlaybackState.ACTION_PAUSE or
-                        PlaybackState.ACTION_PLAY_PAUSE or
-                        PlaybackState.ACTION_SKIP_TO_NEXT or
-                        PlaybackState.ACTION_SKIP_TO_PREVIOUS or
-                        PlaybackState.ACTION_STOP
-                )
-                .setState(
-                    if (isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
-                    PlaybackState.PLAYBACK_POSITION_UNKNOWN,
-                    1.0f
-                )
-            session.setPlaybackState(stateBuilder.build())
-
-            val mediaMetadata = MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_TITLE, title)
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, contentText)
-                .putString(MediaMetadata.METADATA_KEY_ALBUM, if (audioSpec.isNotBlank()) audioSpec else "Aria")
-                .putString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST, artist)
-                .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, title)
-                .putString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE, contentText)
-                .putString(MediaMetadata.METADATA_KEY_DISPLAY_DESCRIPTION, audioSpec)
-                .build()
-            session.setMetadata(mediaMetadata)
-
-            val mediaStyle = Notification.MediaStyle()
+            val mediaStyle = MediaNotificationCompat.MediaStyle()
                 .setMediaSession(session.sessionToken)
                 .setShowActionsInCompactView(0, 1, 2)
-            builder.style = mediaStyle
+            builder.setStyle(mediaStyle)
         }
 
         return builder.build()
