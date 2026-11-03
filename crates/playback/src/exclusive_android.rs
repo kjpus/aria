@@ -5,16 +5,74 @@ use std::{
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
-        Arc,
+        Arc, OnceLock,
     },
     thread::{self, JoinHandle},
     time::Duration,
 };
 
 use jni::{
-    objects::{JClass, JObject, JString, JValue},
-    JavaVM,
+    objects::{GlobalRef, JByteArray, JClass, JObject, JString, JValue},
+    AttachGuard, JavaVM,
 };
+
+static GLOBAL_VM: OnceLock<JavaVM> = OnceLock::new();
+static GLOBAL_APP_CONTEXT: OnceLock<GlobalRef> = OnceLock::new();
+static GLOBAL_CLASS_LOADER: OnceLock<GlobalRef> = OnceLock::new();
+
+pub fn register_android_context(env: &mut jni::JNIEnv, context: &JObject) {
+    if let Ok(vm) = env.get_java_vm() {
+        let _ = GLOBAL_VM.set(vm);
+    }
+    if !context.is_null() {
+        let app_ctx = match env.call_method(context, "getApplicationContext", "()Landroid/content/Context;", &[]) {
+            Ok(val) => match val.l() {
+                Ok(obj) if !obj.is_null() => Some(obj),
+                _ => None,
+            },
+            Err(_) => {
+                let _ = env.exception_clear();
+                None
+            }
+        };
+        let target: &JObject = match &app_ctx {
+            Some(obj) => obj,
+            None => context,
+        };
+        if GLOBAL_APP_CONTEXT.get().is_none() {
+            if let Ok(g) = env.new_global_ref(target) {
+                let _ = GLOBAL_APP_CONTEXT.set(g);
+            }
+        }
+        if GLOBAL_CLASS_LOADER.get().is_none() {
+            if let Some(ctx_ref) = GLOBAL_APP_CONTEXT.get() {
+                let target_obj = unsafe { JObject::from_raw(ctx_ref.as_raw()) };
+                if let Ok(cl_val) = env.call_method(&target_obj, "getClassLoader", "()Ljava/lang/ClassLoader;", &[]) {
+                    if let Ok(cl_obj) = cl_val.l() {
+                        if !cl_obj.is_null() {
+                            if let Ok(cl_g) = env.new_global_ref(&cl_obj) {
+                                let _ = GLOBAL_CLASS_LOADER.set(cl_g);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn get_android_jni() -> Option<(AttachGuard<'static>, JObject<'static>, JObject<'static>)> {
+    let vm = GLOBAL_VM.get()?;
+    let ctx_ref = GLOBAL_APP_CONTEXT.get()?;
+    let env = vm.attach_current_thread().ok()?;
+    let app_context = unsafe { JObject::from_raw(ctx_ref.as_raw()) };
+    let class_loader = if let Some(cl_ref) = GLOBAL_CLASS_LOADER.get() {
+        unsafe { JObject::from_raw(cl_ref.as_raw()) }
+    } else {
+        JObject::null()
+    };
+    Some((env, app_context, class_loader))
+}
 use symphonia::core::{
     audio::{AudioBufferRef, Layout, SampleBuffer},
     codecs::{CodecParameters, Decoder as SymphoniaDecoder, DecoderOptions},
@@ -36,6 +94,7 @@ pub struct ExclusivePlayer {
     state: Arc<ExclusiveState>,
     commands: Sender<ExclusiveCommand>,
     thread: Option<JoinHandle<()>>,
+    stream_spec: DecodedStreamSpec,
 }
 
 struct ExclusiveState {
@@ -67,7 +126,7 @@ enum PreferredPcmKind {
     Float,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActivePcmFormat {
     Pcm16 = 1,
     Pcm24Packed = 2,
@@ -127,6 +186,7 @@ impl ExclusivePlayer {
 
         let thread = thread::Builder::new()
             .name("aria-android-bitperfect".into())
+            .stack_size(2 * 1024 * 1024)
             .spawn(move || {
                 run_android_exclusive_thread(
                     device_id_int,
@@ -145,11 +205,26 @@ impl ExclusivePlayer {
                 state,
                 commands: command_tx,
                 thread: Some(thread),
+                stream_spec,
             }),
             Ok(Err(error)) => Err(error),
             Err(_) => Err(PlaybackError::Output(format!(
                 "Failed to initialize Android bit-accurate playback for '{path}'"
             ))),
+        }
+    }
+
+    pub fn audio_spec_string(&self) -> String {
+        let bits = if self.stream_spec.preferred_valid_bits > 0 {
+            self.stream_spec.preferred_valid_bits
+        } else {
+            16
+        };
+        let sample_rate_khz = self.stream_spec.sample_rate as f64 / 1000.0;
+        if (sample_rate_khz.fract()).abs() < 0.001 {
+            format!("{}-bit / {:.0} kHz", bits, sample_rate_khz)
+        } else {
+            format!("{}-bit / {:.1} kHz", bits, sample_rate_khz)
         }
     }
 
@@ -312,6 +387,7 @@ fn spawn_decode_worker(
 
     let handle = thread::Builder::new()
         .name("aria-android-decode".into())
+        .stack_size(2 * 1024 * 1024)
         .spawn(move || {
             let mut pending_buffer = Vec::new();
 
@@ -444,49 +520,10 @@ fn run_android_exclusive_thread(
     commands: Receiver<ExclusiveCommand>,
     init_tx: Sender<Result<(), PlaybackError>>,
 ) {
-    let ctx = ndk_context::android_context();
-    let vm = match unsafe { JavaVM::from_raw(ctx.vm().cast()) } {
-        Ok(vm) => vm,
-        Err(err) => {
-            let _ = init_tx.send(Err(PlaybackError::Output(format!("Failed to get JavaVM: {err}"))));
-            return;
-        }
-    };
-
-    let mut env = match vm.attach_current_thread() {
-        Ok(env) => env,
-        Err(err) => {
-            let _ = init_tx.send(Err(PlaybackError::Output(format!("Failed to attach JNI thread: {err}"))));
-            return;
-        }
-    };
-
-    let app_context = unsafe { JObject::from_raw(ctx.context().cast()) };
-
-    // In Android JNI, threads attached via attach_current_thread() use the system ClassLoader,
-    // which cannot find application APK classes with env.find_class().
-    // We must load application classes using app_context.getClassLoader().loadClass(...).
-    let class_loader = match env.call_method(
-        &app_context,
-        "getClassLoader",
-        "()Ljava/lang/ClassLoader;",
-        &[],
-    ) {
-        Ok(val) => match val.l() {
-            Ok(obj) => obj,
-            Err(err) => {
-                let _ = env.exception_clear();
-                let _ = init_tx.send(Err(PlaybackError::Output(format!(
-                    "Failed to get ClassLoader object: {err}"
-                ))));
-                return;
-            }
-        },
-        Err(err) => {
-            let _ = env.exception_clear();
-            let _ = init_tx.send(Err(PlaybackError::Output(format!(
-                "Failed to call getClassLoader(): {err}"
-            ))));
+    let (mut env, app_context, class_loader) = match get_android_jni() {
+        Some((e, a, c)) => (e, a, c),
+        None => {
+            let _ = init_tx.send(Err(PlaybackError::Output("Android JNI context not registered".into())));
             return;
         }
     };
@@ -541,6 +578,16 @@ fn run_android_exclusive_thread(
     };
 
     let bit_depth = stream_spec.preferred_valid_bits as i32;
+    aria_domain::log_diagnostic(
+        aria_domain::DiagnosticSubsystem::Playback,
+        aria_domain::DiagnosticLogLevel::Info,
+        format!(
+            "Configuring AudioTrack: device_id={}, sample_rate={}Hz, bits={}, channels={}",
+            device_id, stream_spec.sample_rate, bit_depth, stream_spec.channels
+        ),
+        None,
+    );
+
     let format_result = env.call_method(
         &player_obj,
         "open",
@@ -566,8 +613,25 @@ fn run_android_exclusive_thread(
     };
 
     let active_format = match ActivePcmFormat::try_from(format_code) {
-        Ok(fmt) => fmt,
+        Ok(fmt) => {
+            aria_domain::log_diagnostic(
+                aria_domain::DiagnosticSubsystem::Playback,
+                aria_domain::DiagnosticLogLevel::Info,
+                format!("AudioTrack initialized with format_code {format_code} ({fmt:?})"),
+                None,
+            );
+            fmt
+        }
         Err(_) => {
+            aria_domain::log_diagnostic(
+                aria_domain::DiagnosticSubsystem::Playback,
+                aria_domain::DiagnosticLogLevel::Error,
+                format!(
+                    "Failed to open Android bit-accurate stream (sampleRate={}Hz, bits={}, ch={})",
+                    stream_spec.sample_rate, bit_depth, stream_spec.channels
+                ),
+                None,
+            );
             let _ = init_tx.send(Err(PlaybackError::Output(format!(
                 "Failed to open Android bit-accurate stream (sampleRate={}Hz, bits={}, ch={})",
                 stream_spec.sample_rate, bit_depth, stream_spec.channels
@@ -576,9 +640,39 @@ fn run_android_exclusive_thread(
         }
     };
 
-    if !start_paused {
-        let _ = env.call_method(&player_obj, "play", "()Z", &[]);
-    }
+    // Pre-allocate / fetch reusable Java write buffer to eliminate heap churn and JNI leaks
+    let mut current_buf_capacity = 65536;
+    let write_buf_obj = match env.call_method(
+        &player_obj,
+        "getWriteBuffer",
+        "(I)[B",
+        &[JValue::Int(current_buf_capacity as i32)],
+    ) {
+        Ok(val) => match val.l() {
+            Ok(obj) => obj,
+            Err(e) => {
+                let _ = init_tx.send(Err(PlaybackError::Output(format!(
+                    "Failed to get write buffer object: {e}"
+                ))));
+                return;
+            }
+        },
+        Err(e) => {
+            let _ = init_tx.send(Err(PlaybackError::Output(format!(
+                "Failed to call getWriteBuffer: {e}"
+            ))));
+            return;
+        }
+    };
+    let mut write_buf_global = match env.new_global_ref(&write_buf_obj) {
+        Ok(g) => g,
+        Err(e) => {
+            let _ = init_tx.send(Err(PlaybackError::Output(format!(
+                "Failed to create global ref for write buffer: {e}"
+            ))));
+            return;
+        }
+    };
 
     let _ = init_tx.send(Ok(()));
 
@@ -589,6 +683,8 @@ fn run_android_exclusive_thread(
 
     let mut is_paused = start_paused;
     let mut reached_eos = false;
+    let mut chunk_counter: u32 = 0;
+    let mut playback_started = false;
 
     while !reached_eos {
         // Handle pending commands non-blocking
@@ -648,41 +744,122 @@ fn run_android_exclusive_thread(
                     apply_volume(&mut data, active_format, volume);
                 }
 
-                // Transfer data to JNI byte array and write
-                if let Ok(j_bytes) = env.byte_array_from_slice(&data) {
-                    let _ = env.call_method(
+                if data.len() > current_buf_capacity {
+                    current_buf_capacity = data.len().next_power_of_two();
+                    if let Ok(val) = env.call_method(
                         &player_obj,
-                        "write",
-                        "([BII)I",
-                        &[
-                            (&j_bytes).into(),
-                            JValue::Int(0),
-                            JValue::Int(data.len() as i32),
-                        ],
+                        "getWriteBuffer",
+                        "(I)[B",
+                        &[JValue::Int(current_buf_capacity as i32)],
+                    ) {
+                        if let Ok(obj) = val.l() {
+                            if let Ok(new_g) = env.new_global_ref(&obj) {
+                                write_buf_global = new_g;
+                            }
+                        }
+                    }
+                }
+
+                // Copy data to the reusable pinned Java byte array and write directly
+                let slice_i8: &[i8] = unsafe {
+                    std::slice::from_raw_parts(data.as_ptr() as *const i8, data.len())
+                };
+
+                let write_res: Result<i32, jni::errors::Error> = env.with_local_frame(16, |env| {
+                    let j_arr = unsafe { JByteArray::from_raw(write_buf_global.as_raw()) };
+                    env.set_byte_array_region(&j_arr, 0, slice_i8)?;
+                    let res = env.call_method(
+                        &player_obj,
+                        "writeDirect",
+                        "(I)I",
+                        &[JValue::Int(data.len() as i32)],
+                    )?;
+                    res.i()
+                });
+                let _ = env.exception_clear();
+
+                match write_res {
+                    Ok(written) if written < 0 => {
+                        aria_domain::log_diagnostic(
+                            aria_domain::DiagnosticSubsystem::Playback,
+                            aria_domain::DiagnosticLogLevel::Error,
+                            format!("AudioTrack writeDirect returned error code {written}"),
+                            None,
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(e) => {
+                        aria_domain::log_diagnostic(
+                            aria_domain::DiagnosticSubsystem::Playback,
+                            aria_domain::DiagnosticLogLevel::Error,
+                            format!("Failed to invoke writeDirect: {e}"),
+                            None,
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    _ => {}
+                }
+
+                // Pre-buffering: start playback once the first chunk is written into AudioTrack buffer
+                if !playback_started && !is_paused {
+                    playback_started = true;
+                    let _ = env.call_method(&player_obj, "play", "()Z", &[]);
+                    aria_domain::log_diagnostic(
+                        aria_domain::DiagnosticSubsystem::Playback,
+                        aria_domain::DiagnosticLogLevel::Info,
+                        "AudioTrack play initiated with pre-buffered audio in sink",
+                        None,
                     );
+                }
+
+                // Update position throttled (every ~150ms instead of every chunk)
+                chunk_counter = chunk_counter.wrapping_add(1);
+                if chunk_counter % 16 == 0 {
+                    let _: Result<(), jni::errors::Error> = env.with_local_frame(16, |env| {
+                        if let Ok(pos_val) = env.call_method(&player_obj, "getPositionMs", "()J", &[]) {
+                            if let Ok(pos_ms) = pos_val.j() {
+                                if pos_ms >= 0 {
+                                    state.position_ms.store(pos_ms as u64, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                        Ok(())
+                    });
                     let _ = env.exception_clear();
                 }
 
-                // Update position
-                if let Ok(pos_val) = env.call_method(&player_obj, "getPositionMs", "()J", &[]) {
-                    if let Ok(pos_ms) = pos_val.j() {
-                        if pos_ms >= 0 {
-                            state.position_ms.store(pos_ms as u64, Ordering::Relaxed);
-                        }
-                    }
-                } else {
-                    let _ = env.exception_clear();
+                if chunk_counter % 256 == 0 {
+                    aria_domain::log_diagnostic(
+                        aria_domain::DiagnosticSubsystem::Playback,
+                        aria_domain::DiagnosticLogLevel::Debug,
+                        format!("Playback active: chunk #{chunk_counter}"),
+                        None,
+                    );
                 }
             }
             Ok(Ok(DecodedChunk::EndOfStream)) => {
                 reached_eos = true;
                 break;
             }
-            Ok(Err(_)) => {
+            Ok(Err(err)) => {
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Playback,
+                    aria_domain::DiagnosticLogLevel::Error,
+                    format!("Decoder worker encountered error: {err}"),
+                    None,
+                );
                 reached_eos = true;
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !is_paused && playback_started {
+                    aria_domain::log_diagnostic(
+                        aria_domain::DiagnosticSubsystem::Playback,
+                        aria_domain::DiagnosticLogLevel::Warn,
+                        "Audio buffer starvation: decoder lookahead queue empty (>50ms wait)",
+                        None,
+                    );
+                }
                 continue;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -725,19 +902,24 @@ fn run_android_exclusive_thread(
             }
 
             // Update position during drain
-            if let Ok(pos_val) = env.call_method(&player_obj, "getPositionMs", "()J", &[]) {
-                if let Ok(pos_ms) = pos_val.j() {
-                    if pos_ms >= 0 {
-                        state.position_ms.store(pos_ms as u64, Ordering::Relaxed);
+            let _: Result<(), jni::errors::Error> = env.with_local_frame(16, |env| {
+                if let Ok(pos_val) = env.call_method(&player_obj, "getPositionMs", "()J", &[]) {
+                    if let Ok(pos_ms) = pos_val.j() {
+                        if pos_ms >= 0 {
+                            state.position_ms.store(pos_ms as u64, Ordering::Relaxed);
+                        }
                     }
                 }
-            } else {
-                let _ = env.exception_clear();
-            }
+                Ok(())
+            });
+            let _ = env.exception_clear();
 
             // Check if AudioTrack finished playing
-            let finished = match env.call_method(&player_obj, "isFinished", "()Z", &[]) {
-                Ok(val) => val.z().unwrap_or(true),
+            let finished = match env.with_local_frame::<_, bool, jni::errors::Error>(16, |env| {
+                Ok(env.call_method(&player_obj, "isFinished", "()Z", &[])?
+                    .z()?)
+            }) {
+                Ok(val) => val,
                 Err(_) => {
                     let _ = env.exception_clear();
                     true
@@ -746,6 +928,12 @@ fn run_android_exclusive_thread(
 
             if finished || drain_start.elapsed() > max_drain_duration {
                 state.finished.store(true, Ordering::Relaxed);
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Playback,
+                    aria_domain::DiagnosticLogLevel::Info,
+                    format!("AudioTrack drain completed in {:.2}s", drain_start.elapsed().as_secs_f64()),
+                    None,
+                );
                 break;
             }
 
@@ -844,24 +1032,7 @@ fn apply_volume(bytes: &mut [u8], active_format: ActivePcmFormat, volume: f32) {
 }
 
 pub fn get_active_bluetooth_description() -> Option<String> {
-    let ctx = ndk_context::android_context();
-    let vm = match unsafe { JavaVM::from_raw(ctx.vm().cast()) } {
-        Ok(v) => v,
-        Err(_) => return None,
-    };
-    let mut env = match vm.attach_current_thread() {
-        Ok(e) => e,
-        Err(_) => return None,
-    };
-    let app_context = unsafe { JObject::from_raw(ctx.context().cast()) };
-
-    let class_loader = match env
-        .call_method(&app_context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
-        .and_then(|v| v.l())
-    {
-        Ok(cl) => cl,
-        Err(_) => return None,
-    };
+    let (mut env, app_context, class_loader) = get_android_jni()?;
 
     let class_name = match env.new_string("com.aria.player.AriaBluetoothAudioHelper") {
         Ok(cn) => cn,
@@ -904,24 +1075,7 @@ pub fn get_active_bluetooth_description() -> Option<String> {
 }
 
 pub fn optimize_bluetooth_audio(sample_rate: u32) -> Option<String> {
-    let ctx = ndk_context::android_context();
-    let vm = match unsafe { JavaVM::from_raw(ctx.vm().cast()) } {
-        Ok(v) => v,
-        Err(_) => return None,
-    };
-    let mut env = match vm.attach_current_thread() {
-        Ok(e) => e,
-        Err(_) => return None,
-    };
-    let app_context = unsafe { JObject::from_raw(ctx.context().cast()) };
-
-    let class_loader = match env
-        .call_method(&app_context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
-        .and_then(|v| v.l())
-    {
-        Ok(cl) => cl,
-        Err(_) => return None,
-    };
+    let (mut env, app_context, class_loader) = get_android_jni()?;
 
     let class_name = match env.new_string("com.aria.player.AriaBluetoothAudioHelper") {
         Ok(cn) => cn,
@@ -968,23 +1122,9 @@ pub fn optimize_bluetooth_audio_default() -> Option<String> {
 }
 
 pub fn has_bluetooth_output() -> bool {
-    let ctx = ndk_context::android_context();
-    let vm = match unsafe { JavaVM::from_raw(ctx.vm().cast()) } {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    let mut env = match vm.attach_current_thread() {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-    let app_context = unsafe { JObject::from_raw(ctx.context().cast()) };
-
-    let class_loader = match env
-        .call_method(&app_context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
-        .and_then(|v| v.l())
-    {
-        Ok(cl) => cl,
-        Err(_) => return false,
+    let (mut env, app_context, class_loader) = match get_android_jni() {
+        Some(j) => j,
+        None => return false,
     };
 
     let class_name = match env.new_string("com.aria.player.AriaBluetoothAudioHelper") {
@@ -1018,23 +1158,9 @@ pub fn has_bluetooth_output() -> bool {
 }
 
 pub fn is_bluetooth_device_id(device_id_int: i32) -> bool {
-    let ctx = ndk_context::android_context();
-    let vm = match unsafe { JavaVM::from_raw(ctx.vm().cast()) } {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    let mut env = match vm.attach_current_thread() {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-    let app_context = unsafe { JObject::from_raw(ctx.context().cast()) };
-
-    let class_loader = match env
-        .call_method(&app_context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
-        .and_then(|v| v.l())
-    {
-        Ok(cl) => cl,
-        Err(_) => return false,
+    let (mut env, app_context, class_loader) = match get_android_jni() {
+        Some(j) => j,
+        None => return false,
     };
 
     let class_name = match env.new_string("com.aria.player.AriaBluetoothAudioHelper") {
@@ -1067,24 +1193,15 @@ pub fn is_bluetooth_device_id(device_id_int: i32) -> bool {
     }
 }
 
-pub fn update_playback_service(title: Option<&str>, artist: Option<&str>, is_playing: bool) {
-    let ctx = ndk_context::android_context();
-    let vm = match unsafe { JavaVM::from_raw(ctx.vm().cast()) } {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    let mut env = match vm.attach_current_thread() {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    let app_context = unsafe { JObject::from_raw(ctx.context().cast()) };
-
-    let class_loader = match env
-        .call_method(&app_context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
-        .and_then(|v| v.l())
-    {
-        Ok(cl) => cl,
-        Err(_) => return,
+pub fn update_playback_service(
+    title: Option<&str>,
+    artist: Option<&str>,
+    audio_spec: Option<&str>,
+    is_playing: bool,
+) {
+    let (mut env, app_context, class_loader) = match get_android_jni() {
+        Some(j) => j,
+        None => return,
     };
 
     let class_name = match env.new_string("com.aria.player.AriaPlaybackService") {
@@ -1109,6 +1226,7 @@ pub fn update_playback_service(title: Option<&str>, artist: Option<&str>, is_pla
     let null_obj = JObject::null();
     let j_title = title.and_then(|t| env.new_string(t).ok());
     let j_artist = artist.and_then(|a| env.new_string(a).ok());
+    let j_spec = audio_spec.and_then(|s| env.new_string(s).ok());
     let title_val: JValue = match j_title.as_ref() {
         Some(s) => s.into(),
         None => (&null_obj).into(),
@@ -1117,38 +1235,29 @@ pub fn update_playback_service(title: Option<&str>, artist: Option<&str>, is_pla
         Some(s) => s.into(),
         None => (&null_obj).into(),
     };
+    let spec_val: JValue = match j_spec.as_ref() {
+        Some(s) => s.into(),
+        None => (&null_obj).into(),
+    };
 
     let _ = env.call_static_method(
         &service_class,
         "updatePlayback",
-        "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Z)V",
+        "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Z)V",
         &[
             (&app_context).into(),
             title_val,
             artist_val,
+            spec_val,
             JValue::Bool(if is_playing { 1 } else { 0 }),
         ],
     );
 }
 
 pub fn stop_playback_service() {
-    let ctx = ndk_context::android_context();
-    let vm = match unsafe { JavaVM::from_raw(ctx.vm().cast()) } {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    let mut env = match vm.attach_current_thread() {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    let app_context = unsafe { JObject::from_raw(ctx.context().cast()) };
-
-    let class_loader = match env
-        .call_method(&app_context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
-        .and_then(|v| v.l())
-    {
-        Ok(cl) => cl,
-        Err(_) => return,
+    let (mut env, app_context, class_loader) = match get_android_jni() {
+        Some(j) => j,
+        None => return,
     };
 
     let class_name = match env.new_string("com.aria.player.AriaPlaybackService") {

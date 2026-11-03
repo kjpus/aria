@@ -15,6 +15,7 @@ import { LibraryPanel } from '../library/LibraryPanel';
 import { PlaybackSettingsPanel } from './PlaybackSettingsPanel';
 import { RemoteSettingsPanel } from './RemoteSettingsPanel';
 import { SettingsPanel } from './SettingsPanel';
+import { DiagnosticLogsPanel } from './DiagnosticLogsPanel';
 import {
   fieldMappingFormatLabel,
   normalizeFieldMappingFormat,
@@ -56,6 +57,7 @@ type SettingsPaneProps = {
   onAutoSyncOnStartupChange?: (enabled: boolean) => void;
   remoteStorageOnly?: boolean;
   onRemoteStorageOnlyChange?: (enabled: boolean) => void;
+  onLoggingSettingsChange?: (settings: import('../../types/aria').LoggingSettings) => void;
 };
 
 export function SettingsPane({
@@ -88,6 +90,7 @@ export function SettingsPane({
   onAutoSyncOnStartupChange,
   remoteStorageOnly,
   onRemoteStorageOnlyChange,
+  onLoggingSettingsChange,
 }: SettingsPaneProps) {
   const [isMappingsDialogOpen, setIsMappingsDialogOpen] = useState(false);
   const [isCatalogRulesDialogOpen, setIsCatalogRulesDialogOpen] = useState(false);
@@ -196,6 +199,11 @@ export function SettingsPane({
         onAutoSyncOnStartupChange={onAutoSyncOnStartupChange}
         remoteStorageOnly={remoteStorageOnly ?? settings.remoteStorageOnly ?? false}
         onRemoteStorageOnlyChange={onRemoteStorageOnlyChange}
+      />
+
+      <DiagnosticLogsPanel
+        loggingSettings={settings.logging}
+        onLoggingSettingsChange={onLoggingSettingsChange}
       />
 
       {isMappingsDialogOpen ? (

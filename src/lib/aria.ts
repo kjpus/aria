@@ -27,6 +27,10 @@ import type {
   TrackTagEditRequest,
   TrackRawTags,
   TrackTableSettings,
+  DiagnosticLogEntry,
+  DiagnosticLogLevel,
+  DiagnosticSubsystem,
+  LoggingSettings,
 } from '../types/aria';
 
 export const APP_EVENT_NAME = 'aria://app-event';
@@ -1102,6 +1106,58 @@ export async function updateRemoteStorageOnly(
     return previewBootstrap.settings;
   }
   return invoke<SettingsSnapshot>('update_remote_storage_only', { enabled });
+}
+
+export async function updateLoggingSettings(
+  settings: LoggingSettings,
+): Promise<SettingsSnapshot> {
+  if (!isTauriRuntime) {
+    previewBootstrap = {
+      ...previewBootstrap,
+      settings: {
+        ...previewBootstrap.settings,
+        logging: settings,
+      },
+    };
+    return previewBootstrap.settings;
+  }
+  return invoke<SettingsSnapshot>('update_logging_settings', { settings });
+}
+
+export async function getDiagnosticLogs(
+  subsystem?: string,
+  minLevel?: DiagnosticLogLevel,
+  limit?: number,
+): Promise<DiagnosticLogEntry[]> {
+  if (!isTauriRuntime) {
+    return [];
+  }
+  return invoke<DiagnosticLogEntry[]>('get_diagnostic_logs', {
+    subsystem: subsystem ?? null,
+    minLevel: minLevel ?? null,
+    limit: limit ?? null,
+  });
+}
+
+export async function clearDiagnosticLogs(): Promise<void> {
+  if (!isTauriRuntime) {
+    return;
+  }
+  return invoke<void>('clear_diagnostic_logs');
+}
+
+export async function exportDiagnosticLogsText(): Promise<string> {
+  if (!isTauriRuntime) {
+    return '';
+  }
+  return invoke<string>('export_diagnostic_logs_text');
+}
+
+export async function getDiagnosticLogPath(): Promise<string | null> {
+  if (!isTauriRuntime) {
+    return null;
+  }
+  return invoke<string | null>('get_diagnostic_log_path');
 }
 
 export async function listenToAppEvents(

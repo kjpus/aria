@@ -216,6 +216,8 @@ export function PlayerBar({
           <img
             alt=""
             className="player-bar__art player-bar__art-image"
+            loading="lazy"
+            decoding="async"
             onMouseEnter={() => setShowArtPopup(true)}
             onMouseLeave={() => setShowArtPopup(false)}
             src={art}

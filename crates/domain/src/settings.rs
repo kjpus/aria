@@ -171,6 +171,8 @@ pub struct SettingsSnapshot {
     pub auto_sync_on_startup: bool,
     #[serde(default)]
     pub remote_storage_only: bool,
+    #[serde(default)]
+    pub logging: crate::logging::LoggingSettings,
 }
 
 impl Default for SettingsSnapshot {
@@ -184,6 +186,7 @@ impl Default for SettingsSnapshot {
             playback: PlaybackPreferences::default(),
             auto_sync_on_startup: false,
             remote_storage_only: false,
+            logging: crate::logging::LoggingSettings::default(),
         }
     }
 }

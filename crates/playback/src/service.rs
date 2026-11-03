@@ -31,6 +31,8 @@ use self::exclusive_wasapi::{is_wasapi_device_id, ExclusivePlayer};
 
 #[cfg(target_os = "android")]
 use self::exclusive_android::ExclusivePlayer;
+#[cfg(target_os = "android")]
+pub use self::exclusive_android::register_android_context;
 
 #[derive(Debug, Error)]
 pub enum PlaybackError {
@@ -146,6 +148,17 @@ impl ActivePlayback {
             Self::Shared { request, .. } => request,
             #[cfg(any(target_os = "windows", target_os = "android"))]
             Self::Exclusive { request, .. } => request,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn audio_spec(&self) -> Option<String> {
+        match self {
+            Self::Shared { .. } => None,
+            #[cfg(target_os = "android")]
+            Self::Exclusive { player, .. } => Some(player.audio_spec_string()),
+            #[cfg(all(not(target_os = "android"), any(target_os = "windows")))]
+            Self::Exclusive { .. } => None,
         }
     }
 }
@@ -356,6 +369,7 @@ impl PlaybackService {
                 exclusive_android::update_playback_service(
                     Some(&active.request().queue_item.title),
                     Some(&active.request().queue_item.subtitle),
+                    active.audio_spec().as_deref(),
                     true,
                 );
             } else if let Some(request) = current_queue_request(&backend)
@@ -541,7 +555,24 @@ impl PlaybackService {
     }
 
     pub async fn pause(&self) -> PlaybackSnapshot {
-        self.stop().await
+        {
+            let backend = self.backend.lock().expect("playback backend poisoned");
+            if let Some(active) = backend.active.as_ref() {
+                active.pause();
+                #[cfg(target_os = "android")]
+                exclusive_android::update_playback_service(
+                    Some(&active.request().queue_item.title),
+                    Some(&active.request().queue_item.subtitle),
+                    active.audio_spec().as_deref(),
+                    false,
+                );
+            }
+        }
+
+        let mut state = self.state.write().await;
+        self.refresh_state(&mut state);
+        state.status = PlaybackStatus::Paused;
+        state.clone()
     }
 
     pub async fn stop(&self) -> PlaybackSnapshot {
@@ -764,6 +795,8 @@ fn start_request(
                 .map(|player| (player, target.snapshot))
             }) {
                 Ok((player, snapshot)) => {
+                    #[cfg(target_os = "android")]
+                    let audio_spec = player.audio_spec_string();
                     backend.shared_output = None;
                     backend.last_request = Some(request.clone());
                     backend.output_device = snapshot;
@@ -775,6 +808,7 @@ fn start_request(
                     exclusive_android::update_playback_service(
                         Some(&request.queue_item.title),
                         Some(&request.queue_item.subtitle),
+                        Some(&audio_spec),
                         !start_paused,
                     );
                     return Ok(());
@@ -848,6 +882,7 @@ fn start_request(
     exclusive_android::update_playback_service(
         Some(&request.queue_item.title),
         Some(&request.queue_item.subtitle),
+        None,
         !start_paused,
     );
     Ok(())
@@ -930,14 +965,39 @@ fn rebind_output(
         paused: active.is_paused(),
     });
 
+    #[cfg(target_os = "android")]
+    let was_external = backend.output_device.is_usb
+        || backend.output_device.name.to_lowercase().contains("bluetooth")
+        || backend.output_device.name.to_lowercase().contains("headset")
+        || backend.output_device.name.to_lowercase().contains("buds")
+        || backend.output_device.name.to_lowercase().contains("headphones");
+
     let resolved_snapshot = resolve_output_snapshot(&preferences, strict_selected)?;
+    #[cfg(target_os = "android")]
+    let now_speaker = resolved_snapshot.is_default && !resolved_snapshot.is_usb;
+
     backend.preferences = preferences;
     backend.shared_output = None;
     backend.output_device = resolved_snapshot;
     backend.active = None;
 
     if let Some(resume) = resume {
-        start_request(backend, resume.request, resume.position, resume.paused)?;
+        #[cfg(target_os = "android")]
+        let should_resume = if was_external && now_speaker {
+            false
+        } else {
+            !resume.paused
+        };
+
+        #[cfg(not(target_os = "android"))]
+        let should_resume = !resume.paused;
+
+        if should_resume {
+            start_request(backend, resume.request, resume.position, false)?;
+        } else {
+            backend.saved_position = Some(resume.position);
+            backend.last_request = Some(resume.request);
+        }
     }
 
     Ok(())

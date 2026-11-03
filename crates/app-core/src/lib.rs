@@ -13,6 +13,8 @@ use aria_library::manifest::{
 };
 use aria_library::{LibraryError, LibraryService};
 use aria_playback::{PlaybackError, PlaybackService};
+#[cfg(target_os = "android")]
+pub use aria_playback::register_android_context;
 use aria_playlists::{PlaylistError, PlaylistService};
 use aria_remote_storage::{
     create_backend_for_target, sync_remote_library, sync_remote_playlists, upload_album,
@@ -42,6 +44,8 @@ pub enum AppCoreError {
     Import(String),
     #[error("remote error: {0}")]
     Remote(String),
+    #[error("{0}")]
+    Custom(String),
 }
 
 static GLOBAL_PENDING_GDRIVE_AUTH: Mutex<Option<PendingAuthFlow>> = Mutex::const_new(None);
@@ -72,7 +76,17 @@ impl AppCore {
         let cache_dir = RemoteCacheManager::default_cache_dir().unwrap_or_else(|_| {
             std::env::temp_dir().join("aria_remote_cache")
         });
-        let cache_manager = Arc::new(RemoteCacheManager::new(cache_dir, 8));
+        let cache_manager = Arc::new(RemoteCacheManager::new(cache_dir.clone(), 8));
+
+        let log_dir = cache_dir.parent().unwrap_or(&cache_dir).join("logs");
+        let _ = std::fs::create_dir_all(&log_dir);
+        aria_domain::init_diagnostic_logger(log_dir.clone(), Some(persisted.settings.logging.clone()));
+        aria_domain::log_diagnostic(
+            aria_domain::DiagnosticSubsystem::General,
+            aria_domain::DiagnosticLogLevel::Info,
+            format!("Aria core initialized; logging to {}", log_dir.display()),
+            None,
+        );
 
         let playback_for_updater = playback.clone();
         let path_updater: PathUpdater = Arc::new(move |track_id, path| {
@@ -540,9 +554,34 @@ impl AppCore {
         Ok(snapshot)
     }
 
-    pub async fn play_queue_index(&self, index: usize) -> Result<PlaybackSnapshot, AppCoreError> {
+    pub async fn play_queue_index(&self, mut index: usize) -> Result<PlaybackSnapshot, AppCoreError> {
         let session = self.playback.persisted_session();
-        if let Some(mut req) = session.queue.get(index).cloned() {
+        let total_tracks = session.queue.len();
+        let mut last_error = None;
+        let mut consecutive_failures = 0;
+        const MAX_CONSECUTIVE_SKIPS: usize = 5;
+
+        while index < total_tracks {
+            if consecutive_failures >= MAX_CONSECUTIVE_SKIPS {
+                eprintln!("[app-core] Hit {MAX_CONSECUTIVE_SKIPS} consecutive track playback failures; halting skip loop to prevent resource exhaustion");
+                break;
+            }
+
+            let mut req = match session.queue.get(index).cloned() {
+                Some(r) => r,
+                None => break,
+            };
+
+            aria_domain::log_diagnostic(
+                aria_domain::DiagnosticSubsystem::Playback,
+                aria_domain::DiagnosticLogLevel::Info,
+                format!(
+                    "Queue play index {index}: '{}' by '{}' (path: '{}')",
+                    req.queue_item.title, req.queue_item.subtitle, req.path
+                ),
+                None,
+            );
+
             let n = self.cache_manager.window_size();
             let window: Vec<String> = session
                 .queue
@@ -551,21 +590,62 @@ impl AppCore {
                 .take(n)
                 .map(|r| r.queue_item.id.clone())
                 .collect();
-            if let Err(err) = self.resolve_remote_track_if_needed(&mut req, &window).await {
-                eprintln!("[app-core] Track at index {index} is unavailable ({err}); skipping to next track");
-                if index + 1 < session.queue.len() {
-                    return Box::pin(self.play_queue_index(index + 1)).await;
-                } else {
-                    return Err(err);
+
+            match self.resolve_remote_track_if_needed(&mut req, &window).await {
+                Ok(_) => {
+                    match self.playback.play_queue_index(index).await {
+                        Ok(snapshot) => {
+                            aria_domain::log_diagnostic(
+                                aria_domain::DiagnosticSubsystem::Playback,
+                                aria_domain::DiagnosticLogLevel::Info,
+                                format!(
+                                    "Playback started for index {index}: '{}' (status: {:?})",
+                                    req.queue_item.title, snapshot.status
+                                ),
+                                None,
+                            );
+                            self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
+                                snapshot.clone(),
+                            )));
+                            self.trigger_sliding_window_prefetch().await;
+                            return Ok(snapshot);
+                        }
+                        Err(playback_err) => {
+                            aria_domain::log_diagnostic(
+                                aria_domain::DiagnosticSubsystem::Playback,
+                                aria_domain::DiagnosticLogLevel::Warn,
+                                format!(
+                                    "Playback failed for index {index} ({playback_err}); skipping to next track"
+                                ),
+                                None,
+                            );
+                            eprintln!("[app-core] Playback failed for track at index {index} ({playback_err}); skipping to next track");
+                            last_error = Some(AppCoreError::Playback(playback_err));
+                            consecutive_failures += 1;
+                            index += 1;
+                        }
+                    }
+                }
+                Err(err) => {
+                    aria_domain::log_diagnostic(
+                        aria_domain::DiagnosticSubsystem::Playback,
+                        aria_domain::DiagnosticLogLevel::Warn,
+                        format!(
+                            "Track at index {index} unavailable ({err}); skipping to next track"
+                        ),
+                        None,
+                    );
+                    eprintln!("[app-core] Track at index {index} is unavailable ({err}); skipping to next track");
+                    last_error = Some(err);
+                    consecutive_failures += 1;
+                    index += 1;
                 }
             }
         }
-        let snapshot = self.playback.play_queue_index(index).await?;
-        self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
-            snapshot.clone(),
-        )));
-        self.trigger_sliding_window_prefetch().await;
-        Ok(snapshot)
+
+        Err(last_error.unwrap_or_else(|| {
+            AppCoreError::Custom("No playable tracks available in queue".into())
+        }))
     }
 
     async fn resolve_remote_track_if_needed(
@@ -578,6 +658,12 @@ impl AppCore {
         // 1. If already cached locally, update path to local cached path
         if let Some(cached_path) = self.cache_manager.get_cached_path(track_id).await {
             let local_path_str = cached_path.to_string_lossy().to_string();
+            aria_domain::log_diagnostic(
+                aria_domain::DiagnosticSubsystem::Download,
+                aria_domain::DiagnosticLogLevel::Debug,
+                format!("Resolved track '{track_id}' from local cache: {local_path_str}"),
+                None,
+            );
             request.path = local_path_str.clone();
             self.playback
                 .update_queue_track_path(track_id, local_path_str);
@@ -601,6 +687,12 @@ impl AppCore {
                         && std::path::Path::new(&t.path).exists()
                 }) {
                     let local_path_str = local_track.path.clone();
+                    aria_domain::log_diagnostic(
+                        aria_domain::DiagnosticSubsystem::Download,
+                        aria_domain::DiagnosticLogLevel::Info,
+                        format!("Remote track '{track_id}' matched identical local file: {local_path_str}"),
+                        None,
+                    );
                     request.path = local_path_str.clone();
                     self.playback
                         .update_queue_track_path(track_id, local_path_str);
@@ -671,6 +763,12 @@ impl AppCore {
         }
 
         // 3. Emit Buffering snapshot so UI indicates loading
+        aria_domain::log_diagnostic(
+            aria_domain::DiagnosticSubsystem::Download,
+            aria_domain::DiagnosticLogLevel::Info,
+            format!("Remote track '{track_id}' not in cache; buffering from target '{target_id}' ({rel_path})"),
+            None,
+        );
         let mut buffering_snapshot = self.playback.snapshot().await;
         buffering_snapshot.status = PlaybackStatus::Buffering;
         buffering_snapshot.current_track = Some(request.queue_item.clone());
@@ -682,6 +780,12 @@ impl AppCore {
         let targets = match self.database.load_remote_targets() {
             Ok(t) => t,
             Err(e) => {
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Download,
+                    aria_domain::DiagnosticLogLevel::Error,
+                    format!("Failed to load remote targets for track '{track_id}': {e}"),
+                    None,
+                );
                 eprintln!("[app-core] Failed to load remote targets for track '{track_id}': {e}");
                 let mut reset_snapshot = self.playback.snapshot().await;
                 reset_snapshot.status = PlaybackStatus::Stopped;
@@ -693,6 +797,12 @@ impl AppCore {
         let target = match targets.into_iter().find(|t| t.id == target_id) {
             Some(t) => t,
             None => {
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Download,
+                    aria_domain::DiagnosticLogLevel::Error,
+                    format!("Remote target '{target_id}' not found for track '{track_id}'"),
+                    None,
+                );
                 eprintln!("[app-core] Remote target '{target_id}' not found for track '{track_id}'");
                 let mut reset_snapshot = self.playback.snapshot().await;
                 reset_snapshot.status = PlaybackStatus::Stopped;
@@ -704,6 +814,12 @@ impl AppCore {
         let backend = match create_backend_for_target(&target) {
             Ok(b) => b,
             Err(e) => {
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Download,
+                    aria_domain::DiagnosticLogLevel::Error,
+                    format!("Failed to instantiate backend for target '{target_id}': {e}"),
+                    None,
+                );
                 eprintln!("[app-core] Failed to instantiate backend for target '{target_id}': {e}");
                 let mut reset_snapshot = self.playback.snapshot().await;
                 reset_snapshot.status = PlaybackStatus::Stopped;
@@ -725,8 +841,22 @@ impl AppCore {
         )
         .await
         {
-            Ok(Ok(p)) => p,
+            Ok(Ok(p)) => {
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Download,
+                    aria_domain::DiagnosticLogLevel::Info,
+                    format!("Download finished successfully for '{rel_path}' -> {}", p.display()),
+                    None,
+                );
+                p
+            }
             Ok(Err(err)) => {
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Download,
+                    aria_domain::DiagnosticLogLevel::Error,
+                    format!("Failed to download remote track '{rel_path}' (id: {track_id}): {err}"),
+                    None,
+                );
                 eprintln!("[app-core] Failed to download remote track '{rel_path}' (id: {track_id}): {err}");
                 let mut reset_snapshot = self.playback.snapshot().await;
                 reset_snapshot.status = PlaybackStatus::Stopped;
@@ -736,6 +866,12 @@ impl AppCore {
                 )));
             }
             Err(_) => {
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Download,
+                    aria_domain::DiagnosticLogLevel::Error,
+                    format!("Download timed out (60s) for remote track '{rel_path}' (id: {track_id})"),
+                    None,
+                );
                 eprintln!("[app-core] Download timed out (60s) for remote track '{rel_path}' (id: {track_id})");
                 let mut reset_snapshot = self.playback.snapshot().await;
                 reset_snapshot.status = PlaybackStatus::Stopped;
@@ -982,6 +1118,36 @@ impl AppCore {
         snapshot
     }
 
+    pub async fn update_logging_settings(&self, settings: aria_domain::LoggingSettings) -> SettingsSnapshot {
+        aria_domain::DiagnosticLogger::global().update_settings(settings.clone());
+        let snapshot = self.settings.update_logging(settings).await;
+        self.emit(AppEvent::Settings(snapshot.clone()));
+        snapshot
+    }
+
+    pub fn get_diagnostic_logs(
+        &self,
+        subsystem: Option<aria_domain::DiagnosticSubsystem>,
+        min_level: Option<aria_domain::DiagnosticLogLevel>,
+        limit: Option<usize>,
+    ) -> Vec<aria_domain::DiagnosticLogEntry> {
+        aria_domain::DiagnosticLogger::global().get_logs(subsystem, min_level, limit)
+    }
+
+    pub fn clear_diagnostic_logs(&self) {
+        aria_domain::DiagnosticLogger::global().clear();
+    }
+
+    pub fn export_diagnostic_logs_text(&self) -> String {
+        aria_domain::DiagnosticLogger::global().export_text()
+    }
+
+    pub fn get_diagnostic_log_path(&self) -> Option<String> {
+        aria_domain::DiagnosticLogger::global()
+            .get_log_file_path()
+            .map(|p| p.to_string_lossy().to_string())
+    }
+
     fn emit(&self, event: AppEvent) {
         let _ = self.events.send(event);
     }
@@ -991,6 +1157,7 @@ impl AppCore {
         let mut events = self.events.subscribe();
         std::thread::Builder::new()
             .name("aria-persistence".into())
+            .stack_size(2 * 1024 * 1024)
             .spawn(move || {
                 let mut last_playback_session: Option<PlaybackSessionSnapshot> = None;
                 loop {
@@ -1045,8 +1212,10 @@ impl AppCore {
         } else {
             std::thread::Builder::new()
                 .name("aria-remote-sync".into())
+                .stack_size(4 * 1024 * 1024)
                 .spawn(move || {
                     let runtime = tokio::runtime::Builder::new_multi_thread()
+                        .thread_stack_size(4 * 1024 * 1024)
                         .enable_all()
                         .build()
                         .expect("failed to create remote sync worker runtime");
@@ -1063,6 +1232,7 @@ impl AppCore {
 
         std::thread::Builder::new()
             .name("aria-playback-publisher".into())
+            .stack_size(2 * 1024 * 1024)
             .spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_time()
@@ -1182,6 +1352,7 @@ impl AppCore {
 
             std::thread::Builder::new()
                 .name("aria-output-device-monitor".into())
+                .stack_size(2 * 1024 * 1024)
                 .spawn(move || {
                     let runtime = tokio::runtime::Builder::new_current_thread()
                         .enable_time()
@@ -1257,6 +1428,7 @@ impl AppCore {
             } else {
                 std::thread::Builder::new()
                     .name("aria-remote-target-sync".into())
+                    .stack_size(4 * 1024 * 1024)
                     .spawn(move || {
                         if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
                             rt.block_on(sync_fut);

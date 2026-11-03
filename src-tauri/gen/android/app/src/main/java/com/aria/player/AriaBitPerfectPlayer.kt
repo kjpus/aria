@@ -11,6 +11,8 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.PowerManager
 import android.util.Log
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 class AriaBitPerfectPlayer {
     companion object {
@@ -21,6 +23,26 @@ class AriaBitPerfectPlayer {
         const val FORMAT_PCM_24BIT_PACKED = 2
         const val FORMAT_PCM_32BIT = 3
         const val FORMAT_PCM_FLOAT = 4
+
+        @Volatile
+        var activeInstance: AriaBitPerfectPlayer? = null
+            private set
+
+        @JvmStatic
+        fun silenceActivePlayback() {
+            try {
+                activeInstance?.let { player ->
+                    player.audioTrack?.let { track ->
+                        try {
+                            track.pause()
+                            track.flush()
+                        } catch (_: Exception) {}
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to silence active playback", e)
+            }
+        }
 
         @JvmStatic
         fun createPlayer(): AriaBitPerfectPlayer {
@@ -34,21 +56,31 @@ class AriaBitPerfectPlayer {
     private var audioAttributes: AudioAttributes? = null
     private var mixerAttributesConfigured: Boolean = false
     private var sampleRate: Int = 44100
+    private var bitDepth: Int = 16
     private var channelCount: Int = 2
+    private var chosenEncoding: Int = AudioFormat.ENCODING_PCM_16BIT
+    private var floatWriteBuffer = FloatArray(16384)
     private var bytesPerFrame: Int = 4
     private var framesWritten: Long = 0
+    private var lastUnderrunCount: Int = 0
     private var appContext: Context? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var currentTitle: String = "Aria"
     private var currentArtist: String = "Playing audio"
 
+    fun getAudioSpec(): String {
+        val khz = sampleRate / 1000.0
+        val khzStr = if (khz % 1.0 == 0.0) String.format("%.0f", khz) else String.format("%.1f", khz)
+        return "$bitDepth-bit / $khzStr kHz"
+    }
+
     fun setTrackMetadata(title: String?, artist: String?) {
         if (!title.isNullOrBlank()) this.currentTitle = title
         if (!artist.isNullOrBlank()) this.currentArtist = artist
         appContext?.let {
             val isPlaying = audioTrack?.playState == AudioTrack.PLAYSTATE_PLAYING
-            AriaPlaybackService.updatePlayback(it, this.currentTitle, this.currentArtist, isPlaying)
+            AriaPlaybackService.updatePlayback(it, this.currentTitle, this.currentArtist, getAudioSpec(), isPlaying)
         }
     }
 
@@ -73,13 +105,20 @@ class AriaBitPerfectPlayer {
         try {
             if (wifiLock == null) {
                 val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-                wifiLock = wm?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Aria:PlaybackWifiLock")?.apply {
+                val wifiMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                wifiLock = wm?.createWifiLock(wifiMode, "Aria:PlaybackWifiLock")?.apply {
                     setReferenceCounted(false)
                 }
             }
             wifiLock?.let {
                 if (!it.isHeld) {
                     it.acquire()
+                    AriaPlaybackService.logDiagnostic(2, "Playback", "Acquired AudioTrack WifiLock")
                 }
             }
         } catch (e: Exception) {
@@ -128,6 +167,7 @@ class AriaBitPerfectPlayer {
             }
             this.audioManager = am
             this.sampleRate = sampleRate
+            this.bitDepth = if (bitDepth > 0) bitDepth else 16
             this.channelCount = channelCount
 
             // Find target output device:
@@ -224,6 +264,7 @@ class AriaBitPerfectPlayer {
                 else -> Pair(FORMAT_PCM_16BIT, 2)
             }
             this.bytesPerFrame = bytesPerSample * channelCount
+            this.chosenEncoding = chosenEncoding
 
             // If static AudioTrack.getMinBufferSize failed (common for higher sample rates like 96k/192k on external DACs
             // because system default output only validates up to 48k), compute an explicit buffer size fallback.
@@ -286,7 +327,16 @@ class AriaBitPerfectPlayer {
             }
 
             // 2. Build AudioTrack matching the exact native stream parameters
-            val targetBufferSize = maxOf(minBufferSize * 4, sampleRate * bytesPerFrame / 5) // at least 200ms
+            // Buffer at least 750ms of audio (or 8x minBufferSize) to protect against background GC pauses and CPU frequency scaling
+            val bufferDurationMs = 750
+            val targetBufferSize = maxOf(minBufferSize * 8, (sampleRate * bytesPerFrame * bufferDurationMs) / 1000)
+            val bufferCapacityMs = if (sampleRate > 0 && bytesPerFrame > 0) (targetBufferSize * 1000L) / (sampleRate * bytesPerFrame) else 0L
+
+            AriaPlaybackService.logDiagnostic(
+                2, // INFO
+                "Playback",
+                "Building AudioTrack: bufferSize=$targetBufferSize bytes (~${bufferCapacityMs}ms cushion, minBufferSize=$minBufferSize), encoding=$chosenEncoding, isBluetooth=$isBluetooth"
+            )
 
             val builder = AudioTrack.Builder()
                 .setAudioAttributes(audioAttrs)
@@ -315,6 +365,27 @@ class AriaBitPerfectPlayer {
 
             this.audioTrack = track
             this.framesWritten = 0
+            activeInstance = this
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                track.addOnRoutingChangedListener(AudioTrack.OnRoutingChangedListener { router ->
+                    val routed = (router as? AudioTrack)?.routedDevice
+                    if (routed != null) {
+                        val isSpeaker = routed.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER ||
+                                        routed.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                        val context = appContext
+                        if (isSpeaker && context != null && !AriaPlaybackService.hasExternalAudioOutput(context)) {
+                            Log.i(TAG, "AudioTrack routed to built-in speaker with no external devices -> stopping playback immediately")
+                            try {
+                                router.pause()
+                                router.flush()
+                            } catch (_: Exception) {}
+                            AriaPlaybackService.onAudioReroutedToSpeaker()
+                        }
+                    }
+                }, null)
+            }
+
             Log.i(TAG, "AudioTrack initialized successfully in bit-accurate mode (encoding=$chosenEncoding, buffer size=$targetBufferSize bytes)")
             return formatCode
         } catch (e: Exception) {
@@ -323,10 +394,78 @@ class AriaBitPerfectPlayer {
         }
     }
 
+    private var writeBuffer = ByteArray(65536)
+
+    fun getWriteBuffer(capacity: Int): ByteArray {
+        if (writeBuffer.size < capacity) {
+            writeBuffer = ByteArray(capacity)
+        }
+        return writeBuffer
+    }
+
+    fun writeDirect(size: Int): Int {
+        val track = audioTrack ?: return -1
+        return try {
+            val written = if (chosenEncoding == AudioFormat.ENCODING_PCM_FLOAT) {
+                val numFloats = size / 4
+                if (floatWriteBuffer.size < numFloats) {
+                    floatWriteBuffer = FloatArray(numFloats)
+                }
+                ByteBuffer.wrap(writeBuffer, 0, size)
+                    .order(ByteOrder.LITTLE_ENDIAN)
+                    .asFloatBuffer()
+                    .get(floatWriteBuffer, 0, numFloats)
+                val floatsWritten = track.write(floatWriteBuffer, 0, numFloats, AudioTrack.WRITE_BLOCKING)
+                if (floatsWritten > 0) floatsWritten * 4 else floatsWritten
+            } else {
+                track.write(writeBuffer, 0, size, AudioTrack.WRITE_BLOCKING)
+            }
+
+            if (written > 0 && bytesPerFrame > 0) {
+                framesWritten += written / bytesPerFrame
+            } else if (written < 0) {
+                AriaPlaybackService.logDiagnostic(
+                    4, // ERROR
+                    "Playback",
+                    "AudioTrack.write failed with code $written (encoding=$chosenEncoding, size=$size)"
+                )
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                val underruns = track.underrunCount
+                if (underruns > lastUnderrunCount) {
+                    val diff = underruns - lastUnderrunCount
+                    lastUnderrunCount = underruns
+                    AriaPlaybackService.logDiagnostic(
+                        3, // WARN
+                        "Playback",
+                        "AudioTrack hardware underrun detected! +$diff underrun(s) (total=$underruns, framesWritten=$framesWritten)"
+                    )
+                }
+            }
+            written
+        } catch (e: Exception) {
+            Log.e(TAG, "Error writing audio data directly", e)
+            -1
+        }
+    }
+
     fun write(data: ByteArray, offset: Int, size: Int): Int {
         val track = audioTrack ?: return -1
         return try {
-            val written = track.write(data, offset, size, AudioTrack.WRITE_BLOCKING)
+            val written = if (chosenEncoding == AudioFormat.ENCODING_PCM_FLOAT) {
+                val numFloats = size / 4
+                if (floatWriteBuffer.size < numFloats) {
+                    floatWriteBuffer = FloatArray(numFloats)
+                }
+                ByteBuffer.wrap(data, offset, size)
+                    .order(ByteOrder.LITTLE_ENDIAN)
+                    .asFloatBuffer()
+                    .get(floatWriteBuffer, 0, numFloats)
+                val floatsWritten = track.write(floatWriteBuffer, 0, numFloats, AudioTrack.WRITE_BLOCKING)
+                if (floatsWritten > 0) floatsWritten * 4 else floatsWritten
+            } else {
+                track.write(data, offset, size, AudioTrack.WRITE_BLOCKING)
+            }
             if (written > 0 && bytesPerFrame > 0) {
                 framesWritten += written / bytesPerFrame
             }
@@ -342,7 +481,9 @@ class AriaBitPerfectPlayer {
         return try {
             acquireLocks()
             appContext?.let {
-                AriaPlaybackService.startPlayback(it, currentTitle, currentArtist)
+                val t = if (currentTitle != "Aria") currentTitle else null
+                val a = if (currentArtist != "Playing audio") currentArtist else null
+                AriaPlaybackService.startPlayback(it, t, a, getAudioSpec())
             }
             track.play()
             true
@@ -358,7 +499,9 @@ class AriaBitPerfectPlayer {
             track.pause()
             releaseLocks()
             appContext?.let {
-                AriaPlaybackService.updatePlayback(it, currentTitle, currentArtist, false)
+                val t = if (currentTitle != "Aria") currentTitle else null
+                val a = if (currentArtist != "Playing audio") currentArtist else null
+                AriaPlaybackService.updatePlayback(it, t, a, getAudioSpec(), false)
             }
             true
         } catch (e: Exception) {
@@ -395,9 +538,6 @@ class AriaBitPerfectPlayer {
     fun isFinished(): Boolean {
         val track = audioTrack ?: return true
         return try {
-            if (track.playState == AudioTrack.PLAYSTATE_STOPPED) {
-                return true
-            }
             if (framesWritten <= 0) {
                 return true
             }
@@ -423,10 +563,10 @@ class AriaBitPerfectPlayer {
     }
 
     fun close(): Boolean {
-        releaseLocks()
-        appContext?.let {
-            AriaPlaybackService.stopPlayback(it)
+        if (activeInstance === this) {
+            activeInstance = null
         }
+        releaseLocks()
         return try {
             audioTrack?.let { track ->
                 try {

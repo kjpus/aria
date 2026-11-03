@@ -2058,6 +2058,16 @@ export function App() {
                 selectedMappingFormat={selectedMappingFormat}
                 settings={bootstrap.settings}
                 uiPrefs={uiPrefs}
+                onLoggingSettingsChange={(logging) =>
+                  setBootstrap((current) =>
+                    current
+                      ? {
+                          ...current,
+                          settings: { ...current.settings, logging },
+                        }
+                      : current
+                  )
+                }
               />
             ) : null}
           </section>

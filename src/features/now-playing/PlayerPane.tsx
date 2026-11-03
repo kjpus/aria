@@ -219,6 +219,8 @@ export function PlayerPane({
                 <img
                   alt={`${title} artwork`}
                   className="player-pane__art"
+                  loading="lazy"
+                  decoding="async"
                   src={art}
                 />
               ) : (

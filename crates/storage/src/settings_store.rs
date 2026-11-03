@@ -70,4 +70,10 @@ impl SettingsStore {
         state.remote_storage_only = enabled;
         state.clone()
     }
+
+    pub async fn update_logging(&self, logging: aria_domain::LoggingSettings) -> SettingsSnapshot {
+        let mut state = self.state.write().await;
+        state.logging = logging;
+        state.clone()
+    }
 }

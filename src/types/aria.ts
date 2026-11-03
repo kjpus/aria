@@ -166,6 +166,29 @@ export type SettingsSnapshot = {
   playback: PlaybackPreferences;
   autoSyncOnStartup?: boolean;
   remoteStorageOnly?: boolean;
+  logging?: LoggingSettings;
+};
+
+export type DiagnosticLogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'off';
+
+export type DiagnosticSubsystem = 'download' | 'playback' | 'storage' | 'general';
+
+export type DiagnosticLogEntry = {
+  id: number;
+  timestampMs: number;
+  level: DiagnosticLogLevel;
+  subsystem: DiagnosticSubsystem;
+  message: string;
+  details?: string | null;
+};
+
+export type LoggingSettings = {
+  enabled: boolean;
+  minLevel: DiagnosticLogLevel;
+  logToFile: boolean;
+  logDownloading: boolean;
+  logPlayback: boolean;
+  maxEntries: number;
 };
 
 export type RemoteBackendType = 'google_drive' | 'filesystem' | 'web_dav' | 'smb';

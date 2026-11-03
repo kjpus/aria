@@ -11,13 +11,27 @@ pub struct AppState {
 }
 
 static GLOBAL_APP_CORE: std::sync::OnceLock<Arc<AppCore>> = std::sync::OnceLock::new();
+static MAIN_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
 
 pub fn get_app_core() -> Option<Arc<AppCore>> {
     GLOBAL_APP_CORE.get().cloned()
 }
 
+pub fn get_main_runtime() -> &'static tokio::runtime::Runtime {
+    MAIN_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .thread_stack_size(4 * 1024 * 1024)
+            .enable_all()
+            .build()
+            .expect("failed to initialize main tokio runtime")
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let rt = get_main_runtime();
+    let _guard = rt.enter();
+
     let core = Arc::new(AppCore::new().expect("failed to initialize Aria core"));
     let _ = GLOBAL_APP_CORE.set(core.clone());
     let setup_core = core.clone();
@@ -96,6 +110,11 @@ pub fn run() {
             commands::settings::update_playback_preferences,
             commands::settings::update_auto_sync_on_startup,
             commands::settings::update_remote_storage_only,
+            commands::settings::update_logging_settings,
+            commands::settings::get_diagnostic_logs,
+            commands::settings::clear_diagnostic_logs,
+            commands::settings::export_diagnostic_logs_text,
+            commands::settings::get_diagnostic_log_path,
             commands::remote::get_remote_targets,
             commands::remote::save_remote_target,
             commands::remote::delete_remote_target,
@@ -135,7 +154,8 @@ pub extern "C" fn Java_com_aria_player_AriaPlaybackService_nativePlayPause(
     _class: jni::objects::JClass,
 ) {
     if let Some(core) = get_app_core() {
-        tauri::async_runtime::spawn(async move {
+        let rt = get_main_runtime();
+        rt.spawn(async move {
             let snapshot = core.playback_snapshot().await;
             if snapshot.status == aria_domain::PlaybackStatus::Playing {
                 let _ = core.pause().await;
@@ -153,7 +173,8 @@ pub extern "C" fn Java_com_aria_player_AriaPlaybackService_nativeNext(
     _class: jni::objects::JClass,
 ) {
     if let Some(core) = get_app_core() {
-        tauri::async_runtime::spawn(async move {
+        let rt = get_main_runtime();
+        rt.spawn(async move {
             let _ = core.next_track().await;
         });
     }
@@ -166,8 +187,62 @@ pub extern "C" fn Java_com_aria_player_AriaPlaybackService_nativePrevious(
     _class: jni::objects::JClass,
 ) {
     if let Some(core) = get_app_core() {
-        tauri::async_runtime::spawn(async move {
+        let rt = get_main_runtime();
+        rt.spawn(async move {
             let _ = core.previous_track().await;
         });
     }
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_com_aria_player_AriaPlaybackService_nativeStopPlayback(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) {
+    if let Some(core) = get_app_core() {
+        let rt = get_main_runtime();
+        rt.spawn(async move {
+            let _ = core.pause().await;
+        });
+    }
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_com_aria_player_AriaPlaybackService_nativeRegisterContext(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    context: jni::objects::JObject,
+) {
+    aria_app_core::register_android_context(&mut env, &context);
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_com_aria_player_AriaPlaybackService_nativeLogDiagnostic(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    level_int: jni::sys::jint,
+    subsystem_str: jni::objects::JString,
+    message_str: jni::objects::JString,
+) {
+    let subsystem: String = match env.get_string(&subsystem_str) {
+        Ok(s) => s.into(),
+        Err(_) => "General".into(),
+    };
+    let message: String = match env.get_string(&message_str) {
+        Ok(s) => s.into(),
+        Err(_) => return,
+    };
+    let level = match level_int {
+        0 => aria_domain::DiagnosticLogLevel::Trace,
+        1 => aria_domain::DiagnosticLogLevel::Debug,
+        2 => aria_domain::DiagnosticLogLevel::Info,
+        3 => aria_domain::DiagnosticLogLevel::Warn,
+        4 => aria_domain::DiagnosticLogLevel::Error,
+        _ => aria_domain::DiagnosticLogLevel::Info,
+    };
+    let sub = aria_domain::DiagnosticSubsystem::from_str_loose(&subsystem);
+    aria_domain::log_diagnostic(sub, level, message, None);
 }

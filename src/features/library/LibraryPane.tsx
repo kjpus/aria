@@ -389,7 +389,13 @@ export function LibraryPane({
                 >
                   <div className="album-card__cover-wrapper">
                     {art ? (
-                      <img alt="" className="album-card__art" src={art} />
+                      <img
+                        alt=""
+                        className="album-card__art"
+                        decoding="async"
+                        loading="lazy"
+                        src={art}
+                      />
                     ) : (
                       <EmptyArtPlaceholder className="album-card__art" />
                     )}

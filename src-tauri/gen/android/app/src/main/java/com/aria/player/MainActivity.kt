@@ -58,10 +58,22 @@ class MainActivity : TauriActivity() {
     instance = this
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    try {
+      AriaPlaybackService.nativeRegisterContext(applicationContext)
+    } catch (e: Throwable) {
+      android.util.Log.w("MainActivity", "Failed to register native context", e)
+    }
     volumeControlStream = AudioManager.STREAM_MUSIC
     AriaBluetoothAudioHelper.initialize(this)
     registerAudioDeviceMonitor()
     requestNotificationPermission()
+  }
+
+  override fun onResume() {
+    super.onResume()
+    try {
+      AriaPlaybackService.nativeRegisterContext(applicationContext)
+    } catch (_: Throwable) {}
   }
 
   private fun requestNotificationPermission() {
@@ -103,6 +115,7 @@ class MainActivity : TauriActivity() {
 
         override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
           notifyAudioDevicesChanged()
+          AriaPlaybackService.instance?.checkAndStopIfOnlySpeakerRemaining()
         }
       }
       audioManager.registerAudioDeviceCallback(callback, null)

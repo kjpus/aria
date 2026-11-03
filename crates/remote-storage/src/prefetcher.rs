@@ -58,10 +58,26 @@ impl PlaybackPrefetcher {
                             candidates,
                             active_window_track_ids,
                         }) => {
+                            aria_domain::log_diagnostic(
+                                aria_domain::DiagnosticSubsystem::Download,
+                                aria_domain::DiagnosticLogLevel::Debug,
+                                format!(
+                                    "Prefetcher: received {} candidates for active window {:?}",
+                                    candidates.len(),
+                                    active_window_track_ids
+                                ),
+                                None,
+                            );
                             current_candidates = candidates;
                             current_window_ids = active_window_track_ids;
                         }
                         Some(PrefetchCommand::Cancel) => {
+                            aria_domain::log_diagnostic(
+                                aria_domain::DiagnosticSubsystem::Download,
+                                aria_domain::DiagnosticLogLevel::Debug,
+                                "Prefetcher: received Cancel command",
+                                None,
+                            );
                             current_candidates.clear();
                             current_window_ids.clear();
                         }
@@ -85,6 +101,12 @@ impl PlaybackPrefetcher {
                 info!(
                     "Preemptively prefetching remote track: '{}' ({})",
                     candidate.title, candidate.track_id
+                );
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Download,
+                    aria_domain::DiagnosticLogLevel::Info,
+                    format!("Prefetcher: starting candidate '{}' (id: {})", candidate.title, candidate.track_id),
+                    None,
                 );
 
                 if let Some(events) = &event_tx {
@@ -151,6 +173,12 @@ impl PlaybackPrefetcher {
                                         "Successfully prefetched track '{}' ({})",
                                         candidate.title, candidate.track_id
                                     );
+                                    aria_domain::log_diagnostic(
+                                        aria_domain::DiagnosticSubsystem::Download,
+                                        aria_domain::DiagnosticLogLevel::Info,
+                                        format!("Prefetcher: successfully cached '{}' ({})", candidate.title, candidate.track_id),
+                                        None,
+                                    );
                                     if let Some(updater) = &path_updater {
                                         updater(&candidate.track_id, &cached_path.to_string_lossy());
                                     }
@@ -176,6 +204,12 @@ impl PlaybackPrefetcher {
                                         "Failed to prefetch track '{}' ({}): {err}",
                                         candidate.title, candidate.track_id
                                     );
+                                    aria_domain::log_diagnostic(
+                                        aria_domain::DiagnosticSubsystem::Download,
+                                        aria_domain::DiagnosticLogLevel::Warn,
+                                        format!("Prefetcher: failed candidate '{}' ({}): {err}", candidate.title, candidate.track_id),
+                                        None,
+                                    );
                                     if let Some(events) = &event_tx {
                                         let _ = events.send(AppEvent::Remote(RemoteEvent::CachePrefetchProgress(
                                             CachePrefetchEvent {
@@ -193,6 +227,12 @@ impl PlaybackPrefetcher {
                                     error!(
                                         "Prefetch download timed out for track '{}' ({})",
                                         candidate.title, candidate.track_id
+                                    );
+                                    aria_domain::log_diagnostic(
+                                        aria_domain::DiagnosticSubsystem::Download,
+                                        aria_domain::DiagnosticLogLevel::Warn,
+                                        format!("Prefetcher: timed out (90s) for candidate '{}' ({})", candidate.title, candidate.track_id),
+                                        None,
                                     );
                                     if let Some(events) = &event_tx {
                                         let _ = events.send(AppEvent::Remote(RemoteEvent::CachePrefetchProgress(
@@ -251,8 +291,10 @@ impl PlaybackPrefetcher {
         } else {
             std::thread::Builder::new()
                 .name("aria-prefetcher".into())
+                .stack_size(4 * 1024 * 1024)
                 .spawn(move || {
                     let runtime = tokio::runtime::Builder::new_multi_thread()
+                        .thread_stack_size(4 * 1024 * 1024)
                         .enable_all()
                         .build()
                         .expect("failed to create aria-prefetcher runtime");

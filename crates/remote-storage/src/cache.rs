@@ -119,6 +119,12 @@ impl RemoteCacheManager {
         loop {
             // 1. Fast check if already cached
             if let Some(path) = self.get_cached_path(track_id).await {
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Download,
+                    aria_domain::DiagnosticLogLevel::Debug,
+                    format!("Cache HIT for track '{track_id}' -> {}", path.display()),
+                    None,
+                );
                 return Ok(path);
             }
 
@@ -134,6 +140,12 @@ impl RemoteCacheManager {
             };
 
             if let Some(notify) = notify {
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Download,
+                    aria_domain::DiagnosticLogLevel::Info,
+                    format!("Track '{track_id}' already downloading in-flight; waiting for completion..."),
+                    None,
+                );
                 // Wait for the in-flight download to finish or abort
                 notify.notified().await;
                 // If it succeeded, it is now in cache:
@@ -242,7 +254,39 @@ impl RemoteCacheManager {
         }
 
         // 3. Download from remote backend
-        let bytes = backend.read_bytes(remote_path).await?;
+        aria_domain::log_diagnostic(
+            aria_domain::DiagnosticSubsystem::Download,
+            aria_domain::DiagnosticLogLevel::Info,
+            format!("Starting remote download: '{remote_path}' (id: '{track_id}')"),
+            None,
+        );
+        let download_start = Instant::now();
+        let bytes = match backend.read_bytes(remote_path).await {
+            Ok(b) => b,
+            Err(err) => {
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Download,
+                    aria_domain::DiagnosticLogLevel::Error,
+                    format!("Failed downloading '{remote_path}': {err}"),
+                    None,
+                );
+                return Err(err);
+            }
+        };
+        let download_duration = download_start.elapsed();
+        let mb = bytes.len() as f64 / 1_048_576.0;
+        let speed_mb_s = mb / download_duration.as_secs_f64().max(0.001);
+        aria_domain::log_diagnostic(
+            aria_domain::DiagnosticSubsystem::Download,
+            aria_domain::DiagnosticLogLevel::Info,
+            format!(
+                "Downloaded '{remote_path}': {:.2} MB in {:.2}s ({:.2} MB/s)",
+                mb,
+                download_duration.as_secs_f64(),
+                speed_mb_s
+            ),
+            None,
+        );
 
         // 4. Validate checksum if present
         if let Some(expected) = expected_checksum_sha256 {
@@ -250,11 +294,26 @@ impl RemoteCacheManager {
             hasher.update(&bytes);
             let calculated = format!("{:x}", hasher.finalize());
             if !calculated.eq_ignore_ascii_case(expected) {
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Download,
+                    aria_domain::DiagnosticLogLevel::Error,
+                    format!(
+                        "Checksum MISMATCH for '{remote_path}' (expected {expected}, got {calculated})"
+                    ),
+                    None,
+                );
                 return Err(RemoteStorageError::ChecksumMismatch {
                     file: remote_path.to_string(),
                     expected: expected.to_string(),
                     calculated,
                 });
+            } else {
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Download,
+                    aria_domain::DiagnosticLogLevel::Debug,
+                    format!("SHA-256 verified for '{remote_path}'"),
+                    None,
+                );
             }
         }
 
@@ -276,6 +335,12 @@ impl RemoteCacheManager {
             .map_err(RemoteStorageError::Io)?;
 
         let size_bytes = bytes.len() as u64;
+        aria_domain::log_diagnostic(
+            aria_domain::DiagnosticSubsystem::Download,
+            aria_domain::DiagnosticLogLevel::Info,
+            format!("Cached track '{track_id}' to: {}", target_path.display()),
+            None,
+        );
 
         // 6. Record in LRU entries
         {

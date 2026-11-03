@@ -1,5 +1,6 @@
 pub mod events;
 pub mod library;
+pub mod logging;
 pub mod playback;
 pub mod playlist;
 pub mod remote;
@@ -9,6 +10,10 @@ pub use events::{
     AppEvent, CachePrefetchEvent, GoogleAuthCompletedEvent, LibraryEvent, PlaybackEvent,
     PlaylistEvent, RemoteEvent, RemoteSyncCompletedEvent, RemoteSyncProgressEvent,
     UploadCompletedEvent, UploadFailedItem, UploadProgressEvent,
+};
+pub use logging::{
+    init_diagnostic_logger, log_diagnostic, DiagnosticLogEntry, DiagnosticLogLevel,
+    DiagnosticLogger, DiagnosticSubsystem, LoggingSettings,
 };
 pub use remote::{
     AlbumManifest, ManifestTrack, MasterAlbumSummary, MasterLibraryIndex, MasterPlaylistIndex,

@@ -691,6 +691,7 @@ export function AlbumPane({
                 <img
                   alt={`${selectedAlbum.title} cover art`}
                   className="album-detail__art album-detail__art--interactive"
+                  decoding="async"
                   onDoubleClick={() => setIsArtViewerOpen(true)}
                   src={art}
                 />
