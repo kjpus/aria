@@ -13,6 +13,7 @@ aria-remote-storage = { path = "../remote-storage" }
 aria-storage = { path = "../storage" }
 chrono.workspace = true
 deunicode = "1.6.2"
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

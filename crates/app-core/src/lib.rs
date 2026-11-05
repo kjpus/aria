@@ -48,6 +48,9 @@ pub enum AppCoreError {
     Custom(String),
 }
 
+pub mod automotive;
+pub use automotive::{AutoItem, AutoNowPlaying};
+
 static GLOBAL_PENDING_GDRIVE_AUTH: Mutex<Option<PendingAuthFlow>> = Mutex::const_new(None);
 static GLOBAL_LAST_COMPLETED_GDRIVE_TARGET: Mutex<Option<RemoteTarget>> = Mutex::const_new(None);
 
