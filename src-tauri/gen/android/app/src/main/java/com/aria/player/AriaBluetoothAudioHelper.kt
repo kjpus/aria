@@ -259,7 +259,7 @@ object AriaBluetoothAudioHelper {
      */
     @JvmOverloads
     @JvmStatic
-    fun optimizeForHighestQuality(context: Context?, sourceSampleRate: Int = 44100): BluetoothAudioInfo {
+    fun optimizeForHighestQuality(context: Context?, sourceSampleRate: Int = 44100, sourceBitDepth: Int = 16): BluetoothAudioInfo {
         val ctx = context ?: cachedAppContext ?: return BluetoothAudioInfo(isConnected = false)
         ensureA2dpProxy(ctx)
 
@@ -275,7 +275,7 @@ object AriaBluetoothAudioHelper {
             return getBluetoothAudioInfo(ctx)
         }
 
-        Log.i(TAG, "Optimizing Bluetooth audio quality for device: ${btDevice.name} at source rate: ${sourceSampleRate}Hz (NEVER UPSAMPLING)")
+        Log.i(TAG, "Optimizing Bluetooth audio quality for device: ${btDevice.name} at source rate: ${sourceSampleRate}Hz, bit depth: ${sourceBitDepth}-bit")
 
         // 1. Enable HD Audio (optional codecs) on the device if supported
         val hdSupported = checkOptionalCodecsSupported(a2dp, btDevice)
@@ -316,18 +316,19 @@ object AriaBluetoothAudioHelper {
                 val bestSrMask = getSampleRateMask(bestConfig)
                 val bestBpsMask = getBitsPerSampleMask(bestConfig)
 
-                // CRITICAL AUDIOPHILE RULE: NEVER UP-SAMPLE.
-                // If source track is 44.1kHz, configure Bluetooth codec to 44.1kHz,
-                // even if earbuds or phone support 96kHz or 192kHz!
-                val targetSampleRateFlag = selectSampleRateFlagNeverUpsample(bestSrMask, sourceSampleRate)
-                val targetBitsPerSampleFlag = selectHighestBitsPerSampleFlag(bestBpsMask)
+                // Select sample rate and bit depth according to Aria's rules:
+                // If and only if not supported, re-sample.
+                // Up-sampling is preferred, but if only lower rate is supported, down-sample.
+                // Re-sample to nearest supported sample rate.
+                val targetSampleRateFlag = selectSampleRateFlag(bestSrMask, sourceSampleRate)
+                val targetBitsPerSampleFlag = selectBitsPerSampleFlag(bestBpsMask, sourceBitDepth)
 
                 // For LDAC, force 1000L (Sound Quality Preferred / 990 kbps for 48k/96k, 909 kbps for 44.1k/88.2k)
                 val targetCodecSpecific1 = if (bestType == CODEC_TYPE_LDAC) LDAC_QUALITY_HIGH else 0L
 
                 val negotiatedHz = sampleRateMaskToHz(targetSampleRateFlag)
-                Log.i(TAG, "Never-upsample policy: source=${sourceSampleRate}Hz -> Bluetooth codec=${formatCodecName(bestType, bestConfig)} @ ${negotiatedHz}Hz (flag=0x${Integer.toHexString(targetSampleRateFlag)}), " +
-                    "bitsPerSampleMask=0x${Integer.toHexString(targetBitsPerSampleFlag)}, codecSpecific1=$targetCodecSpecific1")
+                Log.i(TAG, "Bluetooth codec selected: ${formatCodecName(bestType, bestConfig)} @ ${negotiatedHz}Hz (source ${sourceSampleRate}Hz), " +
+                    "bitsPerSampleMask=0x${Integer.toHexString(targetBitsPerSampleFlag)} (source ${sourceBitDepth}-bit), codecSpecific1=$targetCodecSpecific1")
 
                 val currentActiveConfig = getActiveCodecConfig(a2dp, btDevice)
                 val currentType = currentActiveConfig?.let { getCodecType(it) } ?: -1
@@ -684,13 +685,16 @@ object AriaBluetoothAudioHelper {
     private fun highestSampleRateFromMask(mask: Int): Int = sampleRateMaskToHz(mask)
 
     /**
-     * Selects a sample rate flag matching the source rate without EVER up-sampling.
-     * If source is 44.1kHz, selects 44.1kHz even if the earbuds/phone support 96kHz or 192kHz.
+     * Selects a sample rate flag according to Aria's rules:
+     * 1. If and only if a track has sample rate not supported by the DAC/bluetooth earbuds,
+     *    it should be re-sampled. (Exact match is used if supported, no resampling).
+     * 2. Up-sampling is preferred, but if only lower rate is supported, use down-sampling.
+     * 3. Re-sample to the nearest supported sample rate.
      */
-    fun selectSampleRateFlagNeverUpsample(mask: Int, sourceSampleRate: Int): Int {
+    fun selectSampleRateFlag(mask: Int, sourceSampleRate: Int): Int {
         val target = if (sourceSampleRate > 0) sourceSampleRate else 44100
 
-        // 1. Exact match if supported by device/codec
+        // 1. Exact match if supported by device/codec (Bit-perfect, no resampling)
         when (target) {
             192000 -> if (mask and SAMPLE_RATE_192000 != 0) return SAMPLE_RATE_192000
             176400 -> if (mask and SAMPLE_RATE_176400 != 0) return SAMPLE_RATE_176400
@@ -700,36 +704,40 @@ object AriaBluetoothAudioHelper {
             44100 -> if (mask and SAMPLE_RATE_44100 != 0) return SAMPLE_RATE_44100
         }
 
-        // 2. If exact match is not available, pick highest supported rate that is STRICTLY <= target.
-        // Prefer same sample rate family (44.1k vs 48k family) to avoid asynchronous resampling.
-        if (target % 44100 == 0) {
-            // 44.1kHz family (44.1k, 88.2k, 176.4k)
-            if (target >= 176400 && mask and SAMPLE_RATE_176400 != 0) return SAMPLE_RATE_176400
-            if (target >= 88200 && mask and SAMPLE_RATE_88200 != 0) return SAMPLE_RATE_88200
-            if (mask and SAMPLE_RATE_44100 != 0) return SAMPLE_RATE_44100
-        } else {
-            // 48kHz family (48k, 96k, 192k)
-            if (target >= 192000 && mask and SAMPLE_RATE_192000 != 0) return SAMPLE_RATE_192000
-            if (target >= 96000 && mask and SAMPLE_RATE_96000 != 0) return SAMPLE_RATE_96000
-            if (target >= 48000 && mask and SAMPLE_RATE_48000 != 0) return SAMPLE_RATE_48000
+        val allRates = listOf(
+            Pair(192000, SAMPLE_RATE_192000),
+            Pair(176400, SAMPLE_RATE_176400),
+            Pair(96000, SAMPLE_RATE_96000),
+            Pair(88200, SAMPLE_RATE_88200),
+            Pair(48000, SAMPLE_RATE_48000),
+            Pair(44100, SAMPLE_RATE_44100)
+        )
+
+        val supported = allRates.filter { (_, flag) -> (mask and flag) != 0 }
+        if (supported.isEmpty()) {
+            return if (mask and SAMPLE_RATE_48000 != 0) SAMPLE_RATE_48000 else SAMPLE_RATE_44100
         }
 
-        // General fallback: strictly <= target
-        if (target >= 192000 && mask and SAMPLE_RATE_192000 != 0) return SAMPLE_RATE_192000
-        if (target >= 176400 && mask and SAMPLE_RATE_176400 != 0) return SAMPLE_RATE_176400
-        if (target >= 96000 && mask and SAMPLE_RATE_96000 != 0) return SAMPLE_RATE_96000
-        if (target >= 88200 && mask and SAMPLE_RATE_88200 != 0) return SAMPLE_RATE_88200
-        if (target >= 48000 && mask and SAMPLE_RATE_48000 != 0) return SAMPLE_RATE_48000
-        if (target >= 44100 && mask and SAMPLE_RATE_44100 != 0) return SAMPLE_RATE_44100
-
-        // Final fallback if hardware only supports higher than source: lowest available
-        return if (mask and SAMPLE_RATE_44100 != 0) {
-            SAMPLE_RATE_44100
-        } else if (mask and SAMPLE_RATE_48000 != 0) {
-            SAMPLE_RATE_48000
-        } else {
-            SAMPLE_RATE_44100
+        // 2. Up-sampling is preferred: nearest supported sample rate above target
+        val higher = supported.filter { it.first > target }
+        if (higher.isNotEmpty()) {
+            return higher.minByOrNull { it.first - target }!!.second
         }
+
+        // 3. But if only lower rate is supported, use down-sampling: nearest supported rate below target
+        val lower = supported.filter { it.first < target }
+        if (lower.isNotEmpty()) {
+            return lower.minByOrNull { target - it.first }!!.second
+        }
+
+        return supported.minByOrNull { Math.abs(it.first - target) }!!.second
+    }
+
+    /**
+     * Backward-compatible alias for existing callers if any.
+     */
+    fun selectSampleRateFlagNeverUpsample(mask: Int, sourceSampleRate: Int): Int {
+        return selectSampleRateFlag(mask, sourceSampleRate)
     }
 
     private fun bitsPerSampleMaskToBits(mask: Int): Int {
@@ -742,6 +750,16 @@ object AriaBluetoothAudioHelper {
     }
 
     private fun highestBitsPerSampleFromMask(mask: Int): Int = bitsPerSampleMaskToBits(mask)
+
+    fun selectBitsPerSampleFlag(mask: Int, sourceBitDepth: Int = 16): Int {
+        when (sourceBitDepth) {
+            32 -> if (mask and BITS_PER_SAMPLE_32 != 0) return BITS_PER_SAMPLE_32
+            24 -> if (mask and BITS_PER_SAMPLE_24 != 0) return BITS_PER_SAMPLE_24
+            16 -> if (mask and BITS_PER_SAMPLE_16 != 0) return BITS_PER_SAMPLE_16
+        }
+
+        return selectHighestBitsPerSampleFlag(mask)
+    }
 
     private fun selectHighestBitsPerSampleFlag(mask: Int): Int {
         return when {

@@ -418,6 +418,14 @@ fn spawn_decode_worker(
         .name("aria-wasapi-decode".into())
         .spawn(move || {
             let mut pending_buffer = Vec::new();
+            let source_spec = decoder.stream_spec();
+            let mut resampler = crate::resample::AudioResampler::new(
+                source_spec.sample_rate,
+                output_format.sample_rate,
+                source_spec.channels as usize,
+            )
+            .expect("failed to create audio resampler");
+            let mut resampled_f32 = Vec::new();
 
             loop {
                 if stop_flag.load(Ordering::Relaxed) {
@@ -429,6 +437,24 @@ fn spawn_decode_worker(
                     Err(SymphoniaError::IoError(error))
                         if error.kind() == ErrorKind::UnexpectedEof =>
                     {
+                        if resampler.is_resampling() {
+                            resampled_f32.clear();
+                            if let Ok(()) = resampler.flush(&mut resampled_f32) {
+                                if !resampled_f32.is_empty() {
+                                    if write_f32_samples_to_wasapi_bytes(
+                                        &mut pending_buffer,
+                                        &resampled_f32,
+                                        output_format,
+                                    )
+                                    .is_ok()
+                                        && !pending_buffer.is_empty()
+                                    {
+                                        let chunk = std::mem::take(&mut pending_buffer);
+                                        let _ = tx.send(Ok(DecodedChunk::Data(chunk)));
+                                    }
+                                }
+                            }
+                        }
                         let _ = tx.send(Ok(DecodedChunk::EndOfStream));
                         break;
                     }
@@ -450,13 +476,38 @@ fn spawn_decode_worker(
 
                 match decoder.decoder.decode(&packet) {
                     Ok(audio_buffer) => {
-                        if let Err(error) = write_audio_buffer_bytes(
-                            &mut pending_buffer,
-                            audio_buffer,
-                            output_format,
-                        ) {
-                            let _ = tx.send(Err(error));
-                            break;
+                        if !resampler.is_resampling() {
+                            if let Err(error) = write_audio_buffer_bytes(
+                                &mut pending_buffer,
+                                audio_buffer,
+                                output_format,
+                            ) {
+                                let _ = tx.send(Err(error));
+                                break;
+                            }
+                        } else {
+                            let mut sample_buf = SampleBuffer::<f32>::new(
+                                audio_buffer.frames() as u64,
+                                *audio_buffer.spec(),
+                            );
+                            sample_buf.copy_interleaved_ref(audio_buffer);
+                            resampled_f32.clear();
+                            if let Err(error) = resampler
+                                .process_interleaved(sample_buf.samples(), &mut resampled_f32)
+                            {
+                                let _ = tx.send(Err(error));
+                                break;
+                            }
+                            if !resampled_f32.is_empty() {
+                                if let Err(error) = write_f32_samples_to_wasapi_bytes(
+                                    &mut pending_buffer,
+                                    &resampled_f32,
+                                    output_format,
+                                ) {
+                                    let _ = tx.send(Err(error));
+                                    break;
+                                }
+                            }
                         }
 
                         if pending_buffer.is_empty() {
@@ -475,6 +526,24 @@ fn spawn_decode_worker(
                     Err(SymphoniaError::IoError(error))
                         if error.kind() == ErrorKind::UnexpectedEof =>
                     {
+                        if resampler.is_resampling() {
+                            resampled_f32.clear();
+                            if let Ok(()) = resampler.flush(&mut resampled_f32) {
+                                if !resampled_f32.is_empty() {
+                                    if write_f32_samples_to_wasapi_bytes(
+                                        &mut pending_buffer,
+                                        &resampled_f32,
+                                        output_format,
+                                    )
+                                    .is_ok()
+                                        && !pending_buffer.is_empty()
+                                    {
+                                        let chunk = std::mem::take(&mut pending_buffer);
+                                        let _ = tx.send(Ok(DecodedChunk::Data(chunk)));
+                                    }
+                                }
+                            }
+                        }
                         let _ = tx.send(Ok(DecodedChunk::EndOfStream));
                         break;
                     }
@@ -961,7 +1030,14 @@ fn choose_supported_format(
     audio_client: &Audio::IAudioClient,
     stream_spec: DecodedStreamSpec,
 ) -> Option<WasapiPcmFormat> {
-    for candidate in format_candidates(stream_spec) {
+    // 1. Exact match test:
+    // "if and only if a track has bit width or bit rate not supported by the DAC/bluetooth earbuds,
+    //  it should be re-sampled."
+    // First, test if the device supports the track's native sample rate and bit depth.
+    let native_candidates = format_candidates(stream_spec);
+    let mut native_fallback = None;
+
+    for &candidate in &native_candidates {
         let wave_format = build_wave_format(candidate);
         let result = unsafe {
             audio_client.IsFormatSupported(
@@ -972,17 +1048,119 @@ fn choose_supported_format(
         };
 
         if result.is_ok() {
+            // If the candidate preserves the track's bit depth, we have an exact match:
+            // Native sample rate and bit depth supported! Bit-perfect, no resampling.
+            if candidate.valid_bits >= stream_spec.preferred_valid_bits {
+                return Some(candidate);
+            }
+            if native_fallback.is_none() {
+                native_fallback = Some(candidate);
+            }
+        }
+    }
+
+    // 2. Discover supported sample rates on this endpoint (DAC / Bluetooth earbuds).
+    let default_rate = unsafe {
+        audio_client.GetMixFormat().ok().map(|fmt_ptr| {
+            let rate = (*fmt_ptr).nSamplesPerSec;
+            windows::Win32::System::Com::CoTaskMemFree(Some(fmt_ptr as *const _ as *const std::ffi::c_void));
+            rate
+        })
+    };
+
+    let mut rates_to_probe = Vec::new();
+    if let Some(def) = default_rate {
+        rates_to_probe.push(def);
+    }
+    const PROBE_RATES: &[u32] = &[
+        44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000, 32000, 24000, 22050, 16000, 11025, 8000,
+    ];
+    for &r in PROBE_RATES {
+        if !rates_to_probe.contains(&r) {
+            rates_to_probe.push(r);
+        }
+    }
+
+    let mut supported_rates_preserving_bits = Vec::new();
+    let mut all_supported_rates = Vec::new();
+
+    for &rate in &rates_to_probe {
+        let candidates_at_rate = format_candidates_at_rate(stream_spec, rate);
+        for &candidate in &candidates_at_rate {
+            let wave_format = build_wave_format(candidate);
+            let result = unsafe {
+                audio_client.IsFormatSupported(
+                    Audio::AUDCLNT_SHAREMODE_EXCLUSIVE,
+                    &wave_format.Format,
+                    None,
+                )
+            };
+            if result.is_ok() {
+                if !all_supported_rates.contains(&rate) {
+                    all_supported_rates.push(rate);
+                }
+                if candidate.valid_bits >= stream_spec.preferred_valid_bits
+                    && !supported_rates_preserving_bits.contains(&rate)
+                {
+                    supported_rates_preserving_bits.push(rate);
+                }
+                break;
+            }
+        }
+    }
+
+    // If native rate is supported and no other rate can preserve bit depth better,
+    // use native rate without resampling.
+    if supported_rates_preserving_bits.is_empty() {
+        if let Some(native) = native_fallback {
+            return Some(native);
+        }
+    }
+
+    // 3. Select target sample rate according to rules:
+    // "up sampling is preferred, but if only lower bit-rate is supported, use down-sampling.
+    //  re-sample to the nearest supported sample rate."
+    let target_rate = if !supported_rates_preserving_bits.is_empty() {
+        crate::resample::select_resample_rate(
+            stream_spec.sample_rate,
+            &supported_rates_preserving_bits,
+        )
+    } else if !all_supported_rates.is_empty() {
+        crate::resample::select_resample_rate(stream_spec.sample_rate, &all_supported_rates)
+    } else {
+        return native_fallback;
+    };
+
+    // 4. Return the best supported format candidate at target_rate
+    let candidates_at_target = format_candidates_at_rate(stream_spec, target_rate);
+    for candidate in candidates_at_target {
+        let wave_format = build_wave_format(candidate);
+        let result = unsafe {
+            audio_client.IsFormatSupported(
+                Audio::AUDCLNT_SHAREMODE_EXCLUSIVE,
+                &wave_format.Format,
+                None,
+            )
+        };
+        if result.is_ok() {
             return Some(candidate);
         }
     }
 
-    None
+    native_fallback
 }
 
 fn format_candidates(stream_spec: DecodedStreamSpec) -> Vec<WasapiPcmFormat> {
+    format_candidates_at_rate(stream_spec, stream_spec.sample_rate)
+}
+
+fn format_candidates_at_rate(
+    stream_spec: DecodedStreamSpec,
+    sample_rate: u32,
+) -> Vec<WasapiPcmFormat> {
     let base = |kind, valid_bits| WasapiPcmFormat {
         kind,
-        sample_rate: stream_spec.sample_rate,
+        sample_rate,
         channels: stream_spec.channels,
         channel_mask: stream_spec.channel_mask,
         valid_bits,
@@ -1056,6 +1234,61 @@ fn write_audio_buffer_bytes(
     if destination.len() % output_format.block_align() as usize != 0 {
         return Err(PlaybackError::Output(format!(
             "decoded packet does not align to WASAPI block size for {}",
+            output_format.display_label()
+        )));
+    }
+
+    Ok(())
+}
+
+fn write_f32_samples_to_wasapi_bytes(
+    destination: &mut Vec<u8>,
+    samples: &[f32],
+    output_format: WasapiPcmFormat,
+) -> Result<(), PlaybackError> {
+    destination.clear();
+
+    match output_format.kind {
+        WasapiSampleKind::F32 => {
+            destination.extend_from_slice(as_bytes(samples));
+        }
+        WasapiSampleKind::I16 => {
+            for &sample in samples {
+                let clamped = (sample * 32767.0).round().clamp(-32768.0, 32767.0) as i16;
+                destination.extend_from_slice(&clamped.to_ne_bytes());
+            }
+        }
+        WasapiSampleKind::I32 => {
+            match output_format.valid_bits {
+                24 => {
+                    for &sample in samples {
+                        let clamped =
+                            (sample * 8388607.0).round().clamp(-8388608.0, 8388607.0) as i32;
+                        let s32 = clamped << 8;
+                        destination.extend_from_slice(&s32.to_ne_bytes());
+                    }
+                }
+                16 => {
+                    for &sample in samples {
+                        let clamped = (sample * 32767.0).round().clamp(-32768.0, 32767.0) as i32;
+                        let s32 = clamped << 16;
+                        destination.extend_from_slice(&s32.to_ne_bytes());
+                    }
+                }
+                _ => {
+                    for &sample in samples {
+                        let clamped =
+                            (sample * 2147483647.0).round().clamp(-2147483648.0, 2147483647.0) as i32;
+                        destination.extend_from_slice(&clamped.to_ne_bytes());
+                    }
+                }
+            }
+        }
+    }
+
+    if destination.len() % output_format.block_align() as usize != 0 {
+        return Err(PlaybackError::Output(format!(
+            "resampled packet does not align to WASAPI block size for {}",
             output_format.display_label()
         )));
     }

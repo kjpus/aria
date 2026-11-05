@@ -75,8 +75,16 @@ export function albumCreditForTrack(track: ScannedTrack): string {
   const ensemble = joinField(track, 'ensemble');
   const soloist = joinField(track, 'soloist');
 
-  const parts = [conductor, ensemble, soloist].filter(Boolean);
-  return parts.join(' / ');
+  const rawParts = [conductor, ensemble, soloist].filter(Boolean);
+  const deduped: string[] = [];
+  for (const part of rawParts) {
+    for (const name of part.split(' / ').map((s) => s.trim()).filter(Boolean)) {
+      if (!deduped.some((d) => d.toLowerCase() === name.toLowerCase())) {
+        deduped.push(name);
+      }
+    }
+  }
+  return deduped.join(' / ');
 }
 
 export function albumIdForTrack(track: ScannedTrack): string {

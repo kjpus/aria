@@ -8,6 +8,7 @@ license.workspace = true
 aria-domain = { path = "../domain" }
 rand = "0.8"
 rodio = "0.22"
+rubato = "5.0.1"
 symphonia = "0.5.5"
 thiserror.workspace = true
 tokio.workspace = true

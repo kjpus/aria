@@ -81,23 +81,63 @@ impl RemoteCacheManager {
 
     /// Checks if a track is completely cached on disk.
     pub async fn is_track_cached(&self, track_id: &str) -> bool {
-        let entries = self.entries.read().await;
-        if let Some(entry) = entries.get(track_id) {
-            entry.file_path.exists()
-        } else {
-            false
-        }
+        self.get_cached_path(track_id).await.is_some()
     }
 
     /// Returns the cached file path for a track if available.
     pub async fn get_cached_path(&self, track_id: &str) -> Option<PathBuf> {
-        let mut entries = self.entries.write().await;
-        if let Some(entry) = entries.get_mut(track_id) {
-            if entry.file_path.exists() {
-                entry.last_accessed = Instant::now();
-                return Some(entry.file_path.clone());
+        {
+            let mut entries = self.entries.write().await;
+            if let Some(entry) = entries.get_mut(track_id) {
+                if entry.file_path.exists() {
+                    entry.last_accessed = Instant::now();
+                    return Some(entry.file_path.clone());
+                }
             }
         }
+
+        // Check on disk if not found in memory entries (e.g. after app reload or pre-existing cache)
+        let clean_track_id: String = track_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let trimmed_track_id = clean_track_id.trim_matches('_');
+        let effective_track_id = if trimmed_track_id.is_empty() {
+            "track"
+        } else {
+            trimmed_track_id
+        };
+
+        if let Ok(mut dir) = tokio::fs::read_dir(&self.cache_dir).await {
+            while let Ok(Some(entry)) = dir.next_entry().await {
+                let file_name = entry.file_name();
+                let name_str = file_name.to_string_lossy();
+                if name_str.starts_with(effective_track_id) && !name_str.starts_with(".tmp") {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Ok(meta) = entry.metadata().await {
+                            let mut entries = self.entries.write().await;
+                            entries.insert(
+                                track_id.to_string(),
+                                CacheEntry {
+                                    file_path: path.clone(),
+                                    size_bytes: meta.len(),
+                                    last_accessed: Instant::now(),
+                                },
+                            );
+                            return Some(path);
+                        }
+                    }
+                }
+            }
+        }
+
         None
     }
 

@@ -157,6 +157,7 @@ struct ExclusiveDecoder {
     decoder: Box<dyn SymphoniaDecoder>,
     track_id: u32,
     stream_spec: DecodedStreamSpec,
+    delay_frames: u32,
 }
 
 impl ExclusivePlayer {
@@ -166,6 +167,25 @@ impl ExclusivePlayer {
         start_position: Duration,
         start_paused: bool,
         volume: f32,
+    ) -> Result<Self, PlaybackError> {
+        Self::open_internal(device_id, path, start_position, start_paused, volume, false)
+    }
+
+    pub fn open_prewarmed(
+        device_id: &str,
+        path: &str,
+        volume: f32,
+    ) -> Result<Self, PlaybackError> {
+        Self::open_internal(device_id, path, Duration::ZERO, true, volume, true)
+    }
+
+    fn open_internal(
+        device_id: &str,
+        path: &str,
+        start_position: Duration,
+        start_paused: bool,
+        volume: f32,
+        is_prewarm: bool,
     ) -> Result<Self, PlaybackError> {
         let device_id_int: i32 = device_id.parse().unwrap_or(0);
 
@@ -193,6 +213,7 @@ impl ExclusivePlayer {
                     decoder,
                     stream_spec,
                     start_paused,
+                    is_prewarm,
                     state_for_thread,
                     command_rx,
                     init_tx,
@@ -316,11 +337,18 @@ impl ExclusiveDecoder {
             ))
         })?;
 
+        let delay_frames = if start_position == Duration::ZERO {
+            track.codec_params.delay.unwrap_or(0)
+        } else {
+            0
+        };
+
         Ok(Self {
             format,
             decoder,
             track_id: track.id,
             stream_spec,
+            delay_frames,
         })
     }
 
@@ -377,6 +405,7 @@ fn decoded_stream_spec(codec_params: &CodecParameters) -> Option<DecodedStreamSp
 fn spawn_decode_worker(
     mut decoder: ExclusiveDecoder,
     active_format: ActivePcmFormat,
+    output_sample_rate: u32,
     stop_flag: Arc<AtomicBool>,
 ) -> (
     JoinHandle<()>,
@@ -390,6 +419,15 @@ fn spawn_decode_worker(
         .stack_size(2 * 1024 * 1024)
         .spawn(move || {
             let mut pending_buffer = Vec::new();
+            let mut remaining_delay = decoder.delay_frames;
+            let source_spec = decoder.stream_spec();
+            let mut resampler = crate::resample::AudioResampler::new(
+                source_spec.sample_rate,
+                output_sample_rate,
+                source_spec.channels as usize,
+            )
+            .expect("failed to create audio resampler");
+            let mut resampled_f32 = Vec::new();
 
             loop {
                 if stop_flag.load(Ordering::Relaxed) {
@@ -401,6 +439,22 @@ fn spawn_decode_worker(
                     Err(SymphoniaError::IoError(error))
                         if error.kind() == ErrorKind::UnexpectedEof =>
                     {
+                        if resampler.is_resampling() {
+                            resampled_f32.clear();
+                            if let Ok(()) = resampler.flush(&mut resampled_f32) {
+                                if !resampled_f32.is_empty() {
+                                    write_f32_samples_to_android_bytes(
+                                        &mut pending_buffer,
+                                        &resampled_f32,
+                                        active_format,
+                                    );
+                                    if !pending_buffer.is_empty() {
+                                        let chunk = std::mem::take(&mut pending_buffer);
+                                        let _ = tx.send(Ok(DecodedChunk::Data(chunk)));
+                                    }
+                                }
+                            }
+                        }
                         let _ = tx.send(Ok(DecodedChunk::EndOfStream));
                         break;
                     }
@@ -422,11 +476,52 @@ fn spawn_decode_worker(
 
                 match decoder.decoder.decode(&packet) {
                     Ok(audio_buffer) => {
-                        write_audio_buffer_bytes(
-                            &mut pending_buffer,
-                            audio_buffer,
-                            active_format,
-                        );
+                        let total_frames = audio_buffer.frames() as u32;
+                        let skip = if remaining_delay > 0 {
+                            if total_frames <= remaining_delay {
+                                remaining_delay -= total_frames;
+                                continue;
+                            } else {
+                                let s = remaining_delay as usize;
+                                remaining_delay = 0;
+                                s
+                            }
+                        } else {
+                            0
+                        };
+
+                        if !resampler.is_resampling() {
+                            write_audio_buffer_bytes_with_skip(
+                                &mut pending_buffer,
+                                audio_buffer,
+                                active_format,
+                                skip,
+                            );
+                        } else {
+                            let mut sample_buf = SampleBuffer::<f32>::new(
+                                audio_buffer.frames() as u64,
+                                *audio_buffer.spec(),
+                            );
+                            sample_buf.copy_interleaved_ref(audio_buffer);
+                            let samples = sample_buf.samples();
+                            let skip_samples = skip * source_spec.channels as usize;
+                            resampled_f32.clear();
+                            if skip_samples < samples.len() {
+                                if let Err(error) = resampler
+                                    .process_interleaved(&samples[skip_samples..], &mut resampled_f32)
+                                {
+                                    let _ = tx.send(Err(error));
+                                    break;
+                                }
+                                if !resampled_f32.is_empty() {
+                                    write_f32_samples_to_android_bytes(
+                                        &mut pending_buffer,
+                                        &resampled_f32,
+                                        active_format,
+                                    );
+                                }
+                            }
+                        }
 
                         if pending_buffer.is_empty() {
                             continue;
@@ -444,6 +539,22 @@ fn spawn_decode_worker(
                     Err(SymphoniaError::IoError(error))
                         if error.kind() == ErrorKind::UnexpectedEof =>
                     {
+                        if resampler.is_resampling() {
+                            resampled_f32.clear();
+                            if let Ok(()) = resampler.flush(&mut resampled_f32) {
+                                if !resampled_f32.is_empty() {
+                                    write_f32_samples_to_android_bytes(
+                                        &mut pending_buffer,
+                                        &resampled_f32,
+                                        active_format,
+                                    );
+                                    if !pending_buffer.is_empty() {
+                                        let chunk = std::mem::take(&mut pending_buffer);
+                                        let _ = tx.send(Ok(DecodedChunk::Data(chunk)));
+                                    }
+                                }
+                            }
+                        }
                         let _ = tx.send(Ok(DecodedChunk::EndOfStream));
                         break;
                     }
@@ -470,34 +581,90 @@ fn write_audio_buffer_bytes(
     audio_buffer: AudioBufferRef,
     active_format: ActivePcmFormat,
 ) {
+    write_audio_buffer_bytes_with_skip(destination, audio_buffer, active_format, 0);
+}
+
+fn write_audio_buffer_bytes_with_skip(
+    destination: &mut Vec<u8>,
+    audio_buffer: AudioBufferRef,
+    active_format: ActivePcmFormat,
+    skip_frames: usize,
+) {
+    let channels = audio_buffer.spec().channels.count();
+    let skip_samples = skip_frames * channels;
+
     match active_format {
         ActivePcmFormat::PcmFloat => {
             let mut buffer =
                 SampleBuffer::<f32>::new(audio_buffer.frames() as u64, *audio_buffer.spec());
             buffer.copy_interleaved_ref(audio_buffer);
-            destination.extend_from_slice(as_bytes(buffer.samples()));
+            let samples = buffer.samples();
+            if skip_samples < samples.len() {
+                destination.extend_from_slice(as_bytes(&samples[skip_samples..]));
+            }
         }
         ActivePcmFormat::Pcm16 => {
             let mut buffer =
                 SampleBuffer::<i16>::new(audio_buffer.frames() as u64, *audio_buffer.spec());
             buffer.copy_interleaved_ref(audio_buffer);
-            destination.extend_from_slice(as_bytes(buffer.samples()));
+            let samples = buffer.samples();
+            if skip_samples < samples.len() {
+                destination.extend_from_slice(as_bytes(&samples[skip_samples..]));
+            }
         }
         ActivePcmFormat::Pcm24Packed => {
             let mut buffer =
                 SampleBuffer::<f32>::new(audio_buffer.frames() as u64, *audio_buffer.spec());
             buffer.copy_interleaved_ref(audio_buffer);
-            for &sample in buffer.samples() {
-                let clamped = (sample * 8388607.0).round().clamp(-8388608.0, 8388607.0) as i32;
-                let bytes = clamped.to_le_bytes();
-                destination.extend_from_slice(&bytes[0..3]);
+            let samples = buffer.samples();
+            if skip_samples < samples.len() {
+                for &sample in &samples[skip_samples..] {
+                    let clamped = (sample * 8388607.0).round().clamp(-8388608.0, 8388607.0) as i32;
+                    let bytes = clamped.to_le_bytes();
+                    destination.extend_from_slice(&bytes[0..3]);
+                }
             }
         }
         ActivePcmFormat::Pcm32 => {
             let mut buffer =
                 SampleBuffer::<i32>::new(audio_buffer.frames() as u64, *audio_buffer.spec());
             buffer.copy_interleaved_ref(audio_buffer);
-            destination.extend_from_slice(as_bytes(buffer.samples()));
+            let samples = buffer.samples();
+            if skip_samples < samples.len() {
+                destination.extend_from_slice(as_bytes(&samples[skip_samples..]));
+            }
+        }
+    }
+}
+
+fn write_f32_samples_to_android_bytes(
+    destination: &mut Vec<u8>,
+    samples: &[f32],
+    active_format: ActivePcmFormat,
+) {
+    match active_format {
+        ActivePcmFormat::PcmFloat => {
+            destination.extend_from_slice(as_bytes(samples));
+        }
+        ActivePcmFormat::Pcm16 => {
+            for &sample in samples {
+                let clamped = (sample * 32767.0).round().clamp(-32768.0, 32767.0) as i16;
+                destination.extend_from_slice(&clamped.to_le_bytes());
+            }
+        }
+        ActivePcmFormat::Pcm24Packed => {
+            for &sample in samples {
+                let clamped = (sample * 8388607.0).round().clamp(-8388608.0, 8388607.0) as i32;
+                let bytes = clamped.to_le_bytes();
+                destination.extend_from_slice(&bytes[0..3]);
+            }
+        }
+        ActivePcmFormat::Pcm32 => {
+            for &sample in samples {
+                let clamped =
+                    (sample * 2147483647.0).round().clamp(-2147483648.0, 2147483647.0) as i32;
+                destination.extend_from_slice(&clamped.to_le_bytes());
+            }
         }
     }
 }
@@ -516,6 +683,7 @@ fn run_android_exclusive_thread(
     decoder: ExclusiveDecoder,
     stream_spec: DecodedStreamSpec,
     start_paused: bool,
+    is_prewarm: bool,
     state: Arc<ExclusiveState>,
     commands: Receiver<ExclusiveCommand>,
     init_tx: Sender<Result<(), PlaybackError>>,
@@ -582,8 +750,8 @@ fn run_android_exclusive_thread(
         aria_domain::DiagnosticSubsystem::Playback,
         aria_domain::DiagnosticLogLevel::Info,
         format!(
-            "Configuring AudioTrack: device_id={}, sample_rate={}Hz, bits={}, channels={}",
-            device_id, stream_spec.sample_rate, bit_depth, stream_spec.channels
+            "Configuring AudioTrack: device_id={}, sample_rate={}Hz, bits={}, channels={}, is_prewarm={}",
+            device_id, stream_spec.sample_rate, bit_depth, stream_spec.channels, is_prewarm
         ),
         None,
     );
@@ -591,15 +759,30 @@ fn run_android_exclusive_thread(
     let format_result = env.call_method(
         &player_obj,
         "open",
-        "(Landroid/content/Context;IIII)I",
+        "(Landroid/content/Context;IIIIZ)I",
         &[
             (&app_context).into(),
             JValue::Int(device_id),
             JValue::Int(stream_spec.sample_rate as i32),
             JValue::Int(stream_spec.channels as i32),
             JValue::Int(bit_depth),
+            JValue::Bool(is_prewarm as u8),
         ],
-    );
+    ).or_else(|_| {
+        let _ = env.exception_clear();
+        env.call_method(
+            &player_obj,
+            "open",
+            "(Landroid/content/Context;IIII)I",
+            &[
+                (&app_context).into(),
+                JValue::Int(device_id),
+                JValue::Int(stream_spec.sample_rate as i32),
+                JValue::Int(stream_spec.channels as i32),
+                JValue::Int(bit_depth),
+            ],
+        )
+    });
 
     let format_code = match format_result {
         Ok(val) => val.i().unwrap_or(0),
@@ -674,11 +857,19 @@ fn run_android_exclusive_thread(
         }
     };
 
+    let active_sample_rate = match env.call_method(&player_obj, "getSampleRate", "()I", &[]) {
+        Ok(val) => val.i().unwrap_or(stream_spec.sample_rate as i32) as u32,
+        Err(_) => {
+            let _ = env.exception_clear();
+            stream_spec.sample_rate
+        }
+    };
+
     let _ = init_tx.send(Ok(()));
 
     // Spawn the background decode worker
     let stop_flag = Arc::new(AtomicBool::new(false));
-    let (decode_thread, chunk_rx) = spawn_decode_worker(decoder, active_format, stop_flag.clone());
+    let (decode_thread, chunk_rx) = spawn_decode_worker(decoder, active_format, active_sample_rate, stop_flag.clone());
     let mut chunk_rx = Some(chunk_rx);
 
     let mut is_paused = start_paused;
@@ -686,12 +877,65 @@ fn run_android_exclusive_thread(
     let mut chunk_counter: u32 = 0;
     let mut playback_started = false;
 
+    if is_prewarm {
+        // Lookahead pre-buffering: read first decoded chunk and prime AudioTrack sink
+        if let Some(ref rx) = chunk_rx {
+            if let Ok(Ok(DecodedChunk::Data(mut first_chunk))) = rx.recv_timeout(Duration::from_millis(1500)) {
+                let volume = current_volume(&state);
+                if volume < 0.999_9 && !first_chunk.is_empty() {
+                    apply_volume(&mut first_chunk, active_format, volume);
+                }
+
+                if first_chunk.len() > current_buf_capacity {
+                    current_buf_capacity = first_chunk.len().next_power_of_two();
+                    if let Ok(val) = env.call_method(
+                        &player_obj,
+                        "getWriteBuffer",
+                        "(I)[B",
+                        &[JValue::Int(current_buf_capacity as i32)],
+                    ) {
+                        if let Ok(obj) = val.l() {
+                            if let Ok(new_g) = env.new_global_ref(&obj) {
+                                write_buf_global = new_g;
+                            }
+                        }
+                    }
+                }
+
+                let slice_i8: &[i8] = unsafe {
+                    std::slice::from_raw_parts(first_chunk.as_ptr() as *const i8, first_chunk.len())
+                };
+
+                let _ = env.with_local_frame(16, |env| {
+                    let j_arr = unsafe { JByteArray::from_raw(write_buf_global.as_raw()) };
+                    env.set_byte_array_region(&j_arr, 0, slice_i8)?;
+                    let res = env.call_method(
+                        &player_obj,
+                        "writeDirect",
+                        "(I)I",
+                        &[JValue::Int(first_chunk.len() as i32)],
+                    )?;
+                    res.i()
+                });
+                let _ = env.exception_clear();
+                chunk_counter = 1;
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Playback,
+                    aria_domain::DiagnosticLogLevel::Info,
+                    format!("Pre-warmed AudioTrack sink primed with {} bytes", first_chunk.len()),
+                    None,
+                );
+            }
+        }
+    }
+
     while !reached_eos {
         // Handle pending commands non-blocking
         while let Ok(cmd) = commands.try_recv() {
             match cmd {
                 ExclusiveCommand::Play => {
                     is_paused = false;
+                    playback_started = true;
                     let _ = env.call_method(&player_obj, "play", "()Z", &[]);
                 }
                 ExclusiveCommand::Pause => {
@@ -715,6 +959,7 @@ fn run_android_exclusive_thread(
                 match cmd {
                     ExclusiveCommand::Play => {
                         is_paused = false;
+                        playback_started = true;
                         let _ = env.call_method(&player_obj, "play", "()Z", &[]);
                     }
                     ExclusiveCommand::Pause => {}
@@ -881,7 +1126,7 @@ fn run_android_exclusive_thread(
         let _ = env.exception_clear();
 
         let drain_start = std::time::Instant::now();
-        let max_drain_duration = Duration::from_secs(15);
+        let max_drain_duration = Duration::from_millis(3500);
 
         loop {
             // Process any incoming commands during drain
@@ -937,7 +1182,7 @@ fn run_android_exclusive_thread(
                 break;
             }
 
-            thread::sleep(Duration::from_millis(30));
+            thread::sleep(Duration::from_millis(15));
         }
 
         // Wait for Terminate command (from PlaybackService advancing or stopping)

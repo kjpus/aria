@@ -99,6 +99,9 @@ impl AppCore {
             Some(path_updater),
         ));
 
+        let initial_library_mappings = persisted.library.field_mappings.clone();
+        let initial_library_tracks = persisted.library.tracks.clone();
+
         let core = Self {
             events,
             library: LibraryService::with_snapshot(persisted.library),
@@ -109,6 +112,15 @@ impl AppCore {
             cache_manager,
             prefetcher,
         };
+
+        let current_library = core.library.snapshot_now();
+        if current_library.field_mappings != initial_library_mappings
+            || current_library.tracks != initial_library_tracks
+        {
+            if let Err(e) = database.save_library_snapshot(&current_library) {
+                eprintln!("[app-core] failed to persist upgraded library snapshot: {e}");
+            }
+        }
 
         core.spawn_persistence_worker(database);
         core.spawn_playback_publisher();
@@ -513,6 +525,14 @@ impl AppCore {
             if let Err(err) = self.resolve_remote_track_if_needed(&mut requests[0], &active_window).await {
                 eprintln!("[app-core] First track of queue is unavailable ({err}); skipping ahead");
             }
+            // Pre-resolve upcoming tracks in active window that are already cached locally
+            for req in requests.iter_mut().take(n) {
+                if req.path.starts_with("remote://") {
+                    if let Some(cached) = self.cache_manager.get_cached_path(&req.queue_item.id).await {
+                        req.path = cached.to_string_lossy().to_string();
+                    }
+                }
+            }
         }
         let snapshot = self.playback.replace_queue(requests, start_playing).await?;
         self.emit(AppEvent::Playback(PlaybackEvent::SnapshotChanged(
@@ -914,7 +934,11 @@ impl AppCore {
         for i in 1..n {
             if let Some(req) = session.queue.get(current_idx + i) {
                 let track_id = &req.queue_item.id;
-                if self.cache_manager.is_track_cached(track_id).await {
+                if let Some(cached_path) = self.cache_manager.get_cached_path(track_id).await {
+                    let local_path_str = cached_path.to_string_lossy().to_string();
+                    if req.path.starts_with("remote://") {
+                        self.playback.update_queue_track_path(track_id, local_path_str);
+                    }
                     continue;
                 }
 
@@ -1245,7 +1269,25 @@ impl AppCore {
                         Arc::new(tokio::sync::Mutex::new(None));
 
                     loop {
-                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        let poll_delay = if last_snapshot.status == PlaybackStatus::Playing {
+                            let remaining_ms = last_snapshot
+                                .current_track
+                                .as_ref()
+                                .map(|track| track.duration_ms.saturating_sub(last_snapshot.position_ms))
+                                .unwrap_or(u64::MAX);
+
+                            if remaining_ms <= 2500 {
+                                // High-precision window right before track end: 25ms polling for instantaneous gapless handover
+                                std::time::Duration::from_millis(25)
+                            } else {
+                                // Normal active playback: 150ms polling for responsive UI and timely lookahead pre-warming
+                                std::time::Duration::from_millis(150)
+                            }
+                        } else {
+                            std::time::Duration::from_millis(300)
+                        };
+
+                        tokio::time::sleep(poll_delay).await;
 
                         let snapshot = playback.snapshot().await;
                         if snapshot != last_snapshot {
@@ -1255,6 +1297,19 @@ impl AppCore {
                                 .send(AppEvent::Playback(PlaybackEvent::SnapshotChanged(snapshot.clone())));
                             if track_changed {
                                 core.trigger_sliding_window_prefetch().await;
+                            }
+                        }
+
+                        if snapshot.status == PlaybackStatus::Playing {
+                            if let Some(current_idx) = snapshot.current_queue_index {
+                                let session = playback.persisted_session();
+                                if let Some(next_req) = session.queue.get(current_idx + 1) {
+                                    if next_req.path.starts_with("remote://") {
+                                        if let Some(cached) = core.cache_manager.get_cached_path(&next_req.queue_item.id).await {
+                                            playback.update_queue_track_path(&next_req.queue_item.id, cached.to_string_lossy().to_string());
+                                        }
+                                    }
+                                }
                             }
                         }
 

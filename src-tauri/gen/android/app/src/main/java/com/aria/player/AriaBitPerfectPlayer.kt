@@ -55,6 +55,7 @@ class AriaBitPerfectPlayer {
     private var targetDevice: AudioDeviceInfo? = null
     private var audioAttributes: AudioAttributes? = null
     private var mixerAttributesConfigured: Boolean = false
+    private var mixerAttributesPending: Boolean = false
     private var sampleRate: Int = 44100
     private var bitDepth: Int = 16
     private var channelCount: Int = 2
@@ -62,6 +63,12 @@ class AriaBitPerfectPlayer {
     private var floatWriteBuffer = FloatArray(16384)
     private var bytesPerFrame: Int = 4
     private var framesWritten: Long = 0
+    private var eosSignaled: Boolean = false
+    private var eosTimestamp: Long = 0L
+    private var lastHeadPosition: Long = 0L
+    private var lastHeadAdvanceTimestamp: Long = 0L
+    private var drainFinished: Boolean = false
+    private var lastReportedPositionMs: Long = 0L
     private var lastUnderrunCount: Int = 0
     private var appContext: Context? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -152,12 +159,65 @@ class AriaBitPerfectPlayer {
         return name.contains("sco") || name.contains("handsfree") || name.contains("telephony")
     }
 
+    private fun applyMixerAttributes() {
+        if (Build.VERSION.SDK_INT < 34) return
+        val am = audioManager ?: return
+        val dev = targetDevice ?: return
+        val attrs = audioAttributes ?: return
+        if (AriaBluetoothAudioHelper.isBluetoothDevice(dev)) return
+
+        try {
+            val channelMask = if (channelCount == 1) {
+                AudioFormat.CHANNEL_OUT_MONO
+            } else {
+                AudioFormat.CHANNEL_OUT_STEREO
+            }
+            val audioFormat = AudioFormat.Builder()
+                .setSampleRate(sampleRate)
+                .setChannelMask(channelMask)
+                .setEncoding(chosenEncoding)
+                .build()
+
+            val supportedMixers = am.getSupportedMixerAttributes(dev)
+            Log.i(TAG, "Device ${dev.productName} supported mixer configurations: ${supportedMixers.size}")
+
+            val bitPerfectAttr = supportedMixers.find { attr ->
+                attr.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT &&
+                    attr.format.sampleRate == sampleRate &&
+                    attr.format.channelMask == channelMask &&
+                    attr.format.encoding == chosenEncoding
+            } ?: supportedMixers.find { attr ->
+                attr.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT &&
+                    attr.format.sampleRate == sampleRate
+            } ?: AudioMixerAttributes.Builder(audioFormat)
+                .setMixerBehavior(AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT)
+                .build()
+
+            val setOk = am.setPreferredMixerAttributes(
+                attrs,
+                dev,
+                bitPerfectAttr
+            )
+            if (setOk) {
+                mixerAttributesConfigured = true
+                mixerAttributesPending = false
+                Log.i(TAG, "Successfully enabled built-in MIXER_BEHAVIOR_BIT_PERFECT on ${dev.productName} at native rate ${sampleRate}Hz")
+            } else {
+                Log.w(TAG, "setPreferredMixerAttributes returned false for ${dev.productName}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to set preferred mixer attributes: ${e.message}")
+        }
+    }
+
+    @JvmOverloads
     fun open(
         context: Context,
         deviceId: Int,
         sampleRate: Int,
         channelCount: Int,
-        bitDepth: Int
+        bitDepth: Int,
+        isPrewarm: Boolean = false
     ): Int {
         try {
             this.appContext = context.applicationContext
@@ -201,14 +261,26 @@ class AriaBitPerfectPlayer {
             }
 
             val isBluetooth = AriaBluetoothAudioHelper.isBluetoothDevice(device)
+            var effectiveSampleRate = sampleRate
             if (isBluetooth) {
-                Log.i(TAG, "Bluetooth output device targeted: ${device.productName} (id=${device.id}). Configuring for native source rate ${sampleRate}Hz (NEVER UPSAMPLING)...")
-                val btInfo = AriaBluetoothAudioHelper.optimizeForHighestQuality(context, sampleRate)
-                Log.i(TAG, "Bluetooth HD audio active: ${btInfo.summary}")
+                Log.i(TAG, "Bluetooth output device targeted: ${device.productName} (id=${device.id}). Configuring for native source rate ${sampleRate}Hz (${bitDepth}-bit)...")
+                val btInfo = AriaBluetoothAudioHelper.optimizeForHighestQuality(context, sampleRate, bitDepth)
+                if (btInfo.sampleRate > 0) {
+                    effectiveSampleRate = btInfo.sampleRate
+                }
+                Log.i(TAG, "Bluetooth HD audio active: ${btInfo.summary}, effectiveSampleRate=${effectiveSampleRate}Hz")
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && device.sampleRates.isNotEmpty()) {
+                val supported = device.sampleRates
+                if (!supported.contains(sampleRate)) {
+                    effectiveSampleRate = selectNearestSupportedRate(supported, sampleRate)
+                    Log.i(TAG, "Device does not support ${sampleRate}Hz; selected nearest supported rate ${effectiveSampleRate}Hz")
+                }
             }
 
-            this.targetDevice = device
-            Log.i(TAG, "Targeting device: ${device.productName} (id=${device.id}, type=${device.type}, isBluetooth=$isBluetooth) for ${sampleRate}Hz, ${bitDepth}-bit, ${channelCount}ch")
+            val sampleRate = effectiveSampleRate
+            this.sampleRate = sampleRate
+            this.bitDepth = if (bitDepth > 0) bitDepth else 16
+            this.channelCount = channelCount
 
             val channelMask = if (channelCount == 1) {
                 AudioFormat.CHANNEL_OUT_MONO
@@ -288,41 +360,12 @@ class AriaBitPerfectPlayer {
 
             // 1. Android 14+ (API 34+): Request built-in BIT_PERFECT mixer behavior on external USB DAC devices
             if (Build.VERSION.SDK_INT >= 34 && !isBluetooth) {
-                try {
-                    val supportedMixers = am.getSupportedMixerAttributes(device)
-                    Log.i(TAG, "Device ${device.productName} supported mixer configurations: ${supportedMixers.size}")
-                    for (attr in supportedMixers) {
-                        val isBp = attr.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT
-                        Log.d(TAG, "  Mixer attr: format=${attr.format}, behavior=${attr.mixerBehavior} (isBitPerfect=$isBp)")
-                    }
-
-                    // Prefer an exact matching bit-perfect attribute at native source sampleRate from the HAL, or construct one.
-                    // CRITICAL AUDIOPHILE RULE: NEVER select a mixer attribute with a different/higher sample rate, as that forces up-sampling!
-                    val bitPerfectAttr = supportedMixers.find { attr ->
-                        attr.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT &&
-                            attr.format.sampleRate == sampleRate &&
-                            attr.format.channelMask == channelMask &&
-                            attr.format.encoding == chosenEncoding
-                    } ?: supportedMixers.find { attr ->
-                        attr.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT &&
-                            attr.format.sampleRate == sampleRate
-                    } ?: AudioMixerAttributes.Builder(audioFormat)
-                        .setMixerBehavior(AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT)
-                        .build()
-
-                    val setOk = am.setPreferredMixerAttributes(
-                        audioAttrs,
-                        device,
-                        bitPerfectAttr
-                    )
-                    if (setOk) {
-                        mixerAttributesConfigured = true
-                        Log.i(TAG, "Successfully enabled built-in MIXER_BEHAVIOR_BIT_PERFECT on ${device.productName} at native rate ${sampleRate}Hz")
-                    } else {
-                        Log.w(TAG, "setPreferredMixerAttributes returned false for ${device.productName}")
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to set preferred mixer attributes: ${e.message}")
+                val currentActive = activeInstance
+                if (isPrewarm && currentActive != null && currentActive.sampleRate != sampleRate) {
+                    mixerAttributesPending = true
+                    Log.i(TAG, "Deferring USB DAC preferred mixer attribute switch to ${sampleRate}Hz until handover")
+                } else {
+                    applyMixerAttributes()
                 }
             }
 
@@ -365,7 +408,15 @@ class AriaBitPerfectPlayer {
 
             this.audioTrack = track
             this.framesWritten = 0
-            activeInstance = this
+            this.eosSignaled = false
+            this.eosTimestamp = 0L
+            this.lastHeadPosition = 0L
+            this.lastHeadAdvanceTimestamp = 0L
+            this.drainFinished = false
+            this.lastReportedPositionMs = 0L
+            if (!isPrewarm) {
+                activeInstance = this
+            }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 track.addOnRoutingChangedListener(AudioTrack.OnRoutingChangedListener { router ->
@@ -392,6 +443,21 @@ class AriaBitPerfectPlayer {
             Log.e(TAG, "Error opening bit-accurate audio track", e)
             return FORMAT_FAILED
         }
+    }
+
+    fun getSampleRate(): Int = this.sampleRate
+
+    private fun selectNearestSupportedRate(supported: IntArray, sourceRate: Int): Int {
+        if (supported.contains(sourceRate)) return sourceRate
+        val higher = supported.filter { it > sourceRate }
+        if (higher.isNotEmpty()) {
+            return higher.minByOrNull { it - sourceRate }!!
+        }
+        val lower = supported.filter { it < sourceRate }
+        if (lower.isNotEmpty()) {
+            return lower.minByOrNull { sourceRate - it }!!
+        }
+        return supported.minByOrNull { Math.abs(it - sourceRate) } ?: sourceRate
     }
 
     private var writeBuffer = ByteArray(65536)
@@ -479,11 +545,15 @@ class AriaBitPerfectPlayer {
     fun play(): Boolean {
         val track = audioTrack ?: return false
         return try {
+            activeInstance = this
             acquireLocks()
             appContext?.let {
                 val t = if (currentTitle != "Aria") currentTitle else null
                 val a = if (currentArtist != "Playing audio") currentArtist else null
                 AriaPlaybackService.startPlayback(it, t, a, getAudioSpec())
+            }
+            if (Build.VERSION.SDK_INT >= 34 && mixerAttributesPending && !mixerAttributesConfigured) {
+                applyMixerAttributes()
             }
             track.play()
             true
@@ -525,6 +595,11 @@ class AriaBitPerfectPlayer {
     fun endOfStream(): Boolean {
         val track = audioTrack ?: return true
         return try {
+            eosSignaled = true
+            eosTimestamp = System.currentTimeMillis()
+            lastHeadPosition = (track.playbackHeadPosition.toLong() and 0xFFFFFFFFL)
+            lastHeadAdvanceTimestamp = eosTimestamp
+            drainFinished = false
             if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
                 track.stop()
             }
@@ -537,12 +612,51 @@ class AriaBitPerfectPlayer {
 
     fun isFinished(): Boolean {
         val track = audioTrack ?: return true
+        if (drainFinished) return true
+        if (framesWritten <= 0) return true
+
         return try {
-            if (framesWritten <= 0) {
+            val head = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+            val now = System.currentTimeMillis()
+
+            // 1. Reached or exceeded frames written
+            if (head >= framesWritten) {
+                drainFinished = true
                 return true
             }
-            val head = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
-            head >= framesWritten
+
+            // 2. Tolerance check: within 100ms of framesWritten
+            val toleranceFrames = if (sampleRate > 0) sampleRate / 10 else 4410
+            if (head >= framesWritten - toleranceFrames) {
+                drainFinished = true
+                return true
+            }
+
+            // 3. If EOS was signaled, check for position reset, stall, or safety timeout
+            if (eosSignaled) {
+                // If head reset to 0 (or dropped significantly) after having played audio, HAL finished playback!
+                if (head < lastHeadPosition && lastHeadPosition > toleranceFrames) {
+                    drainFinished = true
+                    return true
+                }
+
+                // If head has not advanced for 150ms after EOS, drain is complete
+                if (head > lastHeadPosition) {
+                    lastHeadPosition = head
+                    lastHeadAdvanceTimestamp = now
+                } else if (now - lastHeadAdvanceTimestamp > 150L) {
+                    drainFinished = true
+                    return true
+                }
+
+                // Safety timeout: max buffer duration is ~3 seconds, so drain cannot take > 3.5s
+                if (now - eosTimestamp > 3500L) {
+                    drainFinished = true
+                    return true
+                }
+            }
+
+            false
         } catch (e: Exception) {
             true
         }
@@ -551,9 +665,18 @@ class AriaBitPerfectPlayer {
     fun getPositionMs(): Long {
         val track = audioTrack ?: return 0L
         return try {
+            if (drainFinished && sampleRate > 0 && framesWritten > 0) {
+                return (framesWritten * 1000L) / sampleRate
+            }
             val head = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
             if (sampleRate > 0) {
-                (head * 1000L) / sampleRate
+                val pos = (head * 1000L) / sampleRate
+                if (eosSignaled && pos < lastReportedPositionMs) {
+                    lastReportedPositionMs
+                } else {
+                    lastReportedPositionMs = pos
+                    pos
+                }
             } else {
                 0L
             }
@@ -582,15 +705,17 @@ class AriaBitPerfectPlayer {
             framesWritten = 0
 
             if (Build.VERSION.SDK_INT >= 34 && mixerAttributesConfigured) {
-                val am = audioManager
-                val dev = targetDevice
-                val attrs = audioAttributes
-                if (am != null && dev != null && attrs != null) {
-                    try {
-                        am.clearPreferredMixerAttributes(attrs, dev)
-                        Log.i(TAG, "Cleared preferred mixer attributes for ${dev.productName}")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to clear preferred mixer attributes", e)
+                if (activeInstance === this || activeInstance == null) {
+                    val am = audioManager
+                    val dev = targetDevice
+                    val attrs = audioAttributes
+                    if (am != null && dev != null && attrs != null) {
+                        try {
+                            am.clearPreferredMixerAttributes(attrs, dev)
+                            Log.i(TAG, "Cleared preferred mixer attributes for ${dev.productName}")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to clear preferred mixer attributes", e)
+                        }
                     }
                 }
                 mixerAttributesConfigured = false

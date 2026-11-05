@@ -195,7 +195,7 @@ fn default_fallback_mapping_profile() -> DefaultMappingProfile<'static> {
         composer: &["COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"],
         genre: &["GENRE"],
         conductor: &["CONDUCTOR"],
-        ensemble: &["ENSEMBLE", "ORCHESTRA", "ALBUMARTIST"],
+        ensemble: &["ENSEMBLE", "ORCHESTRA", "BAND", "CHOIR", "CHORUS"],
         soloist: &["SOLOIST", "PERFORMER", "ARTIST", "ALBUMARTIST"],
         year: &["DATE", "YEAR"],
         disk_number: &["DISCNUMBER", "DISKNUMBER", "DISC"],
@@ -211,7 +211,7 @@ fn flac_mapping_profile() -> DefaultMappingProfile<'static> {
         composer: &["COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"],
         genre: &["GENRE"],
         conductor: &["CONDUCTOR"],
-        ensemble: &["ENSEMBLE", "ORCHESTRA", "ALBUMARTIST", "ARTIST"],
+        ensemble: &["ENSEMBLE", "ORCHESTRA", "BAND", "CHOIR", "CHORUS"],
         soloist: &["SOLOIST", "PERFORMER", "ARTIST", "ALBUMARTIST"],
         year: &["DATE", "YEAR"],
         disk_number: &["DISCNUMBER", "DISKNUMBER", "DISC"],
@@ -227,7 +227,7 @@ fn mp3_mapping_profile() -> DefaultMappingProfile<'static> {
         composer: &["COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"],
         genre: &["GENRE"],
         conductor: &["CONDUCTOR"],
-        ensemble: &["BAND", "ORCHESTRA", "ENSEMBLE", "ALBUMARTIST"],
+        ensemble: &["BAND", "ORCHESTRA", "ENSEMBLE", "CHOIR", "CHORUS"],
         soloist: &["SOLOIST", "ARTIST", "PERFORMER", "ALBUMARTIST"],
         year: &["DATE", "YEAR"],
         disk_number: &["DISCNUMBER", "DISKNUMBER", "DISC"],
@@ -243,7 +243,7 @@ fn aac_mapping_profile() -> DefaultMappingProfile<'static> {
         composer: &["COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"],
         genre: &["GENRE"],
         conductor: &["CONDUCTOR"],
-        ensemble: &["BAND", "ORCHESTRA", "ENSEMBLE", "ALBUMARTIST"],
+        ensemble: &["BAND", "ORCHESTRA", "ENSEMBLE", "CHOIR", "CHORUS"],
         soloist: &["SOLOIST", "ARTIST", "PERFORMER", "ALBUMARTIST"],
         year: &["DATE", "YEAR"],
         disk_number: &["DISCNUMBER", "DISKNUMBER", "DISC"],
@@ -259,7 +259,7 @@ fn ogg_mapping_profile() -> DefaultMappingProfile<'static> {
         composer: &["COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"],
         genre: &["GENRE"],
         conductor: &["CONDUCTOR"],
-        ensemble: &["ENSEMBLE", "ORCHESTRA", "ALBUMARTIST", "ARTIST"],
+        ensemble: &["ENSEMBLE", "ORCHESTRA", "BAND", "CHOIR", "CHORUS"],
         soloist: &["SOLOIST", "PERFORMER", "ARTIST", "ALBUMARTIST"],
         year: &["DATE", "YEAR"],
         disk_number: &["DISCNUMBER", "DISKNUMBER", "DISC"],
@@ -275,7 +275,7 @@ fn opus_mapping_profile() -> DefaultMappingProfile<'static> {
         composer: &["COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"],
         genre: &["GENRE"],
         conductor: &["CONDUCTOR"],
-        ensemble: &["ENSEMBLE", "ORCHESTRA", "ALBUMARTIST", "ARTIST"],
+        ensemble: &["ENSEMBLE", "ORCHESTRA", "BAND", "CHOIR", "CHORUS"],
         soloist: &["SOLOIST", "PERFORMER", "ARTIST", "ALBUMARTIST"],
         year: &["DATE", "YEAR"],
         disk_number: &["DISCNUMBER", "DISKNUMBER", "DISC"],
@@ -291,7 +291,7 @@ fn wav_mapping_profile() -> DefaultMappingProfile<'static> {
         composer: &["COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"],
         genre: &["GENRE"],
         conductor: &["CONDUCTOR"],
-        ensemble: &["BAND", "ORCHESTRA", "ENSEMBLE", "ALBUMARTIST"],
+        ensemble: &["BAND", "ORCHESTRA", "ENSEMBLE", "CHOIR", "CHORUS"],
         soloist: &["SOLOIST", "ARTIST", "PERFORMER", "ALBUMARTIST"],
         year: &["DATE", "YEAR"],
         disk_number: &["DISCNUMBER", "DISKNUMBER", "DISC"],
@@ -307,7 +307,7 @@ fn aiff_mapping_profile() -> DefaultMappingProfile<'static> {
         composer: &["COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"],
         genre: &["GENRE"],
         conductor: &["CONDUCTOR"],
-        ensemble: &["BAND", "ORCHESTRA", "ENSEMBLE", "ALBUMARTIST"],
+        ensemble: &["BAND", "ORCHESTRA", "ENSEMBLE", "CHOIR", "CHORUS"],
         soloist: &["SOLOIST", "ARTIST", "PERFORMER", "ALBUMARTIST"],
         year: &["DATE", "YEAR"],
         disk_number: &["DISCNUMBER", "DISKNUMBER", "DISC"],
@@ -335,24 +335,25 @@ fn mp4_mapping_profile() -> DefaultMappingProfile<'static> {
         genre: &["©GEN", "GNRE", "GENRE"],
         conductor: &["----:com.apple.iTunes:CONDUCTOR", "CONDUCTOR"],
         ensemble: &[
-            "AART",
             "----:com.apple.iTunes:ENSEMBLE",
             "----:com.apple.iTunes:ORCHESTRA",
-            "ALBUMARTIST",
+            "----:com.apple.iTunes:BAND",
+            "----:com.apple.iTunes:CHOIR",
             "ENSEMBLE",
             "ORCHESTRA",
-            "©ART",
-            "ARTIST",
+            "BAND",
+            "CHOIR",
+            "CHORUS",
         ],
         soloist: &[
-            "©ART",
-            "ARTIST",
-            "AART",
-            "ALBUMARTIST",
             "----:com.apple.iTunes:SOLOIST",
             "----:com.apple.iTunes:PERFORMER",
             "SOLOIST",
             "PERFORMER",
+            "©ART",
+            "ARTIST",
+            "AART",
+            "ALBUMARTIST",
         ],
         year: &["©DAY", "DATE", "YEAR"],
         disk_number: &["DISK", "DISCNUMBER", "DISKNUMBER", "DISC"],
@@ -495,5 +496,23 @@ mod tests {
 
         assert!(disk_number.tag_priorities.iter().any(|tag| tag == "DISKNUMBER"));
         assert!(track_number.tag_priorities.iter().any(|tag| tag == "TRACK"));
+    }
+
+    #[test]
+    fn ensemble_defaults_exclude_generic_artist_fallbacks() {
+        for format in ["DEFAULT", "FLAC", "MP3", "MP4", "AAC", "OGG", "OPUS", "WAV", "AIFF"] {
+            let mappings = default_field_mappings_for_format(format);
+            let ensemble = mappings
+                .iter()
+                .find(|mapping| mapping.key == "ensemble")
+                .expect("expected ensemble mapping");
+
+            for generic_tag in &["ALBUMARTIST", "ARTIST", "AART", "©ART"] {
+                assert!(
+                    !ensemble.tag_priorities.iter().any(|t| t == generic_tag),
+                    "format {format} ensemble should not contain {generic_tag}"
+                );
+            }
+        }
     }
 }

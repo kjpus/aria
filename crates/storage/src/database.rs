@@ -911,7 +911,9 @@ fn upgrade_loaded_field_mappings(mappings: Vec<LibraryFieldMapping>) -> Vec<Libr
                         .get(&key)
                         .is_some_and(|legacy| mapping.label == legacy.label
                             && mapping.tag_priorities == legacy.tag_priorities)
-                        || is_historical_mp4_composer_default(&format, &mapping) =>
+                        || is_historical_mp4_composer_default(&format, &mapping)
+                        || is_historical_ensemble_default(&format, &mapping)
+                        || is_historical_mp4_soloist_default(&format, &mapping) =>
                 {
                     current_default.clone()
                 }
@@ -941,6 +943,58 @@ fn is_historical_mp4_composer_default(format: &str, mapping: &LibraryFieldMappin
                     &mapping.tag_priorities,
                     PRE_WRT_WITH_FREEFORM_MP4_COMPOSER_TAGS,
                 )
+}
+
+fn is_historical_ensemble_default(_format: &str, mapping: &LibraryFieldMapping) -> bool {
+    if mapping.key != "ensemble" || mapping.label != "Ensemble" {
+        return false;
+    }
+
+    const HISTORICAL_ENSEMBLE_PROFILES: &[&[&str]] = &[
+        &["ENSEMBLE", "ORCHESTRA", "ALBUMARTIST"],
+        &["ENSEMBLE", "ORCHESTRA", "ALBUMARTIST", "ARTIST"],
+        &["BAND", "ORCHESTRA", "ENSEMBLE", "ALBUMARTIST"],
+        &[
+            "----:com.apple.iTunes:ENSEMBLE",
+            "----:com.apple.iTunes:ORCHESTRA",
+            "ENSEMBLE",
+            "ORCHESTRA",
+            "ALBUMARTIST",
+        ],
+        &[
+            "AART",
+            "----:com.apple.iTunes:ENSEMBLE",
+            "----:com.apple.iTunes:ORCHESTRA",
+            "ALBUMARTIST",
+            "ENSEMBLE",
+            "ORCHESTRA",
+            "©ART",
+            "ARTIST",
+        ],
+    ];
+
+    HISTORICAL_ENSEMBLE_PROFILES
+        .iter()
+        .any(|expected| matches_historical_tag_priorities(&mapping.tag_priorities, expected))
+}
+
+fn is_historical_mp4_soloist_default(format: &str, mapping: &LibraryFieldMapping) -> bool {
+    if format != "MP4" || mapping.key != "soloist" || mapping.label != "Soloist" {
+        return false;
+    }
+
+    const HISTORICAL_MP4_SOLOIST_TAGS: &[&str] = &[
+        "©ART",
+        "ARTIST",
+        "AART",
+        "ALBUMARTIST",
+        "----:com.apple.iTunes:SOLOIST",
+        "----:com.apple.iTunes:PERFORMER",
+        "SOLOIST",
+        "PERFORMER",
+    ];
+
+    matches_historical_tag_priorities(&mapping.tag_priorities, HISTORICAL_MP4_SOLOIST_TAGS)
 }
 
 fn matches_historical_tag_priorities(
@@ -1162,6 +1216,7 @@ mod tests {
             },
             auto_sync_on_startup: false,
             remote_storage_only: false,
+            logging: Default::default(),
         };
         let playback = PlaybackSessionSnapshot {
             queue: vec![PlayTrackRequest {
@@ -1340,6 +1395,55 @@ mod tests {
                 "WORKCOMPOSER".to_string(),
                 "COMPOSERSORT".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn upgrades_legacy_ensemble_defaults_to_remove_artist_fallbacks() {
+        let mut stored_defaults = default_field_mappings();
+        let flac_ensemble = stored_defaults
+            .iter_mut()
+            .find(|m| m.format == "FLAC" && m.key == "ensemble")
+            .expect("flac ensemble");
+        flac_ensemble.tag_priorities = vec![
+            "ENSEMBLE".into(),
+            "ORCHESTRA".into(),
+            "ALBUMARTIST".into(),
+            "ARTIST".into(),
+        ];
+
+        let mp4_ensemble = stored_defaults
+            .iter_mut()
+            .find(|m| m.format == "MP4" && m.key == "ensemble")
+            .expect("mp4 ensemble");
+        mp4_ensemble.tag_priorities = vec![
+            "AART".into(),
+            "----:com.apple.iTunes:ENSEMBLE".into(),
+            "----:com.apple.iTunes:ORCHESTRA".into(),
+            "ALBUMARTIST".into(),
+            "ENSEMBLE".into(),
+            "ORCHESTRA".into(),
+            "©ART".into(),
+            "ARTIST".into(),
+        ];
+
+        let upgraded = upgrade_loaded_field_mappings(stored_defaults);
+
+        let upgraded_flac = upgraded
+            .iter()
+            .find(|m| m.format == "FLAC" && m.key == "ensemble")
+            .unwrap();
+        assert_eq!(
+            upgraded_flac.tag_priorities,
+            vec!["ENSEMBLE", "ORCHESTRA", "BAND", "CHOIR", "CHORUS"]
+        );
+
+        let upgraded_mp4 = upgraded
+            .iter()
+            .find(|m| m.format == "MP4" && m.key == "ensemble")
+            .unwrap();
+        assert!(
+            !upgraded_mp4.tag_priorities.iter().any(|t| t == "ALBUMARTIST" || t == "ARTIST" || t == "AART" || t == "©ART")
         );
     }
 

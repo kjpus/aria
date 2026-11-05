@@ -60,9 +60,60 @@ export function PlayerPane({
   const title = currentTrack ? firstField(currentTrack, 'title') || currentTrack.fileName : playback.currentTrack?.title ?? 'No Track Loaded';
   const composer = currentTrack ? joinField(currentTrack, 'composer') : '';
   const conductor = currentTrack ? joinField(currentTrack, 'conductor') : '';
-  const ensemble = currentTrack ? joinField(currentTrack, 'ensemble') : '';
+  const rawEnsemble = currentTrack ? joinField(currentTrack, 'ensemble') : '';
   const soloist = currentTrack ? joinField(currentTrack, 'soloist') : '';
-  const artist = currentTrack ? joinField(currentTrack, 'artist') : '';
+  const rawArtist = currentTrack
+    ? joinField(currentTrack, 'artist') ||
+      (currentTrack.rawTags ? (currentTrack.rawTags['ARTIST'] ?? currentTrack.rawTags['ALBUMARTIST'] ?? []).join(' / ') : '')
+    : '';
+
+  const soloistNames = soloist
+    ? soloist.split(' / ').map((s) => s.trim().toLowerCase()).filter(Boolean)
+    : [];
+  const conductorNames = conductor
+    ? conductor.split(' / ').map((s) => s.trim().toLowerCase()).filter(Boolean)
+    : [];
+  const composerNames = composer
+    ? composer.split(' / ').map((s) => s.trim().toLowerCase()).filter(Boolean)
+    : [];
+
+  const ensemble = rawEnsemble
+    ? rawEnsemble
+        .split(' / ')
+        .map((s) => s.trim())
+        .filter((part) => {
+          const lower = part.toLowerCase();
+          return (
+            !soloistNames.includes(lower) &&
+            !conductorNames.includes(lower) &&
+            !composerNames.includes(lower)
+          );
+        })
+        .join(' / ')
+    : '';
+
+  const ensembleNames = ensemble
+    ? ensemble.split(' / ').map((s) => s.trim().toLowerCase()).filter(Boolean)
+    : [];
+
+  const artist = rawArtist
+    ? rawArtist
+        .split(' / ')
+        .map((s) => s.trim())
+        .filter((part) => {
+          const lower = part.toLowerCase();
+          return (
+            !soloistNames.includes(lower) &&
+            !conductorNames.includes(lower) &&
+            !composerNames.includes(lower) &&
+            !ensembleNames.includes(lower)
+          );
+        })
+        .join(' / ')
+    : '';
+
+  const showArtist = Boolean(artist);
+
   const albumTitle = currentTrack ? albumTitleForTrack(currentTrack) : '';
   const albumId = currentTrack ? albumIdForTrack(currentTrack) : null;
   const year = currentTrack ? firstField(currentTrack, 'year') || firstField(currentTrack, 'date') : '';
@@ -84,14 +135,6 @@ export function PlayerPane({
     const diskNum = rawDisk ? cleanNumber(rawDisk) : '1';
     trackDiskDisplay = `${trackNum}/${diskNum}`;
   }
-
-  const showArtist = Boolean(
-    artist &&
-    artist !== composer &&
-    artist !== conductor &&
-    artist !== ensemble &&
-    artist !== soloist
-  );
 
   const audio = currentTrack?.audio;
   const audioParts: string[] = [];

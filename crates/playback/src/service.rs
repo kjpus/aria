@@ -70,6 +70,7 @@ struct PlaybackBackend {
     shared_output: Option<MixerDeviceSink>,
     output_device: OutputDeviceSnapshot,
     active: Option<ActivePlayback>,
+    prewarmed: Option<ActivePlayback>,
     last_request: Option<PlayTrackRequest>,
     saved_position: Option<Duration>,
     queue: Vec<PlayTrackRequest>,
@@ -173,6 +174,7 @@ impl Default for PlaybackBackend {
             shared_output: None,
             output_device,
             active: None,
+            prewarmed: None,
             last_request: None,
             saved_position: None,
             queue: Vec::new(),
@@ -233,6 +235,7 @@ impl PlaybackService {
                 shared_output: None,
                 output_device,
                 active: None,
+                prewarmed: None,
                 last_request: normalized_session
                     .current_queue_index
                     .and_then(|index| normalized_session.queue.get(index))
@@ -430,6 +433,9 @@ impl PlaybackService {
     ) -> Result<PlaybackSnapshot, PlaybackError> {
         {
             let mut backend = self.backend.lock().expect("playback backend poisoned");
+            if let Some(stale) = backend.prewarmed.take() {
+                std::thread::spawn(move || drop(stale));
+            }
             backend.active = None;
             backend.saved_position = None;
             backend.queue = requests;
@@ -503,6 +509,9 @@ impl PlaybackService {
     pub async fn shuffle_queue(&self) -> PlaybackSnapshot {
         {
             let mut backend = self.backend.lock().expect("playback backend poisoned");
+            if let Some(stale) = backend.prewarmed.take() {
+                std::thread::spawn(move || drop(stale));
+            }
             let start_index = backend
                 .current_queue_index
                 .map_or(0, |index| index.saturating_add(1));
@@ -581,6 +590,9 @@ impl PlaybackService {
             if let Some(active) = backend.active.as_ref() {
                 backend.saved_position = Some(active.get_pos());
             }
+            if let Some(stale) = backend.prewarmed.take() {
+                std::thread::spawn(move || drop(stale));
+            }
             backend.active = None;
         }
 
@@ -627,6 +639,9 @@ impl PlaybackService {
     pub fn shutdown(&self) {
         {
             let mut backend = self.backend.lock().expect("playback backend poisoned");
+            if let Some(stale) = backend.prewarmed.take() {
+                std::thread::spawn(move || drop(stale));
+            }
             backend.active = None;
             backend.saved_position = None;
             backend.shared_output = None;
@@ -660,6 +675,7 @@ impl PlaybackService {
                 )
             })
         {
+            let is_playing = status == PlaybackStatus::Playing;
             state.status = status;
             state.current_track = Some(request.queue_item.clone());
             state.position_ms = position_ms.min(request.queue_item.duration_ms);
@@ -667,11 +683,53 @@ impl PlaybackService {
             if finished {
                 backend.last_request = Some(request.clone());
 
-                if let Some(next_request) = advance_queue_after_finish(&mut backend) {
+                if let Some(mut next_request) = advance_queue_after_finish(&mut backend) {
+                    if next_request.path.starts_with("remote://") {
+                        if let Some(local_path) = find_local_cached_file(&next_request.queue_item.id) {
+                            next_request.path = local_path;
+                        }
+                    }
+
                     let is_local_playable = !next_request.path.starts_with("remote://")
                         && std::path::Path::new(&next_request.path).exists();
 
                     if is_local_playable {
+                        let has_matching_prewarmed = backend
+                            .prewarmed
+                            .as_ref()
+                            .is_some_and(|pw| pw.request().queue_item.id == next_request.queue_item.id);
+
+                        if has_matching_prewarmed {
+                            let prewarmed = backend.prewarmed.take().unwrap();
+                            prewarmed.play();
+
+                            #[cfg(target_os = "android")]
+                            if let Some(audio_spec) = prewarmed.audio_spec() {
+                                exclusive_android::update_playback_service(
+                                    Some(&next_request.queue_item.title),
+                                    Some(&next_request.queue_item.subtitle),
+                                    Some(&audio_spec),
+                                    true,
+                                );
+                            }
+
+                            backend.last_request = Some(next_request.clone());
+                            let old_active = backend.active.replace(prewarmed);
+                            if let Some(old) = old_active {
+                                std::thread::spawn(move || {
+                                    drop(old);
+                                });
+                            }
+
+                            sync_snapshot_queue_state(state, &backend);
+                            if let Some(active) = backend.active.as_ref() {
+                                state.status = PlaybackStatus::Playing;
+                                state.current_track = Some(active.request().queue_item.clone());
+                                state.position_ms = 0;
+                                return;
+                            }
+                        }
+
                         match start_request(&mut backend, next_request, Duration::ZERO, false) {
                             Ok(()) => {
                                 sync_snapshot_queue_state(state, &backend);
@@ -695,6 +753,9 @@ impl PlaybackService {
                         // The next track is a remote track or still being downloaded into cache.
                         // Keep playback alive in Buffering status with the next track so AppCore
                         // can resolve, download, and seamlessly resume playback.
+                        if let Some(stale) = backend.prewarmed.take() {
+                            std::thread::spawn(move || drop(stale));
+                        }
                         backend.active = None;
                         backend.saved_position = None;
                         sync_snapshot_queue_state(state, &backend);
@@ -705,6 +766,9 @@ impl PlaybackService {
                     }
                 }
 
+                if let Some(stale) = backend.prewarmed.take() {
+                    std::thread::spawn(move || drop(stale));
+                }
                 backend.active = None;
                 backend.saved_position = None;
                 sync_snapshot_queue_state(state, &backend);
@@ -712,6 +776,12 @@ impl PlaybackService {
                 state.position_ms = request.queue_item.duration_ms;
                 #[cfg(target_os = "android")]
                 exclusive_android::stop_playback_service();
+            } else if is_playing {
+                let duration_ms = request.queue_item.duration_ms;
+                let remaining_ms = duration_ms.saturating_sub(position_ms);
+                if remaining_ms <= 15_000 || position_ms >= 3_000 {
+                    maybe_prewarm_next_track(&mut backend);
+                }
             }
             return;
         }
@@ -764,6 +834,9 @@ fn start_request(
     start_position: Duration,
     start_paused: bool,
 ) -> Result<(), PlaybackError> {
+    if let Some(stale) = backend.prewarmed.take() {
+        std::thread::spawn(move || drop(stale));
+    }
     backend.active = None;
     backend.saved_position = None;
 
@@ -898,7 +971,176 @@ fn jump_to_queue_index(
     };
 
     backend.current_queue_index = Some(index);
+
+    if let Some(prewarmed) = backend.prewarmed.take() {
+        if prewarmed.request().queue_item.id == request.queue_item.id {
+            if !start_paused {
+                prewarmed.play();
+            }
+            #[cfg(target_os = "android")]
+            if let Some(audio_spec) = prewarmed.audio_spec() {
+                exclusive_android::update_playback_service(
+                    Some(&request.queue_item.title),
+                    Some(&request.queue_item.subtitle),
+                    Some(&audio_spec),
+                    !start_paused,
+                );
+            }
+            backend.last_request = Some(request.clone());
+            let old_active = backend.active.replace(prewarmed);
+            if let Some(old) = old_active {
+                std::thread::spawn(move || {
+                    drop(old);
+                });
+            }
+            return Ok(());
+        } else {
+            std::thread::spawn(move || {
+                drop(prewarmed);
+            });
+        }
+    }
+
     start_request(backend, request, Duration::ZERO, start_paused)
+}
+
+fn find_local_cached_file(track_id: &str) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    let base_cache = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Aria")
+        .join("remote_cache");
+
+    #[cfg(target_os = "android")]
+    let base_cache = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/data/data/com.aria.player"))
+        .join("cache")
+        .join("Aria")
+        .join("remote_cache");
+
+    #[cfg(not(any(target_os = "windows", target_os = "android")))]
+    let base_cache = std::env::temp_dir()
+        .join("Aria")
+        .join("remote_cache");
+
+    if !base_cache.exists() {
+        return None;
+    }
+
+    let clean_track_id: String = track_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = clean_track_id.trim_matches('_');
+    let effective = if trimmed.is_empty() { "track" } else { trimmed };
+
+    if let Ok(entries) = std::fs::read_dir(&base_cache) {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let name_str = file_name.to_string_lossy();
+            if name_str.starts_with(effective) && !name_str.starts_with(".tmp") {
+                let p = entry.path();
+                if p.is_file() {
+                    return Some(p.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn maybe_prewarm_next_track(backend: &mut PlaybackBackend) {
+    let next_index = match backend
+        .current_queue_index
+        .and_then(|idx| (idx + 1 < backend.queue.len()).then_some(idx + 1))
+    {
+        Some(idx) => idx,
+        None => {
+            if let Some(stale) = backend.prewarmed.take() {
+                std::thread::spawn(move || drop(stale));
+            }
+            return;
+        }
+    };
+
+    let next_request = match backend.queue.get(next_index).cloned() {
+        Some(req) => req,
+        None => return,
+    };
+
+    if let Some(prewarmed) = &backend.prewarmed {
+        if prewarmed.request().queue_item.id == next_request.queue_item.id {
+            return;
+        }
+    }
+
+    if let Some(stale) = backend.prewarmed.take() {
+        std::thread::spawn(move || drop(stale));
+    }
+
+    let is_local_playable = !next_request.path.starts_with("remote://")
+        && std::path::Path::new(&next_request.path).exists();
+
+    let mut next_request = next_request;
+    if !is_local_playable {
+        if let Some(local_path) = find_local_cached_file(&next_request.queue_item.id) {
+            if let Some(req) = backend.queue.get_mut(next_index) {
+                req.path = local_path.clone();
+            }
+            next_request.path = local_path;
+        } else {
+            return;
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        let preferences = backend.preferences.clone();
+        match resolve_output_target(&preferences, false).and_then(|target| {
+            ExclusivePlayer::open_prewarmed(
+                &target.snapshot.id,
+                &next_request.path,
+                preferences.volume,
+            )
+            .map(|player| (player, target.snapshot))
+        }) {
+            Ok((player, _snapshot)) => {
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Playback,
+                    aria_domain::DiagnosticLogLevel::Info,
+                    format!(
+                        "Successfully pre-warmed next track in lookahead buffer: '{}' ({})",
+                        next_request.queue_item.title,
+                        player.audio_spec_string()
+                    ),
+                    None,
+                );
+                backend.prewarmed = Some(ActivePlayback::Exclusive {
+                    player,
+                    request: next_request,
+                });
+            }
+            Err(error) => {
+                aria_domain::log_diagnostic(
+                    aria_domain::DiagnosticSubsystem::Playback,
+                    aria_domain::DiagnosticLogLevel::Debug,
+                    format!(
+                        "Pre-warming next track '{}' deferred: {error}",
+                        next_request.queue_item.title
+                    ),
+                    None,
+                );
+            }
+        }
+    }
 }
 
 fn current_queue_request(backend: &PlaybackBackend) -> Option<&PlayTrackRequest> {

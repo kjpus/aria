@@ -72,9 +72,30 @@ impl LibraryService {
         if snapshot.catalog_rules.is_empty() {
             snapshot.catalog_rules = default_catalog_rules();
         }
+
+        let mappings = snapshot.field_mappings.clone();
+        let catalog_rules = compile_catalog_rules(&snapshot.catalog_rules);
+        for track in &mut snapshot.tracks {
+            if !track.raw_tags.is_empty() {
+                let album_path = track.mapped_fields.get("album_path").cloned();
+                track.mapped_fields =
+                    map_fields(&track.raw_tags, &mappings, &track.audio.format, &catalog_rules);
+                if let Some(ap) = album_path {
+                    track.mapped_fields.insert("album_path".to_string(), ap);
+                }
+            }
+        }
+
         Self {
             state: Arc::new(RwLock::new(snapshot)),
         }
+    }
+
+    pub fn snapshot_now(&self) -> LibrarySnapshot {
+        self.state
+            .try_read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
     }
 
     pub async fn snapshot(&self) -> LibrarySnapshot {
@@ -2193,11 +2214,6 @@ mod tests {
             assert!(
                 !track.mapped_fields.get("disk_number").cloned().unwrap_or_default().is_empty(),
                 "expected disk number mapping for {}",
-                sample_track.display()
-            );
-            assert!(
-                !track.mapped_fields.get("ensemble").cloned().unwrap_or_default().is_empty(),
-                "expected album artist atom to populate ensemble for {}",
                 sample_track.display()
             );
             assert!(
