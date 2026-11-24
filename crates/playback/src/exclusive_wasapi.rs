@@ -635,6 +635,8 @@ fn run_exclusive_thread(
     let mut playing = !start_paused;
     let mut source_finished = false;
     let mut frames_rendered = position_to_frames(start_position, init.output_format.sample_rate);
+    let mut staging_buffer =
+        vec![0u8; init.buffer_frames as usize * init.output_format.block_align() as usize];
 
     if !source_finished {
         match fill_render_buffer(
@@ -644,6 +646,7 @@ fn run_exclusive_thread(
             &mut init.consumer,
             &state,
             &mut frames_rendered,
+            &mut staging_buffer,
         ) {
             Ok(finished) => source_finished = finished,
             Err(error) => {
@@ -718,32 +721,24 @@ fn run_exclusive_thread(
 
         match wait_result {
             WAIT_OBJECT_0 if playing && !source_finished => {
-                let padding = match current_padding(&init.audio_client) {
-                    Ok(padding) => padding,
+                // In event-driven WASAPI exclusive mode (hnsBufferDuration == hnsPeriodicity),
+                // each render event signals that a full `buffer_frames` period is ready;
+                // subtracting GetCurrentPadding() under-fills the period on many drivers.
+                match fill_render_buffer(
+                    &init.render_client,
+                    init.buffer_frames,
+                    init.output_format,
+                    &mut init.consumer,
+                    &state,
+                    &mut frames_rendered,
+                    &mut staging_buffer,
+                ) {
+                    Ok(finished) => source_finished = finished,
                     Err(error) => {
-                        eprintln!("exclusive playback padding check failed: {error}");
+                        eprintln!("exclusive playback render failed: {error}");
                         state.finished.store(true, Ordering::Relaxed);
                         cleanup_exclusive_output(init, mmcss, com_initialized);
                         return;
-                    }
-                };
-                let frames_available = init.buffer_frames.saturating_sub(padding);
-                if frames_available > 0 {
-                    match fill_render_buffer(
-                        &init.render_client,
-                        frames_available,
-                        init.output_format,
-                        &mut init.consumer,
-                        &state,
-                        &mut frames_rendered,
-                    ) {
-                        Ok(finished) => source_finished = finished,
-                        Err(error) => {
-                            eprintln!("exclusive playback render failed: {error}");
-                            state.finished.store(true, Ordering::Relaxed);
-                            cleanup_exclusive_output(init, mmcss, com_initialized);
-                            return;
-                        }
                     }
                 }
             }
@@ -964,13 +959,17 @@ fn fill_render_buffer(
     consumer: &mut ExclusiveAudioConsumer,
     state: &ExclusiveState,
     frames_rendered: &mut u64,
+    staging: &mut Vec<u8>,
 ) -> Result<bool, PlaybackError> {
     let byte_count = frames_available as usize * output_format.block_align() as usize;
     // Pull and process PCM bytes BEFORE acquiring the hardware WASAPI render buffer
     // so the real-time thread never blocks on decoder IPC while holding GetBuffer
     // and never leaks the render buffer if decoding fails.
-    let mut staging = vec![0u8; byte_count];
-    let bytes_written = consumer.copy_next_bytes_into(&mut staging)?;
+    if staging.len() != byte_count {
+        staging.resize(byte_count, 0);
+    }
+    staging.fill(0);
+    let bytes_written = consumer.copy_next_bytes_into(staging)?;
 
     let volume = current_volume(state);
     if bytes_written > 0 && volume < 0.999_9 {
@@ -983,7 +982,7 @@ fn fill_render_buffer(
             .map_err(|error| PlaybackError::Output(error.to_string()))?
     };
     let bytes = unsafe { std::slice::from_raw_parts_mut(buffer, byte_count) };
-    bytes.copy_from_slice(&staging);
+    bytes.copy_from_slice(staging);
 
     unsafe {
         render_client
