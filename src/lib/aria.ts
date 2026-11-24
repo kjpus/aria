@@ -14,7 +14,6 @@ import type {
   PlayTrackRequest,
   Playlist,
   PlaylistSnapshot,
-  PreviewTrack,
   PlaylistImportPreview,
   PlaybackSnapshot,
   RemoteCacheStatus,
@@ -29,7 +28,6 @@ import type {
   TrackTableSettings,
   DiagnosticLogEntry,
   DiagnosticLogLevel,
-  DiagnosticSubsystem,
   LoggingSettings,
 } from '../types/aria';
 
@@ -39,7 +37,7 @@ let previewBootstrap: AppBootstrap = {
   library: {
     roots: [
       {
-        path: 'C:\\Users\\hongswan\\Music\\Great 50\\Great 50',
+        path: 'C:\\Music\\Classical\\Great 50',
         label: 'Great 50',
       },
     ],
@@ -89,7 +87,7 @@ let previewBootstrap: AppBootstrap = {
     tracks: [
       {
         id: 'preview-1',
-        path: 'C:\\Users\\hongswan\\Music\\Great 50\\Great 50\\Bernard Haitink - Vaughan Williams Symphony No. 2\\01 - Symphony No. 2.flac',
+        path: 'C:\\Music\\Classical\\Great 50\\Bernard Haitink - Vaughan Williams Symphony No. 2\\01 - Symphony No. 2.flac',
         fileName: '01 - Symphony No. 2.flac',
         albumArtPath: null,
         audio: {
@@ -492,12 +490,12 @@ export async function getPlaylistImportPreview(
       tracks: [
         {
           title: 'Symphony No. 2 in G major "A London Symphony": I. Lento - Allegro risoluto',
-          path: 'C:\\Users\\hongswan\\Music\\Great 50\\Great 50\\Bernard Haitink - Vaughan Williams Symphony No. 2\\01 - Symphony No. 2.flac',
+          path: 'C:\\Music\\Classical\\Great 50\\Bernard Haitink - Vaughan Williams Symphony No. 2\\01 - Symphony No. 2.flac',
           trackId: 'preview-1',
         },
         {
           title: 'Víkingur Ólafsson - Non-existent track example',
-          path: 'C:\\Users\\hongswan\\Music\\Great 50\\Great 50\\Vikingur Olafsson\\02 - Nonexistent.flac',
+          path: 'C:\\Music\\Classical\\Great 50\\Vikingur Olafsson\\02 - Nonexistent.flac',
           trackId: null,
         },
       ],
@@ -1248,7 +1246,7 @@ export async function startGdriveAuthFlow(
     clientSecret: clientSecret || null,
     targetName: targetName || null,
     rootFolderName: rootFolderName || null,
-    storageLimitBytes: storageLimitBytes || null,
+    storageLimitBytes: storageLimitBytes ?? null,
   });
 }
 
@@ -1420,15 +1418,6 @@ export async function copyToClipboard(text: string): Promise<void> {
       }
     } catch (err) {
       console.warn('AriaAndroid.copyText failed, trying fallback:', err);
-    }
-  }
-
-  if (isTauriRuntime) {
-    try {
-      await invoke<void>('copy_to_clipboard', { text });
-      return;
-    } catch {
-      // fallback
     }
   }
 

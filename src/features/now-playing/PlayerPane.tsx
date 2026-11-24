@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { SectionCard } from '../../components/SectionCard';
 import { TrackRawTagsDialog } from '../../components/TrackRawTagsDialog';
 import { readTrackRawTags } from '../../lib/aria';
@@ -50,8 +50,10 @@ export function PlayerPane({
         /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)));
 
   const [rawTags, setRawTags] = useState<TrackRawTags | null>(null);
+  const [rawTagsError, setRawTagsError] = useState<string | null>(null);
   const [isRawTagsOpen, setIsRawTagsOpen] = useState(false);
   const [isLoadingTags, setIsLoadingTags] = useState(false);
+  const rawTagsRequestIdRef = useRef(0);
 
   const art = toLocalImageSrc(currentTrack?.albumArtPath ?? null);
 
@@ -163,25 +165,51 @@ export function PlayerPane({
   const playbackSummary = [audioSummary, deviceSummary].filter(Boolean).join(' — ') || null;
 
   useEffect(() => {
+    rawTagsRequestIdRef.current += 1;
     setRawTags(null);
+    setRawTagsError(null);
+    setIsLoadingTags(false);
     setIsRawTagsOpen(false);
   }, [currentTrack?.id]);
 
+  useEffect(() => {
+    if (!isRawTagsOpen) {
+      return undefined;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setIsRawTagsOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isRawTagsOpen]);
+
   async function handleOpenRawTags() {
     if (!currentTrack) return;
-    if (rawTags) {
-      setIsRawTagsOpen(true);
+    setIsRawTagsOpen(true);
+    if (rawTags && !rawTagsError) {
       return;
     }
+    const requestId = ++rawTagsRequestIdRef.current;
+    setRawTagsError(null);
     setIsLoadingTags(true);
     try {
-      const tags = await readTrackRawTags(currentTrack.id);
+      const tags = await readTrackRawTags(currentTrack.path, currentTrack.rawTags);
+      if (rawTagsRequestIdRef.current !== requestId) {
+        return;
+      }
       setRawTags(tags);
-      setIsRawTagsOpen(true);
     } catch (err) {
-      console.error('Failed to load track raw tags:', err);
+      if (rawTagsRequestIdRef.current !== requestId) {
+        return;
+      }
+      setRawTagsError(String(err));
     } finally {
-      setIsLoadingTags(false);
+      if (rawTagsRequestIdRef.current === requestId) {
+        setIsLoadingTags(false);
+      }
     }
   }
 
@@ -421,7 +449,7 @@ export function PlayerPane({
       </SectionCard>
 
       <TrackRawTagsDialog
-        error={null}
+        error={rawTagsError}
         isLoading={isLoadingTags}
         isOpen={isRawTagsOpen}
         onClose={() => setIsRawTagsOpen(false)}

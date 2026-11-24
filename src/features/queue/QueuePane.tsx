@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { SectionCard } from '../../components/SectionCard';
 import { HoverScrollText } from '../albums/HoverScrollText';
@@ -34,7 +34,10 @@ export function QueuePane({
   onOpenAlbum,
   onOpenTrack,
 }: QueuePaneProps) {
-  const trackLookup = new Map(tracks.map((track) => [track.id, track]));
+  const trackLookup = useMemo(
+    () => new Map(tracks.map((track) => [track.id, track])),
+    [tracks],
+  );
   const currentTrackRef = useRef<HTMLLIElement | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<QueueContextMenuState | null>(null);
@@ -123,9 +126,13 @@ export function QueuePane({
             playback.queue.map((track, index) => (
               <QueueRow
                 index={index}
-                key={track.id}
+                key={`${track.id}-${index}`}
                 currentTrackRef={
-                  playback.currentTrack?.id === track.id ? currentTrackRef : null
+                  (playback.currentQueueIndex !== null
+                    ? playback.currentQueueIndex === index
+                    : playback.currentTrack?.id === track.id)
+                    ? currentTrackRef
+                    : null
                 }
                 playback={playback}
                 queuedTrack={track}
@@ -233,7 +240,11 @@ function QueueRow({
       className={[
         'queue-list__item',
         'queue-list__item--playable',
-        playback.currentTrack?.id === queuedTrack.id ? 'queue-list__item--current' : '',
+        (playback.currentQueueIndex !== null
+          ? playback.currentQueueIndex === index
+          : playback.currentTrack?.id === queuedTrack.id)
+          ? 'queue-list__item--current'
+          : '',
         playback.currentQueueIndex !== null && index < playback.currentQueueIndex
           ? 'queue-list__item--played'
           : '',

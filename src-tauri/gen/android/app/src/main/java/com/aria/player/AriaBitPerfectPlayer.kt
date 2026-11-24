@@ -260,6 +260,8 @@ class AriaBitPerfectPlayer {
                 return FORMAT_FAILED
             }
 
+            this.targetDevice = device
+
             val isBluetooth = AriaBluetoothAudioHelper.isBluetoothDevice(device)
             var effectiveSampleRate = sampleRate
             if (isBluetooth) {
@@ -371,9 +373,12 @@ class AriaBitPerfectPlayer {
 
             // 2. Build AudioTrack matching the exact native stream parameters
             // Buffer at least 750ms of audio (or 8x minBufferSize) to protect against background GC pauses and CPU frequency scaling
-            val bufferDurationMs = 750
-            val targetBufferSize = maxOf(minBufferSize * 8, (sampleRate * bytesPerFrame * bufferDurationMs) / 1000)
-            val bufferCapacityMs = if (sampleRate > 0 && bytesPerFrame > 0) (targetBufferSize * 1000L) / (sampleRate * bytesPerFrame) else 0L
+            val bufferDurationMs = 750L
+            val targetBufferSize = maxOf(
+                minBufferSize.toLong() * 8L,
+                (sampleRate.toLong() * bytesPerFrame.toLong() * bufferDurationMs) / 1000L
+            ).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            val bufferCapacityMs = if (sampleRate > 0 && bytesPerFrame > 0) (targetBufferSize.toLong() * 1000L) / (sampleRate.toLong() * bytesPerFrame.toLong()) else 0L
 
             AriaPlaybackService.logDiagnostic(
                 2, // INFO
@@ -720,6 +725,7 @@ class AriaBitPerfectPlayer {
                 }
                 mixerAttributesConfigured = false
             }
+            targetDevice = null
 
             true
         } catch (e: Exception) {

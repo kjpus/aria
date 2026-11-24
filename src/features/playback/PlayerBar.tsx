@@ -204,56 +204,68 @@ export function PlayerBar({
 
   return (
     <section className="player-bar">
-      <div
-        className="player-bar__identity"
-        onClick={() => onTogglePlayerPane?.()}
-        role={onTogglePlayerPane ? 'button' : undefined}
-        style={{ cursor: onTogglePlayerPane ? 'pointer' : 'default' }}
-        tabIndex={onTogglePlayerPane ? 0 : undefined}
-        title={onTogglePlayerPane ? (isPlayerPaneActive ? 'Close player view' : 'Open player view') : undefined}
-      >
-        {art ? (
-          <img
-            alt=""
-            className="player-bar__art player-bar__art-image"
-            loading="lazy"
-            decoding="async"
-            onMouseEnter={() => setShowArtPopup(true)}
-            onMouseLeave={() => setShowArtPopup(false)}
-            src={art}
-          />
-        ) : (
-          <div className="player-bar__art player-bar__art--empty">
-            <svg
-              aria-hidden="true"
-              fill="none"
-              height="20"
-              stroke="currentColor"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth="1.75"
-              viewBox="0 0 24 24"
-              width="20"
-            >
-              <circle cx="12" cy="12" r="10" />
-              <circle cx="12" cy="12" r="4" />
-              <circle cx="12" cy="12" fill="currentColor" r="1.5" />
-            </svg>
+      <div className="player-bar__identity">
+        <div
+          className="player-bar__identity-trigger"
+          onClick={() => onTogglePlayerPane?.()}
+          onKeyDown={(event) => {
+            if (!onTogglePlayerPane) return;
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              onTogglePlayerPane();
+            }
+          }}
+          role={onTogglePlayerPane ? 'button' : undefined}
+          style={{
+            display: 'contents',
+            cursor: onTogglePlayerPane ? 'pointer' : 'default',
+          }}
+          tabIndex={onTogglePlayerPane ? 0 : undefined}
+          title={onTogglePlayerPane ? (isPlayerPaneActive ? 'Close player view' : 'Open player view') : undefined}
+        >
+          {art ? (
+            <img
+              alt=""
+              className="player-bar__art player-bar__art-image"
+              loading="lazy"
+              decoding="async"
+              onMouseEnter={() => setShowArtPopup(true)}
+              onMouseLeave={() => setShowArtPopup(false)}
+              src={art}
+            />
+          ) : (
+            <div className="player-bar__art player-bar__art--empty">
+              <svg
+                aria-hidden="true"
+                fill="none"
+                height="20"
+                stroke="currentColor"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="1.75"
+                viewBox="0 0 24 24"
+                width="20"
+              >
+                <circle cx="12" cy="12" r="10" />
+                <circle cx="12" cy="12" r="4" />
+                <circle cx="12" cy="12" fill="currentColor" r="1.5" />
+              </svg>
+            </div>
+          )}
+          <div className="player-bar__meta">
+            <div className="player-bar__title-row">
+              <HoverScrollText className="player-bar__title" speed={42} text={title} />
+              {playback.status === 'buffering' ? (
+                <span className="player-bar__buffering-badge">
+                  Buffering
+                </span>
+              ) : null}
+            </div>
+            <HoverScrollText className="player-bar__subtitle" speed={34} text={subtitle} />
           </div>
-        )}
-        <div className="player-bar__meta">
-          <div className="player-bar__title-row">
-            <HoverScrollText className="player-bar__title" speed={42} text={title} />
-            {playback.status === 'buffering' ? (
-              <span className="player-bar__buffering-badge">
-                Buffering
-              </span>
-            ) : null}
-          </div>
-          <HoverScrollText className="player-bar__subtitle" speed={34} text={subtitle} />
         </div>
         {currentTrack && (
-          <div className="player-bar__rating" onClick={(e) => e.stopPropagation()}>
+          <div className="player-bar__rating">
             <button
               aria-label="Favorite track"
               className={`ghost-button player-bar__rating-button player-bar__rating-button--up${

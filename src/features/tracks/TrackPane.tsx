@@ -3,6 +3,7 @@ import type {
   PointerEvent as ReactPointerEvent,
 } from 'react';
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { resolveContextMenuPosition } from '../library/track-table-utils';
 import { ClearableInput } from '../../components/ClearableInput';
 import { EditTrackTagsDialog } from '../../components/EditTrackTagsDialog';
 import { ExportFieldDialog } from '../../components/ExportFieldDialog';
@@ -354,6 +355,9 @@ export function TrackPane({
     };
   }, [draggedVisibleColumn]);
 
+  const onTrackTableChangeRef = useRef(onTrackTableChange);
+  onTrackTableChangeRef.current = onTrackTableChange;
+
   useEffect(() => {
     if (!hasHydrated) {
       return;
@@ -369,7 +373,7 @@ export function TrackPane({
     }
 
     const timeout = window.setTimeout(() => {
-      onTrackTableChange(nextTrackTable);
+      onTrackTableChangeRef.current(nextTrackTable);
     }, 240);
 
     return () => window.clearTimeout(timeout);
@@ -377,7 +381,6 @@ export function TrackPane({
     columnWidths,
     columns,
     hasHydrated,
-    onTrackTableChange,
     persistedTrackTable,
     sortCriteria,
     visibleColumns,
@@ -434,11 +437,6 @@ export function TrackPane({
       window.removeEventListener('keydown', closeMenu);
     };
   }, [albumContextMenu, trackContextMenu]);
-
-  const sortSummary = useMemo(
-    () => describeSortCriteria(sortCriteria, columnLookup),
-    [columnLookup, sortCriteria],
-  );
 
   const trackSearchTextLookup = useMemo(
     () => new Map(tracks.map((track) => [track.id, buildTrackSearchText(track)])),
@@ -1819,19 +1817,6 @@ function buildDefaultSortCriteria(availableKeys: string[]): TrackSortCriterion[]
   return [{ key: fallbackKey, direction: 'asc' }];
 }
 
-function describeSortCriteria(
-  criteria: TrackSortCriterion[],
-  columnLookup: Map<string, { key: string; label: string }>,
-): string {
-  return criteria
-    .map((criterion) => {
-      const label = columnLookup.get(criterion.key)?.label ?? criterion.key;
-      const direction = criterion.direction === 'desc' ? 'descending' : 'ascending';
-      return `${label} (${direction})`;
-    })
-    .join(' -> ');
-}
-
 function getDefaultColumnWidth(key: string): number {
   switch (key) {
     case 'track_number':
@@ -2055,32 +2040,6 @@ function stringListsEqual(left: string[], right: string[]): boolean {
   }
 
   return true;
-}
-
-function resolveContextMenuPosition(
-  container: HTMLElement | null,
-  clientX: number,
-  clientY: number,
-  menuWidth: number,
-) {
-  if (!container) {
-    return { x: clientX, y: clientY };
-  }
-
-  const bounds = container.getBoundingClientRect();
-  const padding = 12;
-  const localX = clientX - bounds.left + container.scrollLeft;
-  const localY = clientY - bounds.top + container.scrollTop;
-  const minLeft = container.scrollLeft + padding;
-  const maxLeft = Math.max(
-    minLeft,
-    container.scrollLeft + container.clientWidth - menuWidth - padding,
-  );
-
-  return {
-    x: Math.max(minLeft, Math.min(localX, maxLeft)),
-    y: Math.max(container.scrollTop + padding, localY),
-  };
 }
 
 function pickRandomTracks(tracks: ScannedTrack[], limit: number) {

@@ -1,5 +1,5 @@
 import type { CSSProperties, ReactNode } from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 type HoverScrollTextProps = {
   text: string;
@@ -18,35 +18,18 @@ export function HoverScrollText({
   const innerRef = useRef<HTMLSpanElement>(null);
   const [overflow, setOverflow] = useState(0);
 
-  useEffect(() => {
-    const measure = () => {
-      if (!outerRef.current || !innerRef.current) {
-        return;
-      }
-
-      const diff = innerRef.current.scrollWidth - outerRef.current.clientWidth;
-      const nextOverflow = diff > 1 ? Math.ceil(diff) : 0;
-      setOverflow(nextOverflow);
-    };
-
-    measure();
-
-    const resizeObserver =
-      typeof ResizeObserver !== 'undefined'
-        ? new ResizeObserver(() => measure())
-        : null;
-
-    if (resizeObserver && outerRef.current && innerRef.current) {
-      resizeObserver.observe(outerRef.current);
-      resizeObserver.observe(innerRef.current);
+  const measure = useCallback(() => {
+    if (!outerRef.current || !innerRef.current) {
+      return;
     }
 
-    window.addEventListener('resize', measure);
+    const diff = innerRef.current.scrollWidth - outerRef.current.clientWidth;
+    const nextOverflow = diff > 1 ? Math.ceil(diff) : 0;
+    setOverflow((current) => (current === nextOverflow ? current : nextOverflow));
+  }, []);
 
-    return () => {
-      resizeObserver?.disconnect();
-      window.removeEventListener('resize', measure);
-    };
+  useEffect(() => {
+    setOverflow(0);
   }, [text]);
 
   const style = {
@@ -57,6 +40,8 @@ export function HoverScrollText({
   return (
     <div
       className={`hover-scroll ${overflow > 0 ? 'hover-scroll--active' : ''} ${className ?? ''}`.trim()}
+      onFocus={measure}
+      onPointerEnter={measure}
       ref={outerRef}
       style={style}
       title={text}

@@ -118,21 +118,24 @@ impl RemoteCacheManager {
             while let Ok(Some(entry)) = dir.next_entry().await {
                 let file_name = entry.file_name();
                 let name_str = file_name.to_string_lossy();
-                if name_str.starts_with(effective_track_id) && !name_str.starts_with(".tmp") {
-                    let path = entry.path();
-                    if path.is_file() {
-                        if let Ok(meta) = entry.metadata().await {
-                            let mut entries = self.entries.write().await;
-                            entries.insert(
-                                track_id.to_string(),
-                                CacheEntry {
-                                    file_path: path.clone(),
-                                    size_bytes: meta.len(),
-                                    last_accessed: Instant::now(),
-                                },
-                            );
-                            return Some(path);
-                        }
+                if name_str.starts_with(".tmp") || name_str.contains(".tmp_") {
+                    continue;
+                }
+                let path = entry.path();
+                if path.file_stem().and_then(|s| s.to_str()) == Some(effective_track_id)
+                    && path.is_file()
+                {
+                    if let Ok(meta) = entry.metadata().await {
+                        let mut entries = self.entries.write().await;
+                        entries.insert(
+                            track_id.to_string(),
+                            CacheEntry {
+                                file_path: path.clone(),
+                                size_bytes: meta.len(),
+                                last_accessed: Instant::now(),
+                            },
+                        );
+                        return Some(path);
                     }
                 }
             }
@@ -588,5 +591,33 @@ mod tests {
 
         assert!(res.is_err());
         assert!(!cache_manager.is_track_cached("trk_bad").await);
+    }
+
+    #[tokio::test]
+    async fn test_cache_ignores_tmp_suffix_and_prefix_collisions() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "aria_cache_test_collision_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Write an in-progress temp file for trk_1 and a completed file for trk_10
+        std::fs::write(temp_dir.join("trk_1.flac.tmp_999_1"), b"partial download").unwrap();
+        std::fs::write(temp_dir.join("trk_10.flac"), b"different track").unwrap();
+
+        let cache_manager = RemoteCacheManager::new(temp_dir.clone(), 5);
+        assert_eq!(cache_manager.get_cached_path("trk_1").await, None);
+        assert!(cache_manager.get_cached_path("trk_10").await.is_some());
+
+        // Once the real trk_1.flac exists, it matches exactly
+        std::fs::write(temp_dir.join("trk_1.flac"), b"real track 1").unwrap();
+        let matched = cache_manager
+            .get_cached_path("trk_1")
+            .await
+            .expect("should match trk_1.flac");
+        assert_eq!(matched.file_name().and_then(|n| n.to_str()), Some("trk_1.flac"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

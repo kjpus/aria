@@ -12,6 +12,7 @@ import {
   GridSmallIcon,
   GripVerticalIcon,
 } from '../../components/Icons';
+import { stringListsEqual } from '../library/track-table-utils';
 import { SectionCard } from '../../components/SectionCard';
 import { toLocalImageSrc } from '../../lib/runtime';
 import type { AlbumGridSize } from '../../lib/ui-preferences';
@@ -254,6 +255,9 @@ export function PlaylistPane({
     };
   }, [resizingColumn]);
 
+  const onTrackTableChangeRef = useRef(onTrackTableChange);
+  onTrackTableChangeRef.current = onTrackTableChange;
+
   useEffect(() => {
     if (!hasHydrated) {
       return undefined;
@@ -267,7 +271,7 @@ export function PlaylistPane({
     }
 
     const timeout = window.setTimeout(() => {
-      onTrackTableChange({
+      onTrackTableChangeRef.current({
         ...settings,
         visibleColumns,
         columnWidths,
@@ -279,8 +283,8 @@ export function PlaylistPane({
     columnWidths,
     hasHydrated,
     normalizedColumnWidths,
-    onTrackTableChange,
     settings,
+    visibleColumns,
   ]);
 
   useEffect(() => {
@@ -642,9 +646,7 @@ export function PlaylistPane({
   };
 
   const handleGlobalPointerUp = () => {
-    window.removeEventListener('pointermove', handleGlobalPointerMove);
-    window.removeEventListener('pointerup', handleGlobalPointerUp);
-    window.removeEventListener('pointercancel', handleGlobalPointerCancel);
+    detachGlobalPointerListeners();
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
 
@@ -690,14 +692,52 @@ export function PlaylistPane({
   };
 
   const handleGlobalPointerCancel = () => {
-    window.removeEventListener('pointermove', handleGlobalPointerMove);
-    window.removeEventListener('pointerup', handleGlobalPointerUp);
-    window.removeEventListener('pointercancel', handleGlobalPointerCancel);
+    detachGlobalPointerListeners();
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
     pointerDragRef.current = null;
     setActiveDrag(null);
   };
+
+  const pointerHandlersRef = useRef({
+    move: handleGlobalPointerMove,
+    up: handleGlobalPointerUp,
+    cancel: handleGlobalPointerCancel,
+  });
+  pointerHandlersRef.current = {
+    move: handleGlobalPointerMove,
+    up: handleGlobalPointerUp,
+    cancel: handleGlobalPointerCancel,
+  };
+
+  const stablePointerListenersRef = useRef<{
+    move: (event: PointerEvent) => void;
+    up: () => void;
+    cancel: () => void;
+  } | null>(null);
+  if (!stablePointerListenersRef.current) {
+    stablePointerListenersRef.current = {
+      move: (event: PointerEvent) => pointerHandlersRef.current.move(event),
+      up: () => pointerHandlersRef.current.up(),
+      cancel: () => pointerHandlersRef.current.cancel(),
+    };
+  }
+
+  function attachGlobalPointerListeners() {
+    const listeners = stablePointerListenersRef.current;
+    if (!listeners) return;
+    window.addEventListener('pointermove', listeners.move);
+    window.addEventListener('pointerup', listeners.up);
+    window.addEventListener('pointercancel', listeners.cancel);
+  }
+
+  function detachGlobalPointerListeners() {
+    const listeners = stablePointerListenersRef.current;
+    if (!listeners) return;
+    window.removeEventListener('pointermove', listeners.move);
+    window.removeEventListener('pointerup', listeners.up);
+    window.removeEventListener('pointercancel', listeners.cancel);
+  }
 
   function handlePlaylistPointerDown(
     event: React.PointerEvent<HTMLElement>,
@@ -720,9 +760,7 @@ export function PlaylistPane({
       targetPosition: null,
     };
 
-    window.addEventListener('pointermove', handleGlobalPointerMove);
-    window.addEventListener('pointerup', handleGlobalPointerUp);
-    window.addEventListener('pointercancel', handleGlobalPointerCancel);
+    attachGlobalPointerListeners();
   }
 
   function handleTrackPointerDown(
@@ -756,28 +794,43 @@ export function PlaylistPane({
       targetPosition: null,
     };
 
-    window.addEventListener('pointermove', handleGlobalPointerMove);
-    window.addEventListener('pointerup', handleGlobalPointerUp);
-    window.addEventListener('pointercancel', handleGlobalPointerCancel);
+    attachGlobalPointerListeners();
   }
 
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && pointerDragRef.current?.isDragging) {
         event.preventDefault();
-        handleGlobalPointerCancel();
+        pointerHandlersRef.current.cancel();
       }
     };
     window.addEventListener('keydown', handleEscape);
     return () => {
       window.removeEventListener('keydown', handleEscape);
-      window.removeEventListener('pointermove', handleGlobalPointerMove);
-      window.removeEventListener('pointerup', handleGlobalPointerUp);
-      window.removeEventListener('pointercancel', handleGlobalPointerCancel);
+      detachGlobalPointerListeners();
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
   }, []);
+
+  const playlistCardData = useMemo(() => {
+    const trackById = new Map(tracks.map((track) => [track.id, track]));
+    const lookup = new Map<string, { tracks: ScannedTrack[]; collageArts: string[] }>();
+    for (const playlist of playlists) {
+      const resolvedTracks: ScannedTrack[] = [];
+      for (const trackId of playlist.trackIds) {
+        const track = trackById.get(trackId);
+        if (track) {
+          resolvedTracks.push(track);
+        }
+      }
+      lookup.set(playlist.id, {
+        tracks: resolvedTracks,
+        collageArts: buildPlaylistCollage(playlist, resolvedTracks),
+      });
+    }
+    return lookup;
+  }, [playlists, tracks]);
 
   return (
     <div className="pane-stack">
@@ -848,8 +901,9 @@ export function PlaylistPane({
 
             <div className={`playlist-grid playlist-grid--${gridSize} playlist-carousel`}>
               {playlists.map((playlist) => {
-                const playlistTracks = tracksForPlaylist(tracks, playlist);
-                const collageArts = buildPlaylistCollage(playlist, playlistTracks);
+                const cardData = playlistCardData.get(playlist.id);
+                const playlistTracks = cardData?.tracks ?? [];
+                const collageArts = cardData?.collageArts ?? [];
                 const selected = selectedPlaylist?.id === playlist.id;
                 const isPlaylistBeingDragged =
                   activeDrag?.type === 'playlist' && activeDrag.playlistId === playlist.id;
@@ -1563,18 +1617,4 @@ function buildPlaylistArtists(track: ScannedTrack): string {
   ].filter(Boolean);
 
   return parts.join(' / ');
-}
-
-function stringListsEqual(left: string[], right: string[]): boolean {
-  if (left.length !== right.length) {
-    return false;
-  }
-
-  for (let index = 0; index < left.length; index += 1) {
-    if (left[index] !== right[index]) {
-      return false;
-    }
-  }
-
-  return true;
 }

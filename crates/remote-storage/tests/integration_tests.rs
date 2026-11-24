@@ -138,7 +138,7 @@ async fn test_sync_remote_library_full_pipeline() {
     let dummy_audio_dir = temp_root.join("source_music");
     tokio::fs::create_dir_all(&dummy_audio_dir).await.expect("create audio dir");
 
-    let backend = Arc::new(FilesystemBackend::new(&temp_root.join("remote_store")));
+    let backend = Arc::new(FilesystemBackend::new(temp_root.join("remote_store")));
 
     let target = RemoteTarget {
         id: "target_test_1".to_string(),
@@ -348,7 +348,7 @@ async fn test_deduplication_and_skip_unchanged_tracks_and_playlists() {
     let dummy_audio_dir = temp_root.join("source_music");
     tokio::fs::create_dir_all(&dummy_audio_dir).await.expect("create audio dir");
 
-    let backend = Arc::new(FilesystemBackend::new(&temp_root.join("remote_store")));
+    let backend = Arc::new(FilesystemBackend::new(temp_root.join("remote_store")));
 
     let target = RemoteTarget {
         id: "target_dedup_1".to_string(),
@@ -421,7 +421,7 @@ async fn test_deduplication_and_skip_unchanged_tracks_and_playlists() {
         backend.clone(),
         &target,
         "Piano Concerto No. 1 in D minor, Op. 15",
-        &[track1.clone()],
+        std::slice::from_ref(&track1),
         upload_options,
         None,
     )
@@ -801,5 +801,152 @@ async fn test_upload_album_with_library_roots_and_multi_disc() {
     assert_eq!(id1, id2, "Remote tracks from the same album with different soloists must NOT split");
 
     // Cleanup
+    let _ = tokio::fs::remove_dir_all(&temp_root).await;
+}
+
+#[tokio::test]
+async fn test_upload_album_does_not_wipe_master_index_on_transient_read_error() {
+    use aria_domain::{RemoteBackendType, RemoteTarget};
+    use aria_remote_storage::{
+        upload_album, RemoteFileRef, RemoteStorageBackend, RemoteStorageError, StorageStatus,
+        StorageUsage, TransferProgress, UploadOptions,
+    };
+    use async_trait::async_trait;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    struct TransientIndexErrorBackend {
+        inner: FilesystemBackend,
+        fail_index_read: AtomicBool,
+    }
+
+    #[async_trait]
+    impl RemoteStorageBackend for TransientIndexErrorBackend {
+        fn provider_id(&self) -> &'static str {
+            self.inner.provider_id()
+        }
+        async fn test_connection(&self) -> Result<StorageStatus, RemoteStorageError> {
+            self.inner.test_connection().await
+        }
+        async fn get_storage_usage(&self) -> Result<StorageUsage, RemoteStorageError> {
+            self.inner.get_storage_usage().await
+        }
+        async fn ensure_directory(&self, path: &str) -> Result<String, RemoteStorageError> {
+            self.inner.ensure_directory(path).await
+        }
+        async fn upload_file(
+            &self,
+            local_path: &Path,
+            remote_path: &str,
+            progress: Option<mpsc::Sender<TransferProgress>>,
+        ) -> Result<RemoteFileRef, RemoteStorageError> {
+            self.inner.upload_file(local_path, remote_path, progress).await
+        }
+        async fn write_bytes(&self, remote_path: &str, data: &[u8]) -> Result<(), RemoteStorageError> {
+            self.inner.write_bytes(remote_path, data).await
+        }
+        async fn read_bytes(&self, remote_path: &str) -> Result<Vec<u8>, RemoteStorageError> {
+            if remote_path == "aria-library-index.json"
+                && self.fail_index_read.load(Ordering::SeqCst)
+            {
+                return Err(RemoteStorageError::ConnectionFailed(
+                    "simulated transient network timeout".into(),
+                ));
+            }
+            self.inner.read_bytes(remote_path).await
+        }
+        async fn delete_file(&self, remote_path: &str) -> Result<(), RemoteStorageError> {
+            self.inner.delete_file(remote_path).await
+        }
+        async fn delete_directory(&self, remote_path: &str) -> Result<(), RemoteStorageError> {
+            self.inner.delete_directory(remote_path).await
+        }
+        async fn clear_all_data(&self) -> Result<(), RemoteStorageError> {
+            self.inner.clear_all_data().await
+        }
+    }
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "aria_transient_index_test_{}",
+        std::process::id()
+    ));
+    let _ = tokio::fs::remove_dir_all(&temp_root).await;
+    let source_dir = temp_root.join("source");
+    let remote_dir = temp_root.join("remote");
+    tokio::fs::create_dir_all(&source_dir).await.unwrap();
+    tokio::fs::create_dir_all(&remote_dir).await.unwrap();
+
+    let t1_path = source_dir.join("01.flac");
+    tokio::fs::write(&t1_path, b"FLAC AUDIO BYTES").await.unwrap();
+
+    let inner = FilesystemBackend::new(&remote_dir);
+    let seeded_index = r#"{"manifestVersion":1,"updatedAt":"2026-01-01T00:00:00Z","albums":[{"albumId":"alb_existing","title":"Existing Album","relativeFolder":"Existing","artworkFileName":null,"trackCount":1,"totalDurationMs":1000,"totalSizeBytes":100}]}"#;
+    inner
+        .write_bytes("aria-library-index.json", seeded_index.as_bytes())
+        .await
+        .unwrap();
+
+    let backend = Arc::new(TransientIndexErrorBackend {
+        inner,
+        fail_index_read: AtomicBool::new(true),
+    });
+
+    let target = RemoteTarget {
+        id: "t_transient".into(),
+        name: "Transient Test".into(),
+        backend_type: RemoteBackendType::Filesystem,
+        is_enabled: true,
+        storage_limit_bytes: None,
+        config_json: String::new(),
+    };
+
+    let mut mapped = BTreeMap::new();
+    mapped.insert("album".into(), vec!["New Album".into()]);
+    mapped.insert("title".into(), vec!["Track 1".into()]);
+    let track = ScannedTrack {
+        id: "local_transient_1".into(),
+        path: t1_path.to_string_lossy().to_string(),
+        file_name: "01.flac".into(),
+        album_art_path: None,
+        audio: AudioPropertiesSnapshot {
+            duration_ms: 1000,
+            sample_rate: Some(44100),
+            bit_depth: Some(16),
+            channels: Some(2),
+            format: "FLAC".into(),
+        },
+        raw_tags: BTreeMap::new(),
+        mapped_fields: mapped,
+    };
+
+    let res = upload_album(
+        backend.clone(),
+        &target,
+        "New Album",
+        &[track],
+        UploadOptions {
+            compute_checksums: false,
+            current_target_usage_bytes: 0,
+            library_roots: vec![],
+        },
+        None,
+    )
+    .await;
+
+    assert!(
+        res.is_err(),
+        "Transient index read error must fail upload instead of wiping remote index"
+    );
+
+    backend.fail_index_read.store(false, Ordering::SeqCst);
+    let intact = backend.read_bytes("aria-library-index.json").await.unwrap();
+    let intact_str = String::from_utf8_lossy(&intact);
+    assert!(
+        intact_str.contains("alb_existing"),
+        "Existing master index must remain intact after transient read failure"
+    );
+
     let _ = tokio::fs::remove_dir_all(&temp_root).await;
 }

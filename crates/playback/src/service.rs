@@ -158,7 +158,7 @@ impl ActivePlayback {
             Self::Shared { .. } => None,
             #[cfg(target_os = "android")]
             Self::Exclusive { player, .. } => Some(player.audio_spec_string()),
-            #[cfg(all(not(target_os = "android"), any(target_os = "windows")))]
+            #[cfg(target_os = "windows")]
             Self::Exclusive { .. } => None,
         }
     }
@@ -534,8 +534,30 @@ impl PlaybackService {
             if start_index <= backend.queue.len()
                 && backend.queue.len() == backend.ordered_queue.len()
             {
-                let restored_queue_tail = backend.ordered_queue[start_index..].to_vec();
-                backend.queue[start_index..].clone_from_slice(&restored_queue_tail);
+                // Preserve already-played + current tracks in queue[..start_index],
+                // and restore the remaining tracks in their original ordered_queue order
+                // without duplicating tracks that were already played in shuffled order.
+                let mut prefix_counts: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
+                for item in &backend.queue[..start_index] {
+                    *prefix_counts.entry(item.queue_item.id.clone()).or_insert(0) += 1;
+                }
+                let mut restored_tail = Vec::with_capacity(backend.queue.len() - start_index);
+                for item in &backend.ordered_queue {
+                    if let Some(count) = prefix_counts.get_mut(&item.queue_item.id) {
+                        if *count > 0 {
+                            *count -= 1;
+                            continue;
+                        }
+                    }
+                    restored_tail.push(item.clone());
+                }
+                if restored_tail.len() == backend.queue.len() - start_index {
+                    backend.queue[start_index..].clone_from_slice(&restored_tail);
+                }
+                if let Some(stale) = backend.prewarmed.take() {
+                    std::thread::spawn(move || drop(stale));
+                }
             }
         }
 
@@ -564,7 +586,7 @@ impl PlaybackService {
     }
 
     pub async fn pause(&self) -> PlaybackSnapshot {
-        {
+        let had_active = {
             let backend = self.backend.lock().expect("playback backend poisoned");
             if let Some(active) = backend.active.as_ref() {
                 active.pause();
@@ -575,12 +597,17 @@ impl PlaybackService {
                     active.audio_spec().as_deref(),
                     false,
                 );
+                true
+            } else {
+                false
             }
-        }
+        };
 
         let mut state = self.state.write().await;
         self.refresh_state(&mut state);
-        state.status = PlaybackStatus::Paused;
+        if had_active {
+            state.status = PlaybackStatus::Paused;
+        }
         state.clone()
     }
 
@@ -650,10 +677,24 @@ impl PlaybackService {
         #[cfg(target_os = "android")]
         exclusive_android::stop_playback_service();
 
-        let mut state = self.state.blocking_write();
-        self.refresh_state(&mut state);
-        state.status = PlaybackStatus::Stopped;
-        state.position_ms = 0;
+        if let Ok(mut state) = self.state.try_write() {
+            self.refresh_state(&mut state);
+            state.status = PlaybackStatus::Stopped;
+            state.position_ms = 0;
+        } else if tokio::runtime::Handle::try_current().is_err() {
+            let mut state = self.state.blocking_write();
+            self.refresh_state(&mut state);
+            state.status = PlaybackStatus::Stopped;
+            state.position_ms = 0;
+        } else {
+            let service = self.clone();
+            tokio::spawn(async move {
+                let mut state = service.state.write().await;
+                service.refresh_state(&mut state);
+                state.status = PlaybackStatus::Stopped;
+                state.position_ms = 0;
+            });
+        }
     }
 
     fn refresh_state(&self, state: &mut PlaybackSnapshot) {
@@ -931,7 +972,7 @@ fn start_request(
         })?;
 
     let player = Player::connect_new(
-        &backend
+        backend
             .shared_output
             .as_ref()
             .expect("shared output created")
@@ -1025,7 +1066,11 @@ fn find_local_cached_file(track_id: &str) -> Option<String> {
         .join("Aria")
         .join("remote_cache");
 
-    if !base_cache.exists() {
+    find_cached_file_in_dir(&base_cache, track_id)
+}
+
+fn find_cached_file_in_dir(cache_dir: &std::path::Path, track_id: &str) -> Option<String> {
+    if !cache_dir.exists() {
         return None;
     }
 
@@ -1042,15 +1087,16 @@ fn find_local_cached_file(track_id: &str) -> Option<String> {
     let trimmed = clean_track_id.trim_matches('_');
     let effective = if trimmed.is_empty() { "track" } else { trimmed };
 
-    if let Ok(entries) = std::fs::read_dir(&base_cache) {
+    if let Ok(entries) = std::fs::read_dir(cache_dir) {
         for entry in entries.flatten() {
             let file_name = entry.file_name();
             let name_str = file_name.to_string_lossy();
-            if name_str.starts_with(effective) && !name_str.starts_with(".tmp") {
-                let p = entry.path();
-                if p.is_file() {
-                    return Some(p.to_string_lossy().to_string());
-                }
+            if name_str.starts_with(".tmp") || name_str.contains(".tmp_") {
+                continue;
+            }
+            let p = entry.path();
+            if p.file_stem().and_then(|s| s.to_str()) == Some(effective) && p.is_file() {
+                return Some(p.to_string_lossy().to_string());
             }
         }
     }
@@ -1100,6 +1146,9 @@ fn maybe_prewarm_next_track(backend: &mut PlaybackBackend) {
             return;
         }
     }
+
+    #[cfg(not(target_os = "android"))]
+    let _ = next_request;
 
     #[cfg(target_os = "android")]
     {
@@ -1518,9 +1567,7 @@ fn output_device_snapshot(
     #[cfg(target_os = "android")]
     {
         if !is_bluetooth {
-            if exclusive_android::has_bluetooth_output() {
-                is_bluetooth = true;
-            } else if let Ok(id_int) = id.parse::<i32>() {
+            if let Ok(id_int) = id.parse::<i32>() {
                 if exclusive_android::is_bluetooth_device_id(id_int) {
                     is_bluetooth = true;
                 }
@@ -1531,8 +1578,8 @@ fn output_device_snapshot(
     let exclusive_capable = is_exclusive_capable_device(&id, is_usb, is_bluetooth);
 
     Ok(OutputDeviceSnapshot {
-        is_default: default_device_id.as_deref() == Some(&id),
-        id: id.clone(),
+        is_default: default_device_id == Some(id.as_str()),
+        id,
         name: preferred_output_device_name(&description),
         backend: output_backend_label(exclusive_mode, is_usb, is_bluetooth),
         exclusive_capable,
@@ -1886,5 +1933,71 @@ mod tests {
             .interface_type(cpal::InterfaceType::Bluetooth)
             .build();
         assert!(!is_bluetooth_device_description(&desc_hf));
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_inside_tokio_runtime_does_not_panic() {
+        let service = PlaybackService::new();
+        service.shutdown();
+        // Calling shutdown multiple times (e.g., CloseRequested + Exit) must also remain safe.
+        service.shutdown();
+        let snapshot = service.snapshot().await;
+        assert_eq!(snapshot.status, PlaybackStatus::Stopped);
+        assert_eq!(snapshot.position_ms, 0);
+    }
+
+    #[test]
+    fn test_find_cached_file_ignores_tmp_suffix_and_prefix_collisions() {
+        let dir = std::env::temp_dir().join(format!(
+            "aria_playback_cache_match_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("trk_1.flac.tmp_1234_1"), b"partial").unwrap();
+        std::fs::write(dir.join("trk_10.flac"), b"other track").unwrap();
+
+        assert_eq!(find_cached_file_in_dir(&dir, "trk_1"), None);
+
+        std::fs::write(dir.join("trk_1.flac"), b"complete").unwrap();
+        let matched = find_cached_file_in_dir(&dir, "trk_1").expect("should match exact stem");
+        assert!(matched.ends_with("trk_1.flac"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_pause_when_stopped_stays_stopped() {
+        let service = PlaybackService::new();
+        let snapshot = service.pause().await;
+        assert_eq!(snapshot.status, PlaybackStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_restore_queue_order_does_not_duplicate_played_tracks() {
+        let service = PlaybackService::new();
+        let make_req = |id: &str| PlayTrackRequest {
+            path: format!("/tmp/{id}.flac"),
+            queue_item: aria_domain::QueueItem {
+                id: id.into(),
+                title: id.into(),
+                subtitle: String::new(),
+                duration_ms: 1_000,
+            },
+        };
+        let ordered = vec![make_req("t1"), make_req("t2"), make_req("t3"), make_req("t4")];
+        {
+            let mut backend = service.backend.lock().unwrap();
+            backend.ordered_queue = ordered.clone();
+            // Simulate shuffled queue where t3 was played first (index 0) and t1 is current (index 1)
+            backend.queue = vec![make_req("t3"), make_req("t1"), make_req("t4"), make_req("t2")];
+            backend.current_queue_index = Some(1);
+        }
+
+        let snapshot = service.restore_queue_order().await;
+        let ids: Vec<&str> = snapshot.queue.iter().map(|q| q.id.as_str()).collect();
+        // Prefix [t3, t1] stays intact; remaining tracks [t2, t4] restored in original order without duplicates
+        assert_eq!(ids, vec!["t3", "t1", "t2", "t4"]);
     }
 }

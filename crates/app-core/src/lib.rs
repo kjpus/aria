@@ -1,3 +1,13 @@
+//! Top-level orchestration layer (`AppCore`) coordinating Aria's library,
+//! playback, playlist, remote-storage, SQLite persistence, and Android Auto
+//! services.
+//!
+//! # Threading & Security Invariants
+//! - `AppCore::shutdown` is idempotent and safe to invoke from synchronous
+//!   Tauri exit hooks.
+//! - Remote credentials in `RemoteTarget.config_json` are redacted via
+//!   `remote_secrets` before crossing IPC boundaries.
+
 use aria_domain::{
     AppBootstrap, AppEvent, CatalogRule, FieldExportRequest, LibraryEvent, LibraryFieldMapping,
     LibrarySnapshot, OutputDeviceSnapshot, PlayTrackRequest, PlaybackEvent, PlaybackPreferences,
@@ -50,6 +60,19 @@ pub enum AppCoreError {
 
 pub mod automotive;
 pub use automotive::{AutoItem, AutoNowPlaying};
+mod playlist_import;
+mod remote_secrets;
+
+pub use playlist_import::{fold_for_matching, get_system_default_codepage, PlaylistTrackMatcher};
+#[cfg(test)]
+use playlist_import::normalize_for_comparison;
+use playlist_import::{
+    decode_with_codepage, parse_playlist_content, resolve_playlist_codepage,
+    sanitize_playlist_filename,
+};
+use remote_secrets::{
+    merge_preserved_remote_secrets, redact_remote_target_for_ui, track_belongs_to_album_folder,
+};
 
 static GLOBAL_PENDING_GDRIVE_AUTH: Mutex<Option<PendingAuthFlow>> = Mutex::const_new(None);
 static GLOBAL_LAST_COMPLETED_GDRIVE_TARGET: Mutex<Option<RemoteTarget>> = Mutex::const_new(None);
@@ -137,13 +160,31 @@ impl AppCore {
     }
 
     pub async fn bootstrap(&self) -> AppBootstrap {
+        let remote_targets = self
+            .database
+            .load_remote_targets()
+            .unwrap_or_default()
+            .into_iter()
+            .map(redact_remote_target_for_ui)
+            .collect();
         AppBootstrap {
             library: self.library.snapshot().await,
             playback: self.playback.snapshot().await,
             playlists: self.playlists.snapshot().await,
             settings: self.settings.snapshot().await,
-            remote_targets: self.database.load_remote_targets().unwrap_or_default(),
+            remote_targets,
         }
+    }
+
+    pub fn library_roots_now(&self) -> Vec<aria_domain::LibraryRoot> {
+        self.library.snapshot_now().roots
+    }
+
+    pub fn artwork_cache_dirs(&self) -> Vec<std::path::PathBuf> {
+        vec![
+            aria_library::album_art_cache_root(),
+            self.cache_manager.cache_dir().join("artwork"),
+        ]
     }
 
     pub fn shutdown(&self) {
@@ -300,9 +341,10 @@ impl AppCore {
             .map_err(|err| AppCoreError::Import(format!("failed to read playlist file: {err}")))?;
 
         let system_cp = get_system_default_codepage();
-        let selected_cp = codepage.unwrap_or(system_cp);
+        let (selected_cp, decode_bytes) =
+            resolve_playlist_codepage(&extension, &bytes, codepage, system_cp);
 
-        let content = decode_with_codepage(&bytes, selected_cp)
+        let content = decode_with_codepage(decode_bytes, selected_cp)
             .map_err(|err| AppCoreError::Import(format!("failed to decode playlist: {err}")))?;
 
         let raw_tracks = parse_playlist_content(&content, &extension);
@@ -462,13 +504,9 @@ impl AppCore {
 
     pub async fn play(&self) -> Result<PlaybackSnapshot, AppCoreError> {
         let session = self.playback.persisted_session();
-        let target_idx = session.current_queue_index.or_else(|| {
-            if !session.queue.is_empty() {
-                Some(0)
-            } else {
-                None
-            }
-        });
+        let target_idx = session
+            .current_queue_index
+            .or((!session.queue.is_empty()).then_some(0));
         if let Some(idx) = target_idx {
             if let Some(mut req) = session.queue.get(idx).cloned() {
                 let window: Vec<String> = session
@@ -525,9 +563,33 @@ impl AppCore {
                 .take(n)
                 .map(|r| r.queue_item.id.clone())
                 .collect();
-            if let Err(err) = self.resolve_remote_track_if_needed(&mut requests[0], &active_window).await {
-                eprintln!("[app-core] First track of queue is unavailable ({err}); skipping ahead");
+
+            // Resolve the first playable track; skip leading unavailable remote tracks instead of passing remote:// to File::open
+            let mut first_playable_idx: Option<usize> = None;
+            let mut last_resolve_err: Option<AppCoreError> = None;
+            for (idx, req) in requests.iter_mut().enumerate() {
+                match self.resolve_remote_track_if_needed(req, &active_window).await {
+                    Ok(_) => {
+                        first_playable_idx = Some(idx);
+                        break;
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "[app-core] Track #{idx} of queue is unavailable ({err}); skipping ahead"
+                        );
+                        last_resolve_err = Some(err);
+                    }
+                }
             }
+
+            if let Some(playable_idx) = first_playable_idx {
+                if playable_idx > 0 {
+                    requests.drain(0..playable_idx);
+                }
+            } else if let Some(err) = last_resolve_err {
+                return Err(err);
+            }
+
             // Pre-resolve upcoming tracks in active window that are already cached locally
             for req in requests.iter_mut().take(n) {
                 if req.path.starts_with("remote://") {
@@ -548,10 +610,14 @@ impl AppCore {
     }
 
     pub async fn previous_track(&self) -> Result<PlaybackSnapshot, AppCoreError> {
-        let session = self.playback.persisted_session();
-        if let Some(idx) = session.current_queue_index {
-            if idx > 0 {
-                return self.play_queue_index(idx - 1).await;
+        let current_snapshot = self.playback.snapshot().await;
+        // Respect standard 3-second restart-current-track behavior before skipping back
+        if current_snapshot.position_ms < 3_000 {
+            let session = self.playback.persisted_session();
+            if let Some(idx) = session.current_queue_index {
+                if idx > 0 {
+                    return self.play_queue_index(idx - 1).await;
+                }
             }
         }
         let snapshot = self.playback.previous_track().await?;
@@ -1262,7 +1328,7 @@ impl AppCore {
             .stack_size(2 * 1024 * 1024)
             .spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
+                    .enable_all()
                     .build()
                     .expect("failed to create playback publisher runtime");
 
@@ -1467,14 +1533,28 @@ impl AppCore {
     }
 
     pub fn get_remote_targets(&self) -> Result<Vec<RemoteTarget>, AppCoreError> {
-        Ok(self.database.load_remote_targets()?)
+        Ok(self
+            .database
+            .load_remote_targets()?
+            .into_iter()
+            .map(redact_remote_target_for_ui)
+            .collect())
     }
 
-    pub fn save_remote_target(&self, target: RemoteTarget) -> Result<Vec<RemoteTarget>, AppCoreError> {
+    pub fn save_remote_target(&self, mut target: RemoteTarget) -> Result<Vec<RemoteTarget>, AppCoreError> {
+        let existing_targets = self.database.load_remote_targets()?;
+        let existing = existing_targets.iter().find(|t| t.id == target.id);
+        merge_preserved_remote_secrets(&mut target, existing);
+
         let is_enabled = target.is_enabled;
         let target_id = target.id.clone();
         self.database.save_remote_target(&target)?;
-        let targets = self.database.load_remote_targets()?;
+        let targets: Vec<RemoteTarget> = self
+            .database
+            .load_remote_targets()?
+            .into_iter()
+            .map(redact_remote_target_for_ui)
+            .collect();
         let _ = self.events.send(AppEvent::Remote(RemoteEvent::TargetsChanged(targets.clone())));
         if is_enabled {
             let core = self.clone();
@@ -1502,7 +1582,12 @@ impl AppCore {
         self.database.delete_remote_target(target_id)?;
         let updated_snapshot = self.library.remove_remote_tracks_for_target(target_id).await;
         let _ = self.events.send(AppEvent::Library(LibraryEvent::SnapshotChanged(updated_snapshot)));
-        let targets = self.database.load_remote_targets()?;
+        let targets: Vec<RemoteTarget> = self
+            .database
+            .load_remote_targets()?
+            .into_iter()
+            .map(redact_remote_target_for_ui)
+            .collect();
         let _ = self.events.send(AppEvent::Remote(RemoteEvent::TargetsChanged(targets.clone())));
         Ok(targets)
     }
@@ -1667,12 +1752,12 @@ impl AppCore {
                         t.backend_type == RemoteBackendType::GoogleDrive
                             && (t.name == target_name || target_name.is_empty())
                     }) {
-                        return Ok(existing);
+                        return Ok(redact_remote_target_for_ui(existing));
                     }
                 }
                 let last = GLOBAL_LAST_COMPLETED_GDRIVE_TARGET.lock().await;
                 if let Some(ref target) = *last {
-                    return Ok(target.clone());
+                    return Ok(redact_remote_target_for_ui(target.clone()));
                 }
                 return Err(AppCoreError::Remote("No pending Google Drive auth flow".into()));
             }
@@ -1709,7 +1794,7 @@ impl AppCore {
         let mut last = GLOBAL_LAST_COMPLETED_GDRIVE_TARGET.lock().await;
         *last = Some(target.clone());
 
-        Ok(target)
+        Ok(redact_remote_target_for_ui(target))
     }
 
     pub async fn upload_album_to_target(
@@ -2142,15 +2227,41 @@ impl AppCore {
             .ok_or_else(|| AppCoreError::Remote(format!("Target '{target_id}' not found")))?;
 
         let synced_items = self.database.load_remote_synced_items_for_target(target_id)?;
-        if let Some(album_item) = synced_items.iter().find(|i| i.item_id == album_id && i.item_type == "album") {
-            let backend = create_backend_for_target(&target)?;
-            let _ = backend.delete_directory(&album_item.remote_path).await;
+        let album_remote_path = synced_items
+            .iter()
+            .find(|i| i.item_id == album_id && i.item_type == "album")
+            .map(|i| i.remote_path.clone());
+
+        let backend = create_backend_for_target(&target)?;
+        if let Some(ref remote_path) = album_remote_path {
+            let _ = backend.delete_directory(remote_path).await;
+        }
+
+        // Update aria-library-index.json so the deleted album does not reappear on next sync
+        if let Ok(bytes) = backend.read_bytes("aria-library-index.json").await {
+            let json = String::from_utf8_lossy(&bytes);
+            if let Ok(mut index) = aria_library::manifest::deserialize_master_index(&json) {
+                let before_len = index.albums.len();
+                index.albums.retain(|a| a.album_id != album_id);
+                if index.albums.len() != before_len {
+                    index.updated_at = chrono::Utc::now().to_rfc3339();
+                    if let Ok(serialized) = aria_library::manifest::serialize_master_index(&index) {
+                        let _ = backend
+                            .write_bytes("aria-library-index.json", serialized.as_bytes())
+                            .await;
+                    }
+                }
+            }
         }
 
         self.database.delete_remote_synced_item(album_id, target_id)?;
-        for item in synced_items {
-            if item.item_type == "track" {
-                let _ = self.database.delete_remote_synced_item(&item.item_id, target_id);
+        if let Some(ref album_folder) = album_remote_path {
+            for item in synced_items {
+                if item.item_type == "track"
+                    && track_belongs_to_album_folder(&item.remote_path, album_folder)
+                {
+                    let _ = self.database.delete_remote_synced_item(&item.item_id, target_id);
+                }
             }
         }
 
@@ -2346,8 +2457,8 @@ impl AppCore {
                         .and_then(|a| a.first())
                         .map(|s| s.as_str())
                         .unwrap_or(&pt.file_name);
-                    let folder = derive_album_relative_path(&[pt.clone()], &roots);
-                    if let Ok(manifest) = build_album_manifest_with_path(alb_title, &[pt.clone()], folder.clone(), None, false) {
+                    let folder = derive_album_relative_path(std::slice::from_ref(pt), &roots);
+                    if let Ok(manifest) = build_album_manifest_with_path(alb_title, std::slice::from_ref(pt), folder.clone(), None, false) {
                         let rel_folder = folder.unwrap_or_else(|| derive_systematic_folder_name(&manifest));
                         let m_track = manifest.tracks.first();
                         let rel_name = m_track.map(|m| m.relative_file_name.as_str()).unwrap_or(&pt.file_name);
@@ -2743,327 +2854,6 @@ impl AppCore {
     }
 }
 
-fn sanitize_playlist_filename(name: &str) -> String {
-    let cleaned = name
-        .chars()
-        .map(|character| match character {
-            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
-            _ => character,
-        })
-        .collect::<String>()
-        .trim()
-        .trim_matches('.')
-        .to_string();
-
-    if cleaned.is_empty() {
-        "playlist".into()
-    } else {
-        cleaned
-    }
-}
-
-fn clean_path(path: &std::path::Path) -> std::path::PathBuf {
-    let mut result = std::path::PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                result.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => {
-                result.push(other.as_os_str());
-            }
-        }
-    }
-    result
-}
-
-fn normalize_for_comparison(path: &std::path::Path) -> String {
-    let cleaned = clean_path(path);
-    cleaned.to_string_lossy().replace('\\', "/").to_lowercase()
-}
-
-pub fn fold_for_matching(s: &str) -> String {
-    // Normalize well-known visual homoglyphs before deunicoding:
-    // Greek beta '\u{03b2}' / '\u{03d0}' is frequently typed or CP437-converted in place of German sharp s 'ß' (U+00DF).
-    let homoglyphs_normalized = s
-        .replace('\u{03b2}', "ss")
-        .replace('\u{03d0}', "ss")
-        .replace('ß', "ss");
-    deunicode::deunicode(&homoglyphs_normalized)
-}
-
-fn extract_track_number_prefix(filename: &str) -> Option<u32> {
-    let trimmed = filename.trim_start();
-    let digits: String = trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if !digits.is_empty() {
-        let rest = &trimmed[digits.len()..];
-        if rest.starts_with('.') || rest.starts_with('-') || rest.starts_with(' ') || rest.starts_with('_') {
-            return digits.parse::<u32>().ok();
-        }
-    }
-    None
-}
-
-pub struct PlaylistTrackMatcher<'a> {
-    exact_path: std::collections::HashMap<String, &'a str>,
-    folded_path: std::collections::HashMap<String, Vec<&'a str>>,
-    by_filename: std::collections::HashMap<String, Vec<&'a ScannedTrack>>,
-    by_folded_filename: std::collections::HashMap<String, Vec<&'a ScannedTrack>>,
-    by_parent_folder: std::collections::HashMap<String, Vec<&'a ScannedTrack>>,
-}
-
-impl<'a> PlaylistTrackMatcher<'a> {
-    pub fn new(tracks: &'a [ScannedTrack]) -> Self {
-        let mut exact_path = std::collections::HashMap::with_capacity(tracks.len());
-        let mut folded_path: std::collections::HashMap<String, Vec<&'a str>> =
-            std::collections::HashMap::with_capacity(tracks.len());
-        let mut by_filename: std::collections::HashMap<String, Vec<&'a ScannedTrack>> =
-            std::collections::HashMap::with_capacity(tracks.len());
-        let mut by_folded_filename: std::collections::HashMap<String, Vec<&'a ScannedTrack>> =
-            std::collections::HashMap::with_capacity(tracks.len());
-        let mut by_parent_folder: std::collections::HashMap<String, Vec<&'a ScannedTrack>> =
-            std::collections::HashMap::new();
-
-        for track in tracks {
-            let norm = normalize_for_comparison(std::path::Path::new(&track.path));
-            exact_path.insert(norm.clone(), track.id.as_str());
-
-            let folded = fold_for_matching(&norm);
-            folded_path.entry(folded).or_default().push(track.id.as_str());
-
-            let track_p = std::path::Path::new(&track.path);
-            if let Some(file_name) = track_p.file_name().and_then(|f| f.to_str()) {
-                let fn_lower = file_name.to_lowercase();
-                by_filename.entry(fn_lower.clone()).or_default().push(track);
-
-                let fn_folded = fold_for_matching(&fn_lower);
-                by_folded_filename.entry(fn_folded).or_default().push(track);
-            }
-
-            if let Some(parent_name) = track_p.parent().and_then(|p| p.file_name()).and_then(|f| f.to_str()) {
-                let folder_folded = fold_for_matching(parent_name).to_lowercase();
-                by_parent_folder.entry(folder_folded).or_default().push(track);
-            }
-        }
-
-        Self {
-            exact_path,
-            folded_path,
-            by_filename,
-            by_folded_filename,
-            by_parent_folder,
-        }
-    }
-
-    pub fn find_match(&self, resolved: &std::path::Path) -> Option<String> {
-        let norm = normalize_for_comparison(resolved);
-
-        // Tier 1: Exact normalized path match
-        if let Some(id) = self.exact_path.get(&norm) {
-            return Some((*id).to_string());
-        }
-
-        // Tier 2: Diacritic / accent / homoglyph-folded path match
-        let folded = fold_for_matching(&norm);
-        if let Some(ids) = self.folded_path.get(&folded) {
-            if ids.len() == 1 {
-                return Some(ids[0].to_string());
-            }
-        }
-
-        // Tier 3: Filename + Parent directory / Unique Filename match
-        if let Some(file_name) = resolved.file_name().and_then(|f| f.to_str()) {
-            let fn_lower = file_name.to_lowercase();
-            let fn_folded = fold_for_matching(&fn_lower);
-            let candidates = self
-                .by_filename
-                .get(&fn_lower)
-                .or_else(|| self.by_folded_filename.get(&fn_folded));
-
-            if let Some(candidates) = candidates {
-                if candidates.len() == 1 {
-                    return Some(candidates[0].id.clone());
-                }
-
-                // If multiple candidate tracks share this filename, match on parent folder name
-                if let Some(playlist_parent) =
-                    resolved.parent().and_then(|p| p.file_name()).and_then(|f| f.to_str())
-                {
-                    let folded_parent = fold_for_matching(playlist_parent).to_lowercase();
-                    let parent_matches: Vec<&ScannedTrack> = candidates
-                        .iter()
-                        .copied()
-                        .filter(|c| {
-                            let track_path = std::path::Path::new(&c.path);
-                            track_path
-                                .parent()
-                                .and_then(|p| p.file_name())
-                                .and_then(|f| f.to_str())
-                                .map(|name| fold_for_matching(name).to_lowercase() == folded_parent)
-                                .unwrap_or(false)
-                        })
-                        .collect();
-
-                    if parent_matches.len() == 1 {
-                        return Some(parent_matches[0].id.clone());
-                    }
-                }
-            }
-        }
-
-        // Tier 4: Parent Folder + Track Number Prefix Match
-        // Handles cases where track titles in filenames had punctuation or minor differences
-        if let Some(playlist_parent) =
-            resolved.parent().and_then(|p| p.file_name()).and_then(|f| f.to_str())
-        {
-            let folded_parent = fold_for_matching(playlist_parent).to_lowercase();
-            if let Some(folder_tracks) = self.by_parent_folder.get(&folded_parent) {
-                if let Some(file_name) = resolved.file_name().and_then(|f| f.to_str()) {
-                    if let Some(target_track_num) = extract_track_number_prefix(file_name) {
-                        let num_matches: Vec<&ScannedTrack> = folder_tracks
-                            .iter()
-                            .copied()
-                            .filter(|c| {
-                                std::path::Path::new(&c.path)
-                                    .file_name()
-                                    .and_then(|f| f.to_str())
-                                    .and_then(extract_track_number_prefix)
-                                    == Some(target_track_num)
-                            })
-                            .collect();
-
-                        if num_matches.len() == 1 {
-                            return Some(num_matches[0].id.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        None
-    }
-}
-
-#[cfg(target_os = "windows")]
-extern "system" {
-    fn GetACP() -> u32;
-    fn MultiByteToWideChar(
-        CodePage: u32,
-        dwFlags: u32,
-        lpMultiByteStr: *const u8,
-        cbMultiByte: i32,
-        lpWideCharStr: *mut u16,
-        cchWideChar: i32,
-    ) -> i32;
-}
-
-#[cfg(target_os = "windows")]
-pub fn get_system_default_codepage() -> u32 {
-    unsafe { GetACP() }
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn get_system_default_codepage() -> u32 {
-    65001 // UTF-8 fallback
-}
-
-#[cfg(target_os = "windows")]
-fn decode_with_codepage(bytes: &[u8], codepage: u32) -> Result<String, String> {
-    if bytes.is_empty() {
-        return Ok(String::new());
-    }
-
-    let input_len = bytes.len() as i32;
-    unsafe {
-        let required_len = MultiByteToWideChar(
-            codepage,
-            0,
-            bytes.as_ptr(),
-            input_len,
-            std::ptr::null_mut(),
-            0,
-        );
-
-        if required_len <= 0 {
-            return Err("Failed to convert string (length calculation)".to_string());
-        }
-
-        let mut buf = vec![0u16; required_len as usize];
-        let result = MultiByteToWideChar(
-            codepage,
-            0,
-            bytes.as_ptr(),
-            input_len,
-            buf.as_mut_ptr(),
-            required_len,
-        );
-
-        if result <= 0 {
-            return Err("Failed to convert string".to_string());
-        }
-
-        Ok(String::from_utf16_lossy(&buf))
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn decode_with_codepage(bytes: &[u8], _codepage: u32) -> Result<String, String> {
-    String::from_utf8(bytes.to_vec()).map_err(|err| err.to_string())
-}
-
-fn parse_playlist_content(content: &str, extension: &str) -> Vec<(String, Option<String>)> {
-    let mut raw_paths = Vec::new();
-    if extension == "pls" {
-        let mut files = std::collections::BTreeMap::new();
-        let mut titles = std::collections::BTreeMap::new();
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if let Some(eq_idx) = trimmed.find('=') {
-                let key = trimmed[..eq_idx].trim().to_ascii_lowercase();
-                let val = trimmed[eq_idx + 1..].trim().to_string();
-                if !val.is_empty() {
-                    if key.starts_with("file") {
-                        if let Ok(num) = key[4..].parse::<u32>() {
-                            files.insert(num, val);
-                        }
-                    } else if key.starts_with("title") {
-                        if let Ok(num) = key[5..].parse::<u32>() {
-                            titles.insert(num, val);
-                        }
-                    }
-                }
-            }
-        }
-        for (num, file_path) in files {
-            let title = titles.get(&num).cloned();
-            raw_paths.push((file_path, title));
-        }
-    } else {
-        // Default to M3U / M3U8 parsing
-        let mut last_extinf = None;
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if trimmed.starts_with("#EXTINF:") {
-                if let Some(comma_idx) = trimmed.find(',') {
-                    last_extinf = Some(trimmed[comma_idx + 1..].trim().to_string());
-                }
-            } else if trimmed.starts_with('#') {
-                continue;
-            } else {
-                raw_paths.push((trimmed.to_string(), last_extinf.take()));
-            }
-        }
-    }
-    raw_paths
-}
-
 pub fn group_playlist_tracks_by_album(
     playlist_tracks: &[ScannedTrack],
     all_library_tracks: &[ScannedTrack],
@@ -3221,20 +3011,57 @@ Version=2
     }
 
     #[test]
+    fn test_m3u8_and_utf8_bom_auto_detection() {
+        // .m3u8 defaults to UTF-8 (65001) even when system default is 1252 and codepage is None or Some(0)
+        let utf8_bytes = "#EXTM3U\n04. Pathe\u{0301}tique.flac\n".as_bytes();
+        let (cp_none, slice_none) = resolve_playlist_codepage("m3u8", utf8_bytes, None, 1252);
+        assert_eq!(cp_none, 65001);
+        assert_eq!(slice_none, utf8_bytes);
+
+        let (cp_zero, _) = resolve_playlist_codepage("m3u8", utf8_bytes, Some(0), 1252);
+        assert_eq!(cp_zero, 65001);
+
+        // UTF-8 BOM in .m3u or .m3u8 selects 65001 and strips the 3-byte BOM
+        let mut bom_bytes = b"\xEF\xBB\xBF".to_vec();
+        bom_bytes.extend_from_slice(utf8_bytes);
+        let (cp_bom, slice_bom) = resolve_playlist_codepage("m3u", &bom_bytes, None, 1252);
+        assert_eq!(cp_bom, 65001);
+        assert_eq!(slice_bom, utf8_bytes);
+
+        // Explicit user codepage overrides auto-detection
+        let (cp_override, _) = resolve_playlist_codepage("m3u8", utf8_bytes, Some(1252), 1252);
+        assert_eq!(cp_override, 1252);
+
+        // parse_playlist_content strips leading U+FEFF BOM if present in string
+        let content_with_bom = "\u{FEFF}#EXTM3U\n#EXTINF:120,Title\n04. Track.flac\n";
+        let tracks = parse_playlist_content(content_with_bom, "m3u8");
+        assert_eq!(
+            tracks,
+            vec![("04. Track.flac".to_string(), Some("Title".to_string()))]
+        );
+    }
+
+    #[test]
     fn test_group_playlist_tracks_by_album_playlist_only() {
-        let mut t1 = ScannedTrack::default();
-        t1.id = "t1".into();
-        t1.file_name = "01.flac".into();
+        let mut t1 = ScannedTrack {
+            id: "t1".into(),
+            file_name: "01.flac".into(),
+            ..Default::default()
+        };
         t1.mapped_fields.insert("album".into(), vec!["Album A".into()]);
 
-        let mut t2 = ScannedTrack::default();
-        t2.id = "t2".into();
-        t2.file_name = "02.flac".into();
+        let mut t2 = ScannedTrack {
+            id: "t2".into(),
+            file_name: "02.flac".into(),
+            ..Default::default()
+        };
         t2.mapped_fields.insert("album".into(), vec!["Album B".into()]);
 
-        let mut t3 = ScannedTrack::default();
-        t3.id = "t3".into();
-        t3.file_name = "03.flac".into();
+        let mut t3 = ScannedTrack {
+            id: "t3".into(),
+            file_name: "03.flac".into(),
+            ..Default::default()
+        };
         t3.mapped_fields.insert("album".into(), vec!["Album A".into()]);
 
         let playlist_tracks = vec![t1.clone(), t2.clone(), t3.clone()];
@@ -3254,19 +3081,25 @@ Version=2
 
     #[test]
     fn test_group_playlist_tracks_by_album_full_albums() {
-        let mut t1 = ScannedTrack::default();
-        t1.id = "t1".into();
-        t1.file_name = "01.flac".into();
+        let mut t1 = ScannedTrack {
+            id: "t1".into(),
+            file_name: "01.flac".into(),
+            ..Default::default()
+        };
         t1.mapped_fields.insert("album".into(), vec!["Album A".into()]);
 
-        let mut t2 = ScannedTrack::default();
-        t2.id = "t2".into();
-        t2.file_name = "02.flac".into();
+        let mut t2 = ScannedTrack {
+            id: "t2".into(),
+            file_name: "02.flac".into(),
+            ..Default::default()
+        };
         t2.mapped_fields.insert("album".into(), vec!["Album A".into()]);
 
-        let mut t3 = ScannedTrack::default();
-        t3.id = "t3".into();
-        t3.file_name = "03.flac".into();
+        let mut t3 = ScannedTrack {
+            id: "t3".into(),
+            file_name: "03.flac".into(),
+            ..Default::default()
+        };
         t3.mapped_fields.insert("album".into(), vec!["Album A".into()]);
 
         // Playlist only has t1
@@ -3281,10 +3114,12 @@ Version=2
 
     #[test]
     fn test_playlist_track_matcher_diacritics() {
-        let mut track = ScannedTrack::default();
-        track.id = "dvorak_track_1".into();
-        track.path = "G:\\Rosettes\\Penguin Rosettes - 1\\Domus - Dvořák Piano Quartets Nos. 1 & 2 (1988) [16B-44.1kHz]\\01. Piano Quartet No. 1 in D Major, Op. 23, B. 53 I. Allegro moderato.flac".into();
-        track.file_name = "01. Piano Quartet No. 1 in D Major, Op. 23, B. 53 I. Allegro moderato.flac".into();
+        let track = ScannedTrack {
+            id: "dvorak_track_1".into(),
+            path: "G:\\Rosettes\\Penguin Rosettes - 1\\Domus - Dvořák Piano Quartets Nos. 1 & 2 (1988) [16B-44.1kHz]\\01. Piano Quartet No. 1 in D Major, Op. 23, B. 53 I. Allegro moderato.flac".into(),
+            file_name: "01. Piano Quartet No. 1 in D Major, Op. 23, B. 53 I. Allegro moderato.flac".into(),
+            ..Default::default()
+        };
 
         let library_tracks = vec![track];
         let matcher = PlaylistTrackMatcher::new(&library_tracks);
@@ -3302,15 +3137,19 @@ Version=2
 
     #[test]
     fn test_playlist_track_matcher_parent_folder_or_drive_letter_change() {
-        let mut track = ScannedTrack::default();
-        track.id = "bach_track".into();
-        track.path = "D:\\Classical\\Bach\\Goldberg\\01. Aria.flac".into();
-        track.file_name = "01. Aria.flac".into();
+        let track = ScannedTrack {
+            id: "bach_track".into(),
+            path: "D:\\Classical\\Bach\\Goldberg\\01. Aria.flac".into(),
+            file_name: "01. Aria.flac".into(),
+            ..Default::default()
+        };
 
-        let mut other_track = ScannedTrack::default();
-        other_track.id = "mozart_track".into();
-        other_track.path = "D:\\Classical\\Mozart\\01. Aria.flac".into();
-        other_track.file_name = "01. Aria.flac".into();
+        let other_track = ScannedTrack {
+            id: "mozart_track".into(),
+            path: "D:\\Classical\\Mozart\\01. Aria.flac".into(),
+            file_name: "01. Aria.flac".into(),
+            ..Default::default()
+        };
 
         let library_tracks = vec![track, other_track];
         let matcher = PlaylistTrackMatcher::new(&library_tracks);
@@ -3323,11 +3162,13 @@ Version=2
 
     #[test]
     fn test_playlist_track_matcher_greek_beta_homoglyph() {
-        let mut track = ScannedTrack::default();
-        track.id = "petibon_track_29".into();
-        // On disk/in DB: uses Greek small letter beta '\u{03b2}' in "flieβen"
-        track.path = "G:\\Mozart 50\\Patricia Petibon - Mozart Die Entführung aus dem Serail, K. 384 (1999) [16B-44.1kHz]\\29. Die Entführung aus dem Serail, K. 384, Act 2 Arie. Wenn der Freude Tränen flie\u{03b2}en (Belmonte).flac".into();
-        track.file_name = "29. Die Entführung aus dem Serail, K. 384, Act 2 Arie. Wenn der Freude Tränen flie\u{03b2}en (Belmonte).flac".into();
+        let track = ScannedTrack {
+            id: "petibon_track_29".into(),
+            // On disk/in DB: uses Greek small letter beta '\u{03b2}' in "flieβen"
+            path: "G:\\Mozart 50\\Patricia Petibon - Mozart Die Entführung aus dem Serail, K. 384 (1999) [16B-44.1kHz]\\29. Die Entführung aus dem Serail, K. 384, Act 2 Arie. Wenn der Freude Tränen flie\u{03b2}en (Belmonte).flac".into(),
+            file_name: "29. Die Entführung aus dem Serail, K. 384, Act 2 Arie. Wenn der Freude Tränen flie\u{03b2}en (Belmonte).flac".into(),
+            ..Default::default()
+        };
 
         let library_tracks = vec![track];
         let matcher = PlaylistTrackMatcher::new(&library_tracks);
@@ -3340,10 +3181,12 @@ Version=2
 
     #[test]
     fn test_playlist_track_matcher_track_number_fallback() {
-        let mut track = ScannedTrack::default();
-        track.id = "aria_track_29".into();
-        track.path = "C:\\Music\\Mozart\\Album\\29. Arie. Wenn der Freude Traenen fliessen.flac".into();
-        track.file_name = "29. Arie. Wenn der Freude Traenen fliessen.flac".into();
+        let track = ScannedTrack {
+            id: "aria_track_29".into(),
+            path: "C:\\Music\\Mozart\\Album\\29. Arie. Wenn der Freude Traenen fliessen.flac".into(),
+            file_name: "29. Arie. Wenn der Freude Traenen fliessen.flac".into(),
+            ..Default::default()
+        };
 
         let library_tracks = vec![track];
         let matcher = PlaylistTrackMatcher::new(&library_tracks);
@@ -3355,25 +3198,84 @@ Version=2
     }
 
     #[test]
+    fn test_playlist_track_matcher_spacing_acute_accent_and_nfd() {
+        let sym4 = ScannedTrack {
+            id: "sym4_04".into(),
+            path: "G:\\Tchaikovsky 50\\Pyotr Illitch Tchaïkovski - Tchaikovsky Symphony No.6 'Pathetique', Symphony No.4, Symphony No.3 'Polish' (2017) [24B-96kHz]\\04. Symphony No. 4 in F Minor Op. 36 IV. Finale - Allegro con fuoco.flac".into(),
+            file_name: "04. Symphony No. 4 in F Minor Op. 36 IV. Finale - Allegro con fuoco.flac".into(),
+            ..Default::default()
+        };
+
+        let sym6 = ScannedTrack {
+            id: "sym6_04".into(),
+            // On disk/in DB: NFD combining acute accent '\u{0301}' after 'e'
+            path: "G:\\Tchaikovsky 50\\Pyotr Illitch Tchaïkovski - Tchaikovsky Symphony No.6 'Pathetique', Symphony No.4, Symphony No.3 'Polish' (2017) [24B-96kHz]\\04. Symphony No. 6 in B Minor, \u{2018}Pathe\u{0301}tique\u{2019} Op. 74 I. Adagio.flac".into(),
+            file_name: "04. Symphony No. 6 in B Minor, \u{2018}Pathe\u{0301}tique\u{2019} Op. 74 I. Adagio.flac".into(),
+            ..Default::default()
+        };
+
+        let library_tracks = vec![sym4, sym6];
+        let matcher = PlaylistTrackMatcher::new(&library_tracks);
+
+        // In playlist (CP1252 best-fit): spacing acute accent '\u{00b4}' after 'e'
+        let playlist_path = std::path::Path::new("G:\\Tchaikovsky 50\\Pyotr Illitch Tchaïkovski - Tchaikovsky Symphony No.6 'Pathetique', Symphony No.4, Symphony No.3 'Polish' (2017) [24B-96kHz]\\04. Symphony No. 6 in B Minor, \u{2018}Pathe\u{00b4}tique\u{2019} Op. 74 I. Adagio.flac");
+        let matched = matcher.find_match(playlist_path);
+        assert_eq!(matched.as_deref(), Some("sym6_04"));
+    }
+
+    #[test]
+    fn test_playlist_track_matcher_multiwork_compilation_track_number_disambiguation() {
+        let sym4 = ScannedTrack {
+            id: "sym4_04".into(),
+            path: "G:\\Tchaikovsky 50\\Compilation Album\\04. Symphony No. 4 in F Minor Op. 36 IV. Finale.flac".into(),
+            file_name: "04. Symphony No. 4 in F Minor Op. 36 IV. Finale.flac".into(),
+            ..Default::default()
+        };
+
+        let sym6 = ScannedTrack {
+            id: "sym6_04".into(),
+            path: "G:\\Tchaikovsky 50\\Compilation Album\\04. Symphony No. 6 in B Minor Op. 74 I. Adagio.flac".into(),
+            file_name: "04. Symphony No. 6 in B Minor Op. 74 I. Adagio.flac".into(),
+            ..Default::default()
+        };
+
+        let library_tracks = vec![sym4, sym6];
+        let matcher = PlaylistTrackMatcher::new(&library_tracks);
+
+        // Different punctuation/subtitle so Tiers 1-3 miss, but Tier 4 disambiguates between the two 04 tracks
+        let playlist_path = std::path::Path::new("G:\\Tchaikovsky 50\\Compilation Album\\04. Symphony No. 6 in B Minor, Pathetique, Op. 74 - I. Adagio.flac");
+        let matched = matcher.find_match(playlist_path);
+        assert_eq!(matched.as_deref(), Some("sym6_04"));
+    }
+
+    #[test]
     fn test_group_local_tracks_by_album_ignores_remote_tracks() {
-        let mut t1 = ScannedTrack::default();
-        t1.id = "t1".into();
-        t1.path = "D:\\Music\\Beethoven\\Symphony5\\01.flac".into();
+        let mut t1 = ScannedTrack {
+            id: "t1".into(),
+            path: "D:\\Music\\Beethoven\\Symphony5\\01.flac".into(),
+            ..Default::default()
+        };
         t1.mapped_fields.insert("album".into(), vec!["Symphony No. 5".into()]);
 
-        let mut t2 = ScannedTrack::default();
-        t2.id = "t2".into();
-        t2.path = "D:\\Music\\Beethoven\\Symphony5\\02.flac".into();
+        let mut t2 = ScannedTrack {
+            id: "t2".into(),
+            path: "D:\\Music\\Beethoven\\Symphony5\\02.flac".into(),
+            ..Default::default()
+        };
         t2.mapped_fields.insert("album".into(), vec!["Symphony No. 5".into()]);
 
-        let mut t3_remote = ScannedTrack::default();
-        t3_remote.id = "t3".into();
-        t3_remote.path = "remote://target_1/Mozart/Requiem/01.flac".into();
+        let mut t3_remote = ScannedTrack {
+            id: "t3".into(),
+            path: "remote://target_1/Mozart/Requiem/01.flac".into(),
+            ..Default::default()
+        };
         t3_remote.mapped_fields.insert("album".into(), vec!["Requiem".into()]);
 
-        let mut t4 = ScannedTrack::default();
-        t4.id = "t4".into();
-        t4.path = "D:\\Music\\Bach\\Goldberg\\01.flac".into();
+        let mut t4 = ScannedTrack {
+            id: "t4".into(),
+            path: "D:\\Music\\Bach\\Goldberg\\01.flac".into(),
+            ..Default::default()
+        };
         t4.mapped_fields.insert("album".into(), vec!["Goldberg Variations".into()]);
 
         let groups = group_local_tracks_by_album(&[t1, t2, t3_remote, t4]);
@@ -3387,20 +3289,26 @@ Version=2
     #[test]
     fn test_group_local_tracks_by_album_separates_performances_and_preserves_multidisc() {
         // Multi-disc album: 2 discs in subdirectories
-        let mut t1_disc1 = ScannedTrack::default();
-        t1_disc1.id = "t1_d1".into();
-        t1_disc1.path = "D:\\Music\\Vivaldi - Four Seasons (Antonini)\\Disc 1\\01.flac".into();
+        let mut t1_disc1 = ScannedTrack {
+            id: "t1_d1".into(),
+            path: "D:\\Music\\Vivaldi - Four Seasons (Antonini)\\Disc 1\\01.flac".into(),
+            ..Default::default()
+        };
         t1_disc1.mapped_fields.insert("album".into(), vec!["Vivaldi: The Four Seasons".into()]);
 
-        let mut t1_disc2 = ScannedTrack::default();
-        t1_disc2.id = "t1_d2".into();
-        t1_disc2.path = "D:\\Music\\Vivaldi - Four Seasons (Antonini)\\Disc 2\\01.flac".into();
+        let mut t1_disc2 = ScannedTrack {
+            id: "t1_d2".into(),
+            path: "D:\\Music\\Vivaldi - Four Seasons (Antonini)\\Disc 2\\01.flac".into(),
+            ..Default::default()
+        };
         t1_disc2.mapped_fields.insert("album".into(), vec!["Vivaldi: The Four Seasons".into()]);
 
         // A second, different recording with the identical album title
-        let mut t2_recording = ScannedTrack::default();
-        t2_recording.id = "t2_ozawa".into();
-        t2_recording.path = "D:\\Music\\Vivaldi - Four Seasons (Ozawa)\\01.flac".into();
+        let mut t2_recording = ScannedTrack {
+            id: "t2_ozawa".into(),
+            path: "D:\\Music\\Vivaldi - Four Seasons (Ozawa)\\01.flac".into(),
+            ..Default::default()
+        };
         t2_recording.mapped_fields.insert("album".into(), vec!["Vivaldi: The Four Seasons".into()]);
 
         let groups = group_local_tracks_by_album(&[t1_disc1, t1_disc2, t2_recording]);
@@ -3413,18 +3321,22 @@ Version=2
 
     #[test]
     fn test_album_id_separates_remote_tracks_with_different_performances() {
-        let mut t1 = ScannedTrack::default();
-        t1.id = "t1_remote_antonini".into();
-        t1.path = "remote://target_1/Vivaldi/The Four Seasons (Antonini)/01.flac".into();
+        let mut t1 = ScannedTrack {
+            id: "t1_remote_antonini".into(),
+            path: "remote://target_1/Vivaldi/The Four Seasons (Antonini)/01.flac".into(),
+            ..Default::default()
+        };
         t1.mapped_fields.insert("album".into(), vec!["Vivaldi: The Four Seasons".into()]);
         t1.mapped_fields.insert("album_path".into(), vec!["Vivaldi/The Four Seasons (Antonini)".into()]);
         t1.mapped_fields.insert("conductor".into(), vec!["Giovanni Antonini".into()]);
         t1.mapped_fields.insert("ensemble".into(), vec!["Il Giardino Armonico".into()]);
         t1.mapped_fields.insert("soloist".into(), vec!["Soloist 1".into()]);
 
-        let mut t1_track2 = ScannedTrack::default();
-        t1_track2.id = "t1_remote_antonini_tr2".into();
-        t1_track2.path = "remote://target_1/Vivaldi/The Four Seasons (Antonini)/02.flac".into();
+        let mut t1_track2 = ScannedTrack {
+            id: "t1_remote_antonini_tr2".into(),
+            path: "remote://target_1/Vivaldi/The Four Seasons (Antonini)/02.flac".into(),
+            ..Default::default()
+        };
         t1_track2.mapped_fields.insert("album".into(), vec!["Vivaldi: The Four Seasons".into()]);
         t1_track2.mapped_fields.insert("album_path".into(), vec!["Vivaldi/The Four Seasons (Antonini)".into()]);
         t1_track2.mapped_fields.insert("conductor".into(), vec!["Giovanni Antonini".into()]);
@@ -3438,9 +3350,11 @@ Version=2
             "Tracks with different soloists on the same album must have the same album ID"
         );
 
-        let mut t2 = ScannedTrack::default();
-        t2.id = "t2_remote_ozawa".into();
-        t2.path = "remote://target_1/Vivaldi/The Four Seasons (Ozawa)/01.flac".into();
+        let mut t2 = ScannedTrack {
+            id: "t2_remote_ozawa".into(),
+            path: "remote://target_1/Vivaldi/The Four Seasons (Ozawa)/01.flac".into(),
+            ..Default::default()
+        };
         t2.mapped_fields.insert("album".into(), vec!["Vivaldi: The Four Seasons".into()]);
         t2.mapped_fields.insert("album_path".into(), vec!["Vivaldi/The Four Seasons (Ozawa)".into()]);
         t2.mapped_fields.insert("conductor".into(), vec!["Seiji Ozawa".into()]);
@@ -3453,10 +3367,12 @@ Version=2
 
     #[test]
     fn test_playlist_remote_track_id_matches_album_upload_manifest() {
-        let mut track = ScannedTrack::default();
-        track.id = "local_track_1".into();
-        track.path = "D:\\Music\\Bach\\WTC\\01.flac".into();
-        track.file_name = "01.flac".into();
+        let mut track = ScannedTrack {
+            id: "local_track_1".into(),
+            path: "D:\\Music\\Bach\\WTC\\01.flac".into(),
+            file_name: "01.flac".into(),
+            ..Default::default()
+        };
         track.mapped_fields.insert("album".into(), vec!["Well-Tempered Clavier".into()]);
         track.mapped_fields.insert("title".into(), vec!["Prelude in C Major".into()]);
         track.mapped_fields.insert("track_number".into(), vec!["1".into()]);
@@ -3506,6 +3422,77 @@ Version=2
         assert!(
             synced_track_ids.contains(manifest_track_id),
             "Synced track set must match playlist remote track ID"
+        );
+    }
+
+    #[test]
+    fn test_track_belongs_to_album_folder_enforces_path_boundary() {
+        assert!(track_belongs_to_album_folder(
+            "Beethoven/Sym9/01.flac",
+            "Beethoven/Sym9"
+        ));
+        assert!(track_belongs_to_album_folder(
+            "Beethoven/Sym9/Disc 1/01.flac",
+            "Beethoven/Sym9/"
+        ));
+        assert!(track_belongs_to_album_folder(
+            "Beethoven\\Sym9\\01.flac",
+            "Beethoven/Sym9"
+        ));
+        // Must NOT match sibling folder sharing a prefix
+        assert!(!track_belongs_to_album_folder(
+            "Beethoven/Sym90/01.flac",
+            "Beethoven/Sym9"
+        ));
+        assert!(!track_belongs_to_album_folder(
+            "Mozart/Requiem/01.flac",
+            "Beethoven/Sym9"
+        ));
+        assert!(!track_belongs_to_album_folder("Beethoven/Sym9/01.flac", ""));
+    }
+
+    #[test]
+    fn test_remote_secret_redaction_and_preservation_on_save() {
+        let original = RemoteTarget {
+            id: "t_webdav".into(),
+            name: "NAS".into(),
+            backend_type: RemoteBackendType::WebDav,
+            storage_limit_bytes: Some(10_000_000_000),
+            is_enabled: true,
+            config_json: r#"{"url":"https://nas.local/music","username":"alice","password":"super-secret-password"}"#.into(),
+        };
+
+        let redacted = redact_remote_target_for_ui(original.clone());
+        assert!(!redacted.config_json.contains("super-secret-password"));
+        let parsed: serde_json::Value = serde_json::from_str(&redacted.config_json).unwrap();
+        assert_eq!(parsed.get("password"), None);
+        assert_eq!(parsed.get("hasPassword"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(parsed.get("username"), Some(&serde_json::Value::String("alice".into())));
+
+        // Editing target name/url without re-entering password must preserve the stored secret
+        let mut edited = RemoteTarget {
+            name: "Renamed NAS".into(),
+            config_json: r#"{"url":"https://nas.local/classical","username":"alice","hasPassword":true}"#.into(),
+            ..redacted
+        };
+        merge_preserved_remote_secrets(&mut edited, Some(&original));
+        let merged: serde_json::Value = serde_json::from_str(&edited.config_json).unwrap();
+        assert_eq!(
+            merged.get("password"),
+            Some(&serde_json::Value::String("super-secret-password".into()))
+        );
+        assert_eq!(merged.get("hasPassword"), None);
+
+        // Entering a new password must overwrite the stored secret
+        let mut rotated = RemoteTarget {
+            config_json: r#"{"url":"https://nas.local/classical","username":"alice","password":"new-password"}"#.into(),
+            ..original.clone()
+        };
+        merge_preserved_remote_secrets(&mut rotated, Some(&original));
+        let merged_rotated: serde_json::Value = serde_json::from_str(&rotated.config_json).unwrap();
+        assert_eq!(
+            merged_rotated.get("password"),
+            Some(&serde_json::Value::String("new-password".into()))
         );
     }
 }

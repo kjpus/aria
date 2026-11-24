@@ -50,35 +50,21 @@ struct TokenResponse {
 }
 
 /// Generates a high-entropy cryptographically random PKCE code verifier.
-pub fn generate_pkce_verifier() -> String {
+pub fn generate_pkce_verifier() -> Result<String, RemoteStorageError> {
     let mut bytes = [0u8; 32];
-    if let Err(e) = getrandom::fill(&mut bytes) {
-        tracing::error!("CSPRNG error generating PKCE verifier: {e}");
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let pid = std::process::id();
-        let hash = Sha256::digest(format!("{now}:{pid}:pkce_fallback").as_bytes());
-        bytes.copy_from_slice(&hash);
-    }
-    base64url_encode(&bytes)
+    getrandom::fill(&mut bytes).map_err(|e| {
+        RemoteStorageError::auth_failed(format!("CSPRNG error generating PKCE verifier: {e}"))
+    })?;
+    Ok(base64url_encode(&bytes))
 }
 
 /// Generates a cryptographically random OAuth state token for CSRF protection.
-pub fn generate_oauth_state() -> String {
+pub fn generate_oauth_state() -> Result<String, RemoteStorageError> {
     let mut bytes = [0u8; 32];
-    if let Err(e) = getrandom::fill(&mut bytes) {
-        tracing::error!("CSPRNG error generating OAuth state: {e}");
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let pid = std::process::id();
-        let hash = Sha256::digest(format!("{now}:{pid}:state_fallback").as_bytes());
-        bytes.copy_from_slice(&hash);
-    }
-    base64url_encode(&bytes)
+    getrandom::fill(&mut bytes).map_err(|e| {
+        RemoteStorageError::auth_failed(format!("CSPRNG error generating OAuth state: {e}"))
+    })?;
+    Ok(base64url_encode(&bytes))
 }
 
 /// Generates the S256 code challenge for a given PKCE verifier.
@@ -194,9 +180,9 @@ impl PendingAuthFlow {
         let local_addr = listener.local_addr().map_err(RemoteStorageError::Io)?;
         let redirect_uri = format!("http://127.0.0.1:{}/callback", local_addr.port());
 
-        let verifier = generate_pkce_verifier();
+        let verifier = generate_pkce_verifier()?;
         let challenge = generate_pkce_challenge(&verifier);
-        let state = generate_oauth_state();
+        let state = generate_oauth_state()?;
 
         let mut auth_url = Url::parse(GOOGLE_AUTH_URL)
             .map_err(|e| RemoteStorageError::auth_failed(e.to_string()))?;
@@ -414,7 +400,7 @@ async fn listen_for_callback(
                 let body = "<!DOCTYPE html><html><body>Invalid or missing OAuth state parameter (CSRF detected)</body></html>";
                 let response = format!(
                     "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.as_bytes().len(),
+                    body.len(),
                     body
                 );
                 let _ = socket.write_all(response.as_bytes()).await;
@@ -425,17 +411,18 @@ async fn listen_for_callback(
             }
 
             if let Some(error) = params.get("error") {
+                let escaped_error = escape_html(error);
                 let body = format!(
                     "<!DOCTYPE html><html><body style='font-family:-apple-system,BlinkMacSystemFont,sans-serif;padding:40px;background:#18181b;color:#f4f4f5;'>\
                     <h2 style='color:#ef4444;'>Google Authentication Failed</h2>\
                     <p>Error: {}</p>\
                     <p style='color:#a1a1aa;'>You can close this window and try again in Aria.</p>\
                     </body></html>",
-                    error
+                    escaped_error
                 );
                 let response = format!(
                     "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.as_bytes().len(),
+                    body.len(),
                     body
                 );
                 let _ = socket.write_all(response.as_bytes()).await;
@@ -450,7 +437,7 @@ async fn listen_for_callback(
                     let body = "<!DOCTYPE html><html><body>Missing authorization code</body></html>";
                     let response = format!(
                         "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.as_bytes().len(),
+                        body.len(),
                         body
                     );
                     let _ = socket.write_all(response.as_bytes()).await;
@@ -534,7 +521,7 @@ async fn listen_for_callback(
 </html>"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.as_bytes().len(),
+                body.len(),
                 body
             );
             let _ = socket.write_all(response.as_bytes()).await;
@@ -670,17 +657,43 @@ pub async fn refresh_access_token(
     })
 }
 
+fn escape_html(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_pkce_generation() {
-        let verifier = generate_pkce_verifier();
+        let verifier = generate_pkce_verifier().expect("pkce verifier");
         assert!(!verifier.is_empty());
         let challenge = generate_pkce_challenge(&verifier);
         assert!(!challenge.is_empty());
         assert_ne!(verifier, challenge);
+        let state = generate_oauth_state().expect("oauth state");
+        assert!(!state.is_empty());
+        assert_ne!(verifier, state);
+    }
+
+    #[test]
+    fn test_escape_html_prevents_xss() {
+        assert_eq!(
+            escape_html("<script>alert(\"x\" & 'y')</script>"),
+            "&lt;script&gt;alert(&quot;x&quot; &amp; &#39;y&#39;)&lt;/script&gt;"
+        );
     }
 
     #[test]

@@ -122,6 +122,7 @@ version = "0.5.0"
 dependencies = [
  "aria-domain",
  "chrono",
+ "deunicode",
  "dirs",
  "lofty",
  "regex",

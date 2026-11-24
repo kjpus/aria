@@ -426,26 +426,10 @@ impl RemoteStorageBackend for WebDavBackend {
             let hrefs = extract_all_tag_values(&body, "href");
             let base_url_parsed = reqwest::Url::parse(&self.base_url)
                 .map_err(|e| RemoteStorageError::ProviderError(e.to_string()))?;
-            let base_path = base_url_parsed.path().trim_end_matches('/');
 
             for href in hrefs {
-                let target_url = if href.starts_with("http://") || href.starts_with("https://") {
-                    if let Ok(parsed) = reqwest::Url::parse(href) {
-                        if parsed.path().trim_end_matches('/') == base_path {
-                            continue;
-                        }
-                    }
-                    href.to_string()
-                } else {
-                    let decoded_href = href.trim_end_matches('/');
-                    if decoded_href == base_path || decoded_href.is_empty() {
-                        continue;
-                    }
-                    if let Ok(joined) = base_url_parsed.join(href) {
-                        joined.to_string()
-                    } else {
-                        continue;
-                    }
+                let Some(target_url) = resolve_webdav_child_delete_url(&base_url_parsed, href) else {
+                    continue;
                 };
 
                 let del_req = self.client.delete(&target_url);
@@ -454,6 +438,37 @@ impl RemoteStorageBackend for WebDavBackend {
         }
         Ok(())
     }
+}
+
+/// Validates and resolves a WebDAV `<href>` from a PROPFIND response so that `clear_all_data`
+/// never sends authenticated DELETE requests to another origin or outside `base_url`'s path.
+fn resolve_webdav_child_delete_url(base_url: &reqwest::Url, href: &str) -> Option<String> {
+    let resolved = base_url.join(href.trim()).ok()?;
+    if resolved.scheme() != base_url.scheme()
+        || resolved.host() != base_url.host()
+        || resolved.port_or_known_default() != base_url.port_or_known_default()
+    {
+        return None;
+    }
+
+    let base_path = base_url.path().trim_end_matches('/');
+    let resolved_path = resolved.path().trim_end_matches('/');
+
+    if resolved_path == base_path || resolved_path.is_empty() {
+        return None;
+    }
+
+    let is_strict_child = if base_path.is_empty() {
+        resolved_path.starts_with('/') && resolved_path.len() > 1
+    } else {
+        resolved_path.starts_with(&format!("{base_path}/"))
+    };
+
+    if !is_strict_child {
+        return None;
+    }
+
+    Some(resolved.to_string())
 }
 
 fn extract_all_tag_values<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
@@ -535,5 +550,39 @@ mod tests {
         assert_eq!(usage.used_bytes, 15_000_000_000);
         assert_eq!(usage.free_bytes, Some(50_000_000_000));
         assert_eq!(usage.total_bytes, Some(65_000_000_000));
+    }
+
+    #[test]
+    fn test_webdav_clear_all_data_rejects_cross_origin_and_out_of_scope_hrefs() {
+        let base = reqwest::Url::parse("https://nas.local:5006/music/").unwrap();
+
+        // Valid strict child paths (relative and same-origin absolute)
+        assert_eq!(
+            resolve_webdav_child_delete_url(&base, "/music/Beethoven/"),
+            Some("https://nas.local:5006/music/Beethoven/".to_string())
+        );
+        assert_eq!(
+            resolve_webdav_child_delete_url(&base, "https://nas.local:5006/music/aria-library-index.json"),
+            Some("https://nas.local:5006/music/aria-library-index.json".to_string())
+        );
+
+        // Must reject self, parent, sibling prefix, traversal, and cross-origin SSRF
+        assert_eq!(resolve_webdav_child_delete_url(&base, "/music/"), None);
+        assert_eq!(resolve_webdav_child_delete_url(&base, "/music"), None);
+        assert_eq!(resolve_webdav_child_delete_url(&base, "/"), None);
+        assert_eq!(resolve_webdav_child_delete_url(&base, "/music2/other"), None);
+        assert_eq!(resolve_webdav_child_delete_url(&base, "../secrets/file"), None);
+        assert_eq!(
+            resolve_webdav_child_delete_url(&base, "https://attacker.example/steal-basic-auth"),
+            None
+        );
+        assert_eq!(
+            resolve_webdav_child_delete_url(&base, "http://nas.local:5006/music/Beethoven/"),
+            None
+        );
+        assert_eq!(
+            resolve_webdav_child_delete_url(&base, "https://nas.local:9999/music/Beethoven/"),
+            None
+        );
     }
 }

@@ -1,59 +1,64 @@
 # Aria
 
-Aria is a desktop-first classical music player built for local libraries and classical-music metadata.
+Aria is a desktop-first classical music player with Android and Android Auto support, built around classical-music metadata, bit-accurate playback, and user-owned local or remote libraries.
 
-Today it focuses on:
+## Highlights
 
-- local file libraries rather than streaming
-- configurable tag-to-database mapping
-- classical-friendly catalog number extraction
-- playlists and queue management
-- high-quality desktop playback, including Windows WASAPI exclusive mode where supported
-
-## What Aria Does Today
-
-- Scans local music directories into a persistent SQLite library
-- Preserves raw tags and also builds normalized database fields
-- Lets the user configure database fields and tag priorities
-- Lets the user configure composer-aware catalog parsing rules
-- Extracts embedded FLAC cover art first and falls back to sidecar images
-- Provides Library, Album, Tracks, Playlists, Queue, and Settings panes
-- Persists settings, queue state, playlists, and library scan results between launches
+- **Local & remote classical libraries:** Scan local music folders into SQLite and optionally sync albums and playlists to/from your own **Google Drive**, **WebDAV**, **SMB**, or local/filesystem remote storage targets with a sliding-window prefetch cache.
+- **Per-format tag mapping & raw tag preservation:** Preserves raw tags separately from normalized database fields (`composer`, `work`/title, `catalog`, `conductor`, `ensemble`, `soloist`, `album`, `year`, `disk_number`, `track_number`, `genre`), with customizable per-format priority profiles (`DEFAULT`, `FLAC`, `MP3`, `MP4`, `AAC`, `OGG`, `OPUS`, `WAV`, `AIFF`).
+- **Composer-aware catalog extraction:** Automatically parses classical catalog numbers (`BWV`, `WAB`, `K`, `KV`, `D`, `RV`, `HWV`, `TWV`, `BuxWV`, `Hob.`, `S.`, `WoO`, `Op`) with colon-segment prioritization, range suppression, and Unicode diacritic folding.
+- **In-place tag editing & field export:** Inspect all raw tags on a track, edit tags across single or multiple tracks, and export mapped fields back into audio files (FLAC/Vorbis, ID3v2, MP4 `ilst`).
+- **Artwork resolution:** Extracts embedded cover art from FLAC and MP4/M4A files (cached locally) and falls back to sidecar images (`cover`, `folder`, `front`).
+- **High-resolution playback:** Shared output via `rodio`, Windows **WASAPI exclusive mode**, **Android USB DAC bit-perfect** (`MIXER_BEHAVIOR_BIT_PERFECT` on Android 14+) and **Bluetooth HD audio**, plus high-quality `rubato` resampling when hardware requires rate conversion.
+- **Multi-pane desktop & mobile UI:** `Library`, `Album`, `Tracks`, `Player`, `Playlists` (with M3U/M3U8/PLS import & M3U export), `Queue`, and `Settings` (including `Diagnostic logs`).
+- **Android Auto support:** Native media browser and playback service (`AriaPlaybackService`) exposing library browsing and transport controls.
 
 ## Tech Stack
 
-- `Tauri 2`
-- `React + TypeScript + Vite`
-- `Rust + Tokio`
-- `SQLite`
+- **Shell:** `Tauri 2` (Windows, macOS, Linux, Android)
+- **Frontend:** `React 18 + TypeScript + Vite`
+- **Backend:** `Rust + Tokio`
+- **Persistence:** `SQLite` (`rusqlite`)
+- **Audio & Tagging:** `symphonia`, `rodio`, `rubato`, `lofty`, Windows WASAPI (`windows` crate), Android `AudioTrack` / `MediaBrowserServiceCompat` (Kotlin + JNI)
 
-The codebase is organized as a Rust workspace with UI code in `/src`, a thin Tauri shell in `/src-tauri`, and business logic in `/crates`.
+The codebase is organized as a Rust workspace with presentation-focused UI code in `/src`, a thin Tauri/JNI shell in `/src-tauri`, and business logic in `/crates`.
 
 ## Repository Map
 
-- `src/`: frontend UI
-- `src-tauri/`: Tauri app shell and command registration
-- `crates/domain/`: shared DTOs and defaults
-- `crates/app-core/`: orchestration layer
-- `crates/library/`: library scan and tag normalization
-- `crates/playback/`: playback service and queue
-- `crates/playlists/`: playlist service
-- `crates/storage/`: SQLite persistence and migrations
-- `docs/LIBRARY.md`: detailed library scan and metadata notes
-- `AGENTS.md`: project customization for AI coding agents
+- `src/`: React + TypeScript frontend (`app/`, `components/`, `features/{albums,library,now-playing,playback,playlists,queue,remote,settings,tracks}`, `lib/`, `types/`)
+- `src-tauri/`: Tauri desktop/mobile shell, IPC commands (`src/commands/`), Android Auto JNI bridge (`src/auto_jni.rs`), and custom checked-in Android Kotlin code (`gen/android/app/src/main/java/com/aria/player/`)
+- `crates/domain/`: Shared serializable DTOs, default mapping profiles, catalog rules, and diagnostic logging
+- `crates/app-core/`: Service orchestration, playlist import matching, remote secret redaction, background workers, and Android Auto view models
+- `crates/library/`: Recursive scanning, raw tag extraction, per-format field mapping, catalog extraction, in-place tag writing, artwork caching, and remote manifest builders
+- `crates/playback/`: Long-lived playback service, persistent queue, resampling (`rubato`), Windows WASAPI exclusive output, and Android bit-perfect output
+- `crates/playlists/`: Persistent playlist service and automatic `Favorites` playlist
+- `crates/remote-storage/`: Remote storage backends (`gdrive`, `webdav`, `smb`, `filesystem`), upload/sync pipelines, quota checks, sliding-window cache, and prefetch worker
+- `crates/storage/`: SQLite persistence, schema migrations, and settings store
+- `crates/artwork/`, `crates/search/`, `crates/platform-audio/`: Reserved workspace support crates (currently minimal stubs; see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md))
+- `docs/`: Architecture, library pipeline, playback, remote storage, and Android documentation
+- `AGENTS.md`: Project guardrails and workflow defaults for AI coding agents
+
+## Platform Support
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| Windows (x64) | Primary desktop target | Shared audio + WASAPI exclusive mode; `.msi` and NSIS `.exe` installers |
+| macOS (Universal) | Desktop build | Shared audio; native AppleScript/Finder file dialogs |
+| Linux (x64) | Desktop build | Shared audio (ALSA); `zenity`/`kdialog`/`xdg-open` file dialogs |
+| Android & Android Auto | Supported mobile target | Native `AudioTrack` USB DAC bit-perfect & Bluetooth HD paths, foreground media service; see [docs/ANDROID.md](./docs/ANDROID.md) |
 
 ## Prerequisites
 
 Install these on your machine and make sure they are available on `PATH`:
 
-- Node.js and npm
-- Rust and Cargo
-- Tauri OS prerequisites for your platform
+- Node.js (LTS) and npm
+- Rust (stable) and Cargo
+- Tauri OS prerequisites for your platform (WebView2 on Windows; `libwebkit2gtk-4.1-dev`, `libasound2-dev`, etc. on Linux)
+- For Android builds: Android SDK, NDK, and Rust Android targets (see [docs/ANDROID.md](./docs/ANDROID.md))
 
 Windows notes:
 
-- Tauri desktop apps require WebView2
-- In PowerShell, `npm.cmd` may be more reliable than `npm` if PowerShell script execution is restricted
+- In PowerShell, `npm.cmd` is often more reliable than `npm` if PowerShell script execution policy is restricted.
 
 ## Developer Workflow
 
@@ -63,149 +68,68 @@ Install dependencies:
 npm.cmd install
 ```
 
-Run the app in development mode:
+Run the desktop app in development mode:
 
 ```powershell
 npm.cmd run tauri -- dev
 ```
 
-Run a frontend production build:
+Verification commands:
 
 ```powershell
+# Frontend TypeScript check + production bundle
 npm.cmd run build
-```
 
-Run a Rust compile check for the desktop app:
-
-```powershell
+# Rust compile check for the Tauri shell
 cargo check --manifest-path src-tauri/Cargo.toml
+
+# Workspace lints (CI enforces -D warnings)
+cargo clippy --workspace --all-targets -- -D warnings
+
+# Workspace unit and integration tests
+cargo test --workspace
 ```
 
 ## Packaging And Release Builds
 
-Aria can be built in two release forms:
-
-- a standalone optimized executable for local testing
-- an installer package for sharing with other users
-
-Build both with:
+Build an optimized desktop executable and platform installer bundles:
 
 ```powershell
 npm.cmd run tauri -- build
 ```
-
-What this command does:
-
-- runs the frontend production build
-- compiles the Rust app in release mode
-- creates installer bundle artifacts through Tauri
 
 Typical Windows outputs:
 
-- release executable: `target\release\aria.exe`
-- installer bundles: `target\release\bundle\`
+- Release executable: `target\release\aria.exe`
+- Installer bundles: `target\release\bundle\msi\` and `target\release\bundle\nsis\`
 
-The exact installer filenames depend on the host toolchain and Tauri bundler, but on Windows you should expect artifacts such as:
+Automated multi-platform desktop releases are built by [`.github/workflows/release.yml`](./.github/workflows/release.yml) when pushing a `v*` tag (for example `v0.5.0`). CI checks run on every push and pull request via [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
 
-- `msi\Aria_0.5.0_x64_en-US.msi`
-- `nsis\Aria_0.5.0_x64-setup.exe`
+## First-Use Flow
 
-If you only want to test the optimized app locally, you can launch the release executable directly. If you want something to hand to another user, use the installer from the `bundle` directory.
-
-On a Windows machine, the first installer build may download the WiX and NSIS tool bundles automatically. That is expected.
-
-### Packaging Checklist
-
-Before building an installer package, make sure:
-
-- `npm.cmd install` has been run
-- Rust/Cargo are installed and working
-- Tauri Windows prerequisites are installed
-- WebView2 is available on the target machine
-
-### Clean Packaging Workflow
-
-From a clean checkout:
-
-```powershell
-npm.cmd install
-npm.cmd run tauri -- build
-```
-
-After that:
-
-1. Check `target\release\bundle\`
-2. Pick the installer format you want to distribute
-3. Test-install it on the same machine or a clean Windows machine
-4. Launch Aria and verify first-run flow, scanning, playback, and icon appearance
-
-## Running Aria As A User
-
-### From source
-
-If you are running from a developer checkout:
-
-```powershell
-npm.cmd run tauri -- dev
-```
-
-### From a release executable
-
-After building with `npm.cmd run tauri -- build`, launch:
-
-```text
-target\release\aria.exe
-```
-
-### From an installer package
-
-After building with `npm.cmd run tauri -- build`, open:
-
-```text
-target\release\bundle\
-```
-
-Then run the installer file generated for Windows, such as the `.msi` or setup `.exe`.
-
-### First-use flow
-
-1. Open `Settings`
-2. Click `Add directory`
-3. Choose a music folder
-4. Aria adds the root and starts scanning automatically
-5. Adjust `Database fields` and `Catalog rules` if needed
-6. Choose the playback output device in `Settings`
+1. Open `Settings` -> `Library`
+2. Click `Add directory` and pick a music folder (Aria scans automatically) — or configure a remote storage target under `Settings` -> `Remote Storage`
+3. Customize `Database fields` (per audio format) and `Catalog rules` if needed
+4. Select an output device and exclusive/bit-perfect preference in `Settings` -> `Playback`
 
 ## Data And Storage
 
-Aria stores its persistent state in SQLite.
+Aria stores persistent library metadata, playlists, queue state, settings, and remote sync state in SQLite:
 
-On Windows, the default database path is:
+- **Windows:** `%LOCALAPPDATA%\Aria\aria.sqlite3`
+- **macOS / Linux:** Platform data directory under `Aria/aria.sqlite3`
+- **Android:** App internal files directory (`/data/data/com.aria.player/files/aria.sqlite3`)
 
-```text
-%LOCALAPPDATA%\Aria\aria.sqlite3
-```
+Extracted embedded artwork and cached remote audio files are stored under Aria's local app-data/cache directory.
 
-Aria also caches extracted embedded FLAC cover art under the local app data area.
+## Documentation
 
-## Library Behavior At A Glance
-
-- Aria stores both `raw tags` and `mapped fields`
-- Field mappings are priority-based per database field
-- Catalog extraction is only used when the `catalog` field was not resolved from dedicated tags
-- FLAC embedded cover art is preferred over sidecar cover files
-
-For the detailed scan and mapping rules, see [docs/LIBRARY.md](./docs/LIBRARY.md).
-
-## Current Limitations
-
-- Embedded cover extraction is currently FLAC-first; other formats mainly rely on sidecar images
-- The project is desktop-first; mobile is not an active primary target yet
-
-## Related Docs
-
-- [docs/LIBRARY.md](./docs/LIBRARY.md)
-- [AGENTS.md](./AGENTS.md)
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — Crate boundaries, threading, IPC, and security model
+- [docs/LIBRARY.md](./docs/LIBRARY.md) — Library scanning, per-format field mappings, catalog rules, artwork, and tag writing
+- [docs/PLAYBACK.md](./docs/PLAYBACK.md) — Playback engine, WASAPI exclusive mode, resampling, and Android bit-perfect audio
+- [docs/REMOTE_STORAGE.md](./docs/REMOTE_STORAGE.md) — Remote backends, manifests, OAuth setup, caching, and sync
+- [docs/ANDROID.md](./docs/ANDROID.md) — Android & Android Auto build, custom Kotlin layer, 16 KB page alignment, and signing
+- [AGENTS.md](./AGENTS.md) — Guidelines for AI coding agents
 
 ## License
 
@@ -213,4 +137,4 @@ Aria is licensed under the Apache License, Version 2.0. See [LICENSE](./LICENSE)
 
 ## Note
 
-This app is vibe-coded using OpenAI's Codex with GPT-5.4 on Extra High reasoning. I've had the idea of a music player more suited for classical music (at least in my mind) for a while. I recently got my hands on Codex and decided to try vibe-coding as a learning experience. GPT came up with a few tech-stack options at the beginning. I made the choice because I don't know any of the technologies, perfect for a vibe-coding exercise. 
+This app is vibe-coded using OpenAI's Codex with GPT-5.4 on Extra High reasoning. I've had the idea of a music player more suited for classical music (at least in my mind) for a while. I recently got my hands on Codex and decided to try vibe-coding as a learning experience. GPT came up with a few tech-stack options at the beginning. I made the choice because I don't know any of the technologies, perfect for a vibe-coding exercise.

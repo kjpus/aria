@@ -295,7 +295,7 @@ function buildEditableTagRows(tracks: ScannedTrack[]): EditableTagRow[] {
     .sort((left, right) => left.localeCompare(right))
     .map((tagName) => {
       const valuesPerTrack = tracks.map((track) =>
-        normalizeTagValues(track.rawTags[tagName] ?? []),
+        normalizeTagValues(lookupRawTagValues(track.rawTags, tagName)),
       );
       const sharedValues = valuesPerTrack.every((values) =>
         valueListsEqual(values, valuesPerTrack[0] ?? []),
@@ -398,6 +398,34 @@ function valueListsEqual(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+function lookupRawTagValues(
+  rawTags: Record<string, string[]>,
+  tagName: string,
+): string[] {
+  if (rawTags[tagName]) {
+    return rawTags[tagName];
+  }
+  const lower = tagName.toLowerCase();
+  for (const [key, values] of Object.entries(rawTags)) {
+    if (key.toLowerCase() === lower) {
+      return values;
+    }
+  }
+  return [];
+}
+
 function normalizeTagName(tagName: string): string {
-  return tagName.trim().toUpperCase();
+  const trimmed = tagName.trim();
+  if (trimmed.startsWith('----:')) {
+    const rest = trimmed.slice(5);
+    const colonIdx = rest.indexOf(':');
+    if (colonIdx !== -1) {
+      const mean = rest.slice(0, colonIdx).trim();
+      const name = rest.slice(colonIdx + 1).trim();
+      const canonicalMean =
+        mean.toLowerCase() === 'com.apple.itunes' ? 'com.apple.iTunes' : mean;
+      return `----:${canonicalMean}:${name.toUpperCase()}`;
+    }
+  }
+  return trimmed.toUpperCase();
 }

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 aria-domain = { path = "../domain" }
 chrono.workspace = true
+deunicode.workspace = true
 dirs.workspace = true
 lofty.workspace = true
 regex.workspace = true

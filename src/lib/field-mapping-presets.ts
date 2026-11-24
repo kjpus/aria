@@ -192,33 +192,33 @@ function flacMappingProfile(): DefaultMappingProfile {
 
 function mp3MappingProfile(): DefaultMappingProfile {
   return {
-    album: ['ALBUM'],
-    title: ['TITLE'],
+    album: ['TALB', 'ALBUM'],
+    title: ['TIT2', 'TITLE'],
     catalog: ['CATALOGNUMBER', 'CATALOG'],
-    composer: ['COMPOSER', 'WORKCOMPOSER', 'COMPOSERSORT'],
-    genre: ['GENRE'],
-    conductor: ['CONDUCTOR'],
+    composer: ['TCOM', 'COMPOSER', 'WORKCOMPOSER', 'COMPOSERSORT'],
+    genre: ['TCON', 'GENRE'],
+    conductor: ['TPE3', 'CONDUCTOR'],
     ensemble: ['BAND', 'ORCHESTRA', 'ENSEMBLE', 'CHOIR', 'CHORUS'],
-    soloist: ['SOLOIST', 'ARTIST', 'PERFORMER', 'ALBUMARTIST'],
-    year: ['DATE', 'YEAR'],
-    diskNumber: ['DISCNUMBER', 'DISKNUMBER', 'DISC'],
-    trackNumber: ['TRACKNUMBER', 'TRACK'],
+    soloist: ['SOLOIST', 'TPE1', 'ARTIST', 'PERFORMER', 'TPE2', 'ALBUMARTIST'],
+    year: ['TDRC', 'TYER', 'TDOR', 'DATE', 'YEAR'],
+    diskNumber: ['TPOS', 'DISCNUMBER', 'DISKNUMBER', 'DISC'],
+    trackNumber: ['TRCK', 'TRACKNUMBER', 'TRACK'],
   };
 }
 
 function aacMappingProfile(): DefaultMappingProfile {
   return {
-    album: ['ALBUM'],
-    title: ['TITLE'],
+    album: ['TALB', 'ALBUM'],
+    title: ['TIT2', 'TITLE'],
     catalog: ['CATALOGNUMBER', 'CATALOG'],
-    composer: ['COMPOSER', 'WORKCOMPOSER', 'COMPOSERSORT'],
-    genre: ['GENRE'],
-    conductor: ['CONDUCTOR'],
+    composer: ['TCOM', 'COMPOSER', 'WORKCOMPOSER', 'COMPOSERSORT'],
+    genre: ['TCON', 'GENRE'],
+    conductor: ['TPE3', 'CONDUCTOR'],
     ensemble: ['BAND', 'ORCHESTRA', 'ENSEMBLE', 'CHOIR', 'CHORUS'],
-    soloist: ['SOLOIST', 'ARTIST', 'PERFORMER', 'ALBUMARTIST'],
-    year: ['DATE', 'YEAR'],
-    diskNumber: ['DISCNUMBER', 'DISKNUMBER', 'DISC'],
-    trackNumber: ['TRACKNUMBER', 'TRACK'],
+    soloist: ['SOLOIST', 'TPE1', 'ARTIST', 'PERFORMER', 'TPE2', 'ALBUMARTIST'],
+    year: ['TDRC', 'TYER', 'TDOR', 'DATE', 'YEAR'],
+    diskNumber: ['TPOS', 'DISCNUMBER', 'DISKNUMBER', 'DISC'],
+    trackNumber: ['TRCK', 'TRACKNUMBER', 'TRACK'],
   };
 }
 
@@ -256,33 +256,33 @@ function opusMappingProfile(): DefaultMappingProfile {
 
 function wavMappingProfile(): DefaultMappingProfile {
   return {
-    album: ['ALBUM'],
-    title: ['TITLE'],
+    album: ['TALB', 'IPRD', 'ALBUM'],
+    title: ['TIT2', 'INAM', 'TITLE'],
     catalog: ['CATALOGNUMBER', 'CATALOG'],
-    composer: ['COMPOSER', 'WORKCOMPOSER', 'COMPOSERSORT'],
-    genre: ['GENRE'],
-    conductor: ['CONDUCTOR'],
+    composer: ['TCOM', 'IMUS', 'COMPOSER', 'WORKCOMPOSER', 'COMPOSERSORT'],
+    genre: ['TCON', 'IGNR', 'GENRE'],
+    conductor: ['TPE3', 'CONDUCTOR'],
     ensemble: ['BAND', 'ORCHESTRA', 'ENSEMBLE', 'CHOIR', 'CHORUS'],
-    soloist: ['SOLOIST', 'ARTIST', 'PERFORMER', 'ALBUMARTIST'],
-    year: ['DATE', 'YEAR'],
-    diskNumber: ['DISCNUMBER', 'DISKNUMBER', 'DISC'],
-    trackNumber: ['TRACKNUMBER', 'TRACK'],
+    soloist: ['SOLOIST', 'TPE1', 'IART', 'ARTIST', 'PERFORMER', 'TPE2', 'ALBUMARTIST'],
+    year: ['TDRC', 'TYER', 'ICRD', 'DATE', 'YEAR'],
+    diskNumber: ['TPOS', 'DISCNUMBER', 'DISKNUMBER', 'DISC'],
+    trackNumber: ['TRCK', 'IPRT', 'ITRK', 'TRACKNUMBER', 'TRACK'],
   };
 }
 
 function aiffMappingProfile(): DefaultMappingProfile {
   return {
-    album: ['ALBUM'],
-    title: ['TITLE'],
+    album: ['TALB', 'ALBUM'],
+    title: ['TIT2', 'NAME', 'TITLE'],
     catalog: ['CATALOGNUMBER', 'CATALOG'],
-    composer: ['COMPOSER', 'WORKCOMPOSER', 'COMPOSERSORT'],
-    genre: ['GENRE'],
-    conductor: ['CONDUCTOR'],
+    composer: ['TCOM', 'COMPOSER', 'WORKCOMPOSER', 'COMPOSERSORT'],
+    genre: ['TCON', 'GENRE'],
+    conductor: ['TPE3', 'CONDUCTOR'],
     ensemble: ['BAND', 'ORCHESTRA', 'ENSEMBLE', 'CHOIR', 'CHORUS'],
-    soloist: ['SOLOIST', 'ARTIST', 'PERFORMER', 'ALBUMARTIST'],
-    year: ['DATE', 'YEAR'],
-    diskNumber: ['DISCNUMBER', 'DISKNUMBER', 'DISC'],
-    trackNumber: ['TRACKNUMBER', 'TRACK'],
+    soloist: ['SOLOIST', 'TPE1', 'AUTH', 'ARTIST', 'PERFORMER', 'TPE2', 'ALBUMARTIST'],
+    year: ['TDRC', 'TYER', 'DATE', 'YEAR'],
+    diskNumber: ['TPOS', 'DISCNUMBER', 'DISKNUMBER', 'DISC'],
+    trackNumber: ['TRCK', 'TRACKNUMBER', 'TRACK'],
   };
 }
 

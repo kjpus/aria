@@ -350,8 +350,36 @@ function addTagOption(tags: Map<string, string>, tagName: string) {
   tags.set(normalized, normalized);
 }
 
+function lookupRawTagValues(
+  rawTags: Record<string, string[]>,
+  tagName: string,
+): string[] {
+  if (rawTags[tagName]) {
+    return rawTags[tagName];
+  }
+  const lower = tagName.toLowerCase();
+  for (const [key, values] of Object.entries(rawTags)) {
+    if (key.toLowerCase() === lower) {
+      return values;
+    }
+  }
+  return [];
+}
+
 function normalizeTagName(tagName: string): string {
-  return tagName.trim().toUpperCase();
+  const trimmed = tagName.trim();
+  if (trimmed.startsWith('----:')) {
+    const rest = trimmed.slice(5);
+    const colonIdx = rest.indexOf(':');
+    if (colonIdx !== -1) {
+      const mean = rest.slice(0, colonIdx).trim();
+      const name = rest.slice(colonIdx + 1).trim();
+      const canonicalMean =
+        mean.toLowerCase() === 'com.apple.itunes' ? 'com.apple.iTunes' : mean;
+      return `----:${canonicalMean}:${name.toUpperCase()}`;
+    }
+  }
+  return trimmed.toUpperCase();
 }
 
 function buildTagOverwriteWarning(
@@ -367,7 +395,7 @@ function buildTagOverwriteWarning(
   const previewValues: string[] = [];
 
   for (const track of tracks) {
-    const values = (track.rawTags[normalizedTagName] ?? [])
+    const values = lookupRawTagValues(track.rawTags, normalizedTagName)
       .map((value) => value.trim())
       .filter(Boolean);
 

@@ -1,5 +1,7 @@
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+use std::path::Path;
 #[cfg(target_os = "windows")]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use aria_domain::AppBootstrap;
 use tauri::State;
@@ -50,7 +52,66 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         .map_err(|error| CommandError::Message(error.to_string()))?
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        tokio::task::spawn_blocking(|| {
+            let output = std::process::Command::new("osascript")
+                .args([
+                    "-e",
+                    r#"POSIX path of (choose folder with prompt "Select a music library directory")"#,
+                ])
+                .output()
+                .map_err(|error| CommandError::Message(error.to_string()))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if stderr.contains("-128") || stderr.contains("User canceled") {
+                    return Ok(None);
+                }
+                let message = stderr.trim().to_string();
+                return Err(CommandError::Message(if message.is_empty() {
+                    "Directory selection failed.".into()
+                } else {
+                    message
+                }));
+            }
+
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Ok((!path.is_empty()).then_some(path))
+        })
+        .await
+        .map_err(|error| CommandError::Message(error.to_string()))?
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        tokio::task::spawn_blocking(|| {
+            let output = std::process::Command::new("zenity")
+                .args([
+                    "--file-selection",
+                    "--directory",
+                    "--title=Select a music library directory",
+                ])
+                .output()
+                .or_else(|_| {
+                    std::process::Command::new("kdialog")
+                        .args(["--getexistingdirectory", ".", "--title", "Select a music library directory"])
+                        .output()
+                })
+                .map_err(|error| CommandError::Message(error.to_string()))?;
+
+            if !output.status.success() {
+                return Ok(None);
+            }
+
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Ok((!path.is_empty()).then_some(path))
+        })
+        .await
+        .map_err(|error| CommandError::Message(error.to_string()))?
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         Err(CommandError::Message(
             "Directory selection is not supported on this platform yet.".into(),
@@ -60,16 +121,42 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
 #[tauri::command]
 pub fn open_directory(path: String) -> Result<(), CommandError> {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     {
-        std::process::Command::new("explorer.exe")
-            .arg(path)
-            .spawn()
+        let dir_path = Path::new(&path);
+        if !dir_path.is_dir() {
+            return Err(CommandError::Message(
+                "Target path is not an existing directory.".into(),
+            ));
+        }
+
+        #[cfg(target_os = "windows")]
+        let mut cmd = {
+            let mut c = std::process::Command::new("explorer.exe");
+            c.arg(strip_windows_verbatim_prefix(dir_path));
+            c
+        };
+
+        #[cfg(target_os = "macos")]
+        let mut cmd = {
+            let mut c = std::process::Command::new("open");
+            c.arg(dir_path);
+            c
+        };
+
+        #[cfg(target_os = "linux")]
+        let mut cmd = {
+            let mut c = std::process::Command::new("xdg-open");
+            c.arg(dir_path);
+            c
+        };
+
+        cmd.spawn()
             .map_err(|error| CommandError::Message(error.to_string()))?;
         Ok(())
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         let _ = path;
         Err(CommandError::Message(
@@ -88,6 +175,8 @@ pub fn open_url(url: String) -> Result<(), CommandError> {
             "Only http and https protocols are permitted.".into(),
         ));
     }
+
+    let safe_url = parsed.as_str();
 
     #[cfg(target_os = "windows")]
     {
@@ -110,7 +199,7 @@ pub fn open_url(url: String) -> Result<(), CommandError> {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
-        let wide_file: Vec<u16> = OsStr::new(&url)
+        let wide_file: Vec<u16> = OsStr::new(safe_url)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
@@ -138,7 +227,7 @@ pub fn open_url(url: String) -> Result<(), CommandError> {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
-            .arg(&url)
+            .arg(safe_url)
             .spawn()
             .map_err(|error| CommandError::Message(error.to_string()))?;
         Ok(())
@@ -147,7 +236,7 @@ pub fn open_url(url: String) -> Result<(), CommandError> {
     #[cfg(target_os = "linux")]
     {
         std::process::Command::new("xdg-open")
-            .arg(&url)
+            .arg(safe_url)
             .spawn()
             .map_err(|error| CommandError::Message(error.to_string()))?;
         Ok(())
@@ -155,8 +244,7 @@ pub fn open_url(url: String) -> Result<(), CommandError> {
 
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
-        let _ = parsed;
-        let _ = url;
+        let _ = safe_url;
         Err(CommandError::Message(
             "Opening external URLs is not supported on this platform yet.".into(),
         ))
@@ -176,7 +264,41 @@ pub fn show_in_explorer(path: String) -> Result<(), CommandError> {
         Ok(())
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        let target = Path::new(&path);
+        if !target.exists() {
+            return Err(CommandError::Message("Target file does not exist.".into()));
+        }
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(target)
+            .spawn()
+            .map_err(|error| CommandError::Message(error.to_string()))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let target = Path::new(&path);
+        let dir = if target.is_dir() {
+            target
+        } else {
+            target.parent().unwrap_or(target)
+        };
+        if !dir.is_dir() {
+            return Err(CommandError::Message(
+                "Target directory does not exist.".into(),
+            ));
+        }
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|error| CommandError::Message(error.to_string()))?;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         let _ = path;
         Err(CommandError::Message(
@@ -203,13 +325,28 @@ fn explorer_select_arguments(path: &str) -> [String; 2] {
 
 #[cfg(target_os = "windows")]
 fn normalize_explorer_path(path: &str) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| Path::new(path).to_path_buf())
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| Path::new(path).to_path_buf());
+    strip_windows_verbatim_prefix(&resolved)
+}
+
+#[cfg(target_os = "windows")]
+fn strip_windows_verbatim_prefix(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{unc}"))
+    } else if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        path.to_path_buf()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "windows")]
-    use super::explorer_select_arguments;
+    use super::{explorer_select_arguments, strip_windows_verbatim_prefix};
+    #[cfg(target_os = "windows")]
+    use std::path::Path;
 
     #[cfg(target_os = "windows")]
     #[test]
@@ -217,5 +354,18 @@ mod tests {
         let arguments = explorer_select_arguments(r"D:\Music Library\Disc 1\track 01.m4a");
 
         assert_eq!(arguments, ["/select,".to_string(), r"D:\Music Library\Disc 1\track 01.m4a".to_string()]);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn strip_windows_verbatim_prefix_handles_drive_and_unc_paths() {
+        assert_eq!(
+            strip_windows_verbatim_prefix(Path::new(r"\\?\D:\Music\01.flac")),
+            Path::new(r"D:\Music\01.flac")
+        );
+        assert_eq!(
+            strip_windows_verbatim_prefix(Path::new(r"\\?\UNC\nas\music\01.flac")),
+            Path::new(r"\\nas\music\01.flac")
+        );
     }
 }

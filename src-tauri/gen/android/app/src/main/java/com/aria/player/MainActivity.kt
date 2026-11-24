@@ -27,7 +27,12 @@ class MainActivity : TauriActivity() {
     fun openBrowser(url: String): Boolean {
       val act = instance ?: return false
       return try {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        val uri = Uri.parse(url)
+        val scheme = uri.scheme?.lowercase()
+        if (scheme != "http" && scheme != "https") {
+          return false
+        }
+        val intent = Intent(Intent.ACTION_VIEW, uri)
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         act.startActivity(intent)
         true
@@ -174,7 +179,9 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onDestroy() {
-    AriaBluetoothAudioHelper.cleanup()
+    if (!AriaPlaybackService.isServiceRunning) {
+      AriaBluetoothAudioHelper.cleanup()
+    }
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && audioDeviceCallback != null) {
       val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
       audioManager?.unregisterAudioDeviceCallback(audioDeviceCallback)

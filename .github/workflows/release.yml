@@ -50,7 +50,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ARIA_BUILD_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         with:
-          tagName: aria-v__VERSION__ # The action automatically replaces __VERSION__ with the version from package.json
+          tagName: v__VERSION__ # Matches the 'v*' push trigger and replaces __VERSION__ from package.json
           releaseName: 'Aria v__VERSION__'
           releaseBody: 'See the assets below to download and install this version.'
           releaseDraft: false

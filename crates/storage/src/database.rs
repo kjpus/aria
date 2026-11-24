@@ -27,23 +27,12 @@ pub enum StorageError {
     Serde(#[from] serde_json::Error),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PersistedState {
     pub library: LibrarySnapshot,
     pub playback: PlaybackSessionSnapshot,
     pub playlists: PlaylistSnapshot,
     pub settings: SettingsSnapshot,
-}
-
-impl Default for PersistedState {
-    fn default() -> Self {
-        Self {
-            library: LibrarySnapshot::default(),
-            playback: PlaybackSessionSnapshot::default(),
-            playlists: PlaylistSnapshot::default(),
-            settings: SettingsSnapshot::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -216,7 +205,7 @@ impl AppDatabase {
         tx.execute("delete from scanned_tracks", [])?;
         {
             let mut statement = tx.prepare(
-                "insert into scanned_tracks (
+                "insert or replace into scanned_tracks (
                    id, path, file_name, album_art_path, audio_json, raw_tags_json, mapped_fields_json
                  ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
@@ -266,7 +255,10 @@ impl AppDatabase {
     }
 
     fn connect(&self) -> Result<Connection, StorageError> {
-        Ok(Connection::open(&self.path)?)
+        let connection = Connection::open(&self.path)?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.execute_batch("pragma foreign_keys = on;")?;
+        Ok(connection)
     }
 
     fn load_settings(&self, connection: &Connection) -> Result<SettingsSnapshot, StorageError> {
@@ -522,19 +514,23 @@ impl AppDatabase {
     }
 
     pub fn delete_remote_target(&self, id: &str) -> Result<(), StorageError> {
-        let connection = self.connect()?;
-        connection.execute("delete from remote_targets where id = ?1", params![id])?;
-        connection.execute("delete from remote_synced_items where remote_target_id = ?1", params![id])?;
+        let mut connection = self.connect()?;
+        let tx = connection.transaction()?;
+        tx.execute("delete from remote_targets where id = ?1", params![id])?;
+        tx.execute("delete from remote_synced_items where remote_target_id = ?1", params![id])?;
         let sync_key = format!("remote_target_last_sync:{id}");
-        connection.execute("delete from app_settings where setting_key = ?1", params![sync_key])?;
+        tx.execute("delete from app_settings where setting_key = ?1", params![sync_key])?;
+        tx.commit()?;
         Ok(())
     }
 
     pub fn clear_remote_synced_items_for_target(&self, id: &str) -> Result<(), StorageError> {
-        let connection = self.connect()?;
-        connection.execute("delete from remote_synced_items where remote_target_id = ?1", params![id])?;
+        let mut connection = self.connect()?;
+        let tx = connection.transaction()?;
+        tx.execute("delete from remote_synced_items where remote_target_id = ?1", params![id])?;
         let sync_key = format!("remote_target_last_sync:{id}");
-        connection.execute("delete from app_settings where setting_key = ?1", params![sync_key])?;
+        tx.execute("delete from app_settings where setting_key = ?1", params![sync_key])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -724,11 +720,12 @@ impl AppDatabase {
         hints: &[&str],
     ) -> Result<Option<RemoteSyncedItem>, StorageError> {
         let connection = self.connect()?;
-        let pattern = format!("%/{file_name}");
+        let escaped_file_name = escape_like_literal(file_name);
+        let pattern = format!("%/{escaped_file_name}");
         let mut statement = connection.prepare(
             "select item_id, remote_target_id, item_type, remote_path, remote_file_id, size_bytes, checksum, sync_status, last_synced_at
              from remote_synced_items
-             where remote_target_id = ?1 and item_type = 'track' and sync_status = 'synced' and (remote_path like ?2 or remote_path = ?3)",
+             where remote_target_id = ?1 and item_type = 'track' and sync_status = 'synced' and (remote_path like ?2 escape '\\' or remote_path = ?3)",
         )?;
         let mut rows = statement.query(params![target_id, pattern, file_name])?;
         let mut matches = Vec::new();
@@ -818,11 +815,11 @@ impl AppDatabase {
     pub fn get_total_synced_bytes_for_target(&self, target_id: &str) -> Result<u64, StorageError> {
         let connection = self.connect()?;
         let total: Option<i64> = connection.query_row(
-            "select sum(size_bytes) from remote_synced_items where remote_target_id = ?1",
+            "select sum(size_bytes) from remote_synced_items where remote_target_id = ?1 and item_type = 'track'",
             params![target_id],
             |row| row.get(0),
         )?;
-        Ok(total.unwrap_or(0) as u64)
+        Ok(total.unwrap_or(0).max(0) as u64)
     }
 }
 
@@ -935,14 +932,11 @@ fn is_historical_mp4_composer_default(format: &str, mapping: &LibraryFieldMappin
     format == "MP4"
         && mapping.key == "composer"
         && mapping.label == "Composer"
-        && matches_historical_tag_priorities(&mapping.tag_priorities, PRE_WRT_MP4_COMPOSER_TAGS)
-            || format == "MP4"
-                && mapping.key == "composer"
-                && mapping.label == "Composer"
-                && matches_historical_tag_priorities(
-                    &mapping.tag_priorities,
-                    PRE_WRT_WITH_FREEFORM_MP4_COMPOSER_TAGS,
-                )
+        && (matches_historical_tag_priorities(&mapping.tag_priorities, PRE_WRT_MP4_COMPOSER_TAGS)
+            || matches_historical_tag_priorities(
+                &mapping.tag_priorities,
+                PRE_WRT_WITH_FREEFORM_MP4_COMPOSER_TAGS,
+            ))
 }
 
 fn is_historical_ensemble_default(_format: &str, mapping: &LibraryFieldMapping) -> bool {
@@ -1131,6 +1125,20 @@ fn legacy_field_mapping(
         label: label.into(),
         tag_priorities: tag_priorities.iter().map(|tag| (*tag).into()).collect(),
     }
+}
+
+fn escape_like_literal(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' | '%' | '_' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1516,8 +1524,9 @@ mod tests {
         let loaded_sync_time = database.get_remote_target_last_sync("target_gdrive_1").expect("get sync timestamp");
         assert_eq!(loaded_sync_time, Some("2026-09-13T20:00:00Z".to_string()));
 
+        // Only track rows count toward synced bytes so album summary rows are not double-counted
         let total_bytes = database.get_total_synced_bytes_for_target("target_gdrive_1").expect("total bytes");
-        assert_eq!(total_bytes, 550_000_000);
+        assert_eq!(total_bytes, 50_000_000);
 
         // Test find_remote_synced_track_by_hints
         let found = database
@@ -1607,6 +1616,44 @@ mod tests {
             resolved.remote_path,
             "Bach 50/Angela Hewitt - Bach Keyboard Concertos Nos. 1-7, BWV 1052-8 etc. (2006) [16B-44.1kHz]/02.flac"
         );
+
+        let _ = fs::remove_dir_all(&test_root);
+    }
+
+    #[test]
+    fn find_remote_synced_track_by_hints_escapes_like_wildcards() {
+        let test_root = std::env::temp_dir().join(format!(
+            "aria-storage-like-escape-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&test_root);
+        let db_path = test_root.join("aria.sqlite3");
+        let database = AppDatabase::at(db_path).expect("open db");
+
+        let item = RemoteSyncedItem {
+            item_id: "trk_other".to_string(),
+            remote_target_id: "t1".to_string(),
+            item_type: "track".to_string(),
+            remote_path: "Bach/01XTrack.flac".to_string(),
+            remote_file_id: None,
+            size_bytes: 1_000,
+            checksum: None,
+            sync_status: "synced".to_string(),
+            last_synced_at: "2026-11-01T00:00:00Z".to_string(),
+        };
+        database.save_remote_synced_item(&item).expect("save item");
+
+        // '_' must NOT act as a single-char wildcard matching 'X'
+        let res = database
+            .find_remote_synced_track_by_hints("t1", "01_Track.flac", &["Bach"])
+            .expect("query");
+        assert!(res.is_none());
+
+        // '%' must NOT act as a multi-char wildcard
+        let res_pct = database
+            .find_remote_synced_track_by_hints("t1", "01%Track.flac", &["Bach"])
+            .expect("query");
+        assert!(res_pct.is_none());
 
         let _ = fs::remove_dir_all(&test_root);
     }

@@ -331,7 +331,7 @@ impl ExclusiveAudioConsumer {
             && self
                 .current_chunk
                 .as_ref()
-                .map_or(true, |c| self.current_cursor >= c.len())
+                .is_none_or(|c| self.current_cursor >= c.len())
     }
 
     fn copy_next_bytes_into(&mut self, destination: &mut [u8]) -> Result<usize, PlaybackError> {
@@ -439,20 +439,18 @@ fn spawn_decode_worker(
                     {
                         if resampler.is_resampling() {
                             resampled_f32.clear();
-                            if let Ok(()) = resampler.flush(&mut resampled_f32) {
-                                if !resampled_f32.is_empty() {
-                                    if write_f32_samples_to_wasapi_bytes(
-                                        &mut pending_buffer,
-                                        &resampled_f32,
-                                        output_format,
-                                    )
-                                    .is_ok()
-                                        && !pending_buffer.is_empty()
-                                    {
-                                        let chunk = std::mem::take(&mut pending_buffer);
-                                        let _ = tx.send(Ok(DecodedChunk::Data(chunk)));
-                                    }
-                                }
+                            if resampler.flush(&mut resampled_f32).is_ok()
+                                && !resampled_f32.is_empty()
+                                && write_f32_samples_to_wasapi_bytes(
+                                    &mut pending_buffer,
+                                    &resampled_f32,
+                                    output_format,
+                                )
+                                .is_ok()
+                                && !pending_buffer.is_empty()
+                            {
+                                let chunk = std::mem::take(&mut pending_buffer);
+                                let _ = tx.send(Ok(DecodedChunk::Data(chunk)));
                             }
                         }
                         let _ = tx.send(Ok(DecodedChunk::EndOfStream));
@@ -528,20 +526,18 @@ fn spawn_decode_worker(
                     {
                         if resampler.is_resampling() {
                             resampled_f32.clear();
-                            if let Ok(()) = resampler.flush(&mut resampled_f32) {
-                                if !resampled_f32.is_empty() {
-                                    if write_f32_samples_to_wasapi_bytes(
-                                        &mut pending_buffer,
-                                        &resampled_f32,
-                                        output_format,
-                                    )
-                                    .is_ok()
-                                        && !pending_buffer.is_empty()
-                                    {
-                                        let chunk = std::mem::take(&mut pending_buffer);
-                                        let _ = tx.send(Ok(DecodedChunk::Data(chunk)));
-                                    }
-                                }
+                            if resampler.flush(&mut resampled_f32).is_ok()
+                                && !resampled_f32.is_empty()
+                                && write_f32_samples_to_wasapi_bytes(
+                                    &mut pending_buffer,
+                                    &resampled_f32,
+                                    output_format,
+                                )
+                                .is_ok()
+                                && !pending_buffer.is_empty()
+                            {
+                                let chunk = std::mem::take(&mut pending_buffer);
+                                let _ = tx.send(Ok(DecodedChunk::Data(chunk)));
                             }
                         }
                         let _ = tx.send(Ok(DecodedChunk::EndOfStream));
@@ -722,20 +718,32 @@ fn run_exclusive_thread(
 
         match wait_result {
             WAIT_OBJECT_0 if playing && !source_finished => {
-                match fill_render_buffer(
-                    &init.render_client,
-                    init.buffer_frames,
-                    init.output_format,
-                    &mut init.consumer,
-                    &state,
-                    &mut frames_rendered,
-                ) {
-                    Ok(finished) => source_finished = finished,
+                let padding = match current_padding(&init.audio_client) {
+                    Ok(padding) => padding,
                     Err(error) => {
-                        eprintln!("exclusive playback render failed: {error}");
+                        eprintln!("exclusive playback padding check failed: {error}");
                         state.finished.store(true, Ordering::Relaxed);
                         cleanup_exclusive_output(init, mmcss, com_initialized);
                         return;
+                    }
+                };
+                let frames_available = init.buffer_frames.saturating_sub(padding);
+                if frames_available > 0 {
+                    match fill_render_buffer(
+                        &init.render_client,
+                        frames_available,
+                        init.output_format,
+                        &mut init.consumer,
+                        &state,
+                        &mut frames_rendered,
+                    ) {
+                        Ok(finished) => source_finished = finished,
+                        Err(error) => {
+                            eprintln!("exclusive playback render failed: {error}");
+                            state.finished.store(true, Ordering::Relaxed);
+                            cleanup_exclusive_output(init, mmcss, com_initialized);
+                            return;
+                        }
                     }
                 }
             }
@@ -808,10 +816,20 @@ fn initialize_exclusive_output(
         candidate_periods.push(minimum_period);
     }
 
-    let render_event = unsafe {
+    struct EventHandleGuard(Option<Foundation::HANDLE>);
+    impl Drop for EventHandleGuard {
+        fn drop(&mut self) {
+            if let Some(handle) = self.0.take() {
+                let _ = unsafe { Foundation::CloseHandle(handle) };
+            }
+        }
+    }
+
+    let mut render_event_guard = EventHandleGuard(Some(unsafe {
         Threading::CreateEventA(None, false, false, windows::core::PCSTR(ptr::null()))
             .map_err(|error| PlaybackError::Output(error.to_string()))?
-    };
+    }));
+    let render_event = render_event_guard.0.unwrap();
 
     initialize_audio_client_exclusive(
         &device,
@@ -846,6 +864,7 @@ fn initialize_exclusive_output(
     let mut consumer = ExclusiveAudioConsumer::new(decode_thread, chunk_rx, stop_flag);
     consumer.prefill_lookahead(Duration::from_millis(500));
 
+    let render_event = render_event_guard.0.take().unwrap();
     Ok(ExclusiveInit {
         consumer,
         audio_client,
@@ -947,22 +966,24 @@ fn fill_render_buffer(
     frames_rendered: &mut u64,
 ) -> Result<bool, PlaybackError> {
     let byte_count = frames_available as usize * output_format.block_align() as usize;
+    // Pull and process PCM bytes BEFORE acquiring the hardware WASAPI render buffer
+    // so the real-time thread never blocks on decoder IPC while holding GetBuffer
+    // and never leaks the render buffer if decoding fails.
+    let mut staging = vec![0u8; byte_count];
+    let bytes_written = consumer.copy_next_bytes_into(&mut staging)?;
+
+    let volume = current_volume(state);
+    if bytes_written > 0 && volume < 0.999_9 {
+        apply_volume_to_bytes(&mut staging[..bytes_written], output_format, volume);
+    }
+
     let buffer = unsafe {
         render_client
             .GetBuffer(frames_available)
             .map_err(|error| PlaybackError::Output(error.to_string()))?
     };
-    let bytes = unsafe { std::slice::from_raw_parts_mut(buffer as *mut u8, byte_count) };
-
-    let bytes_written = consumer.copy_next_bytes_into(bytes)?;
-    if bytes_written < byte_count {
-        bytes[bytes_written..].fill(0);
-    }
-
-    let volume = current_volume(state);
-    if bytes_written > 0 && volume < 0.999_9 {
-        apply_volume_to_bytes(&mut bytes[..bytes_written], output_format, volume);
-    }
+    let bytes = unsafe { std::slice::from_raw_parts_mut(buffer, byte_count) };
+    bytes.copy_from_slice(&staging);
 
     unsafe {
         render_client
@@ -1231,7 +1252,10 @@ fn write_audio_buffer_bytes(
         }
     }
 
-    if destination.len() % output_format.block_align() as usize != 0 {
+    if !destination
+        .len()
+        .is_multiple_of(output_format.block_align() as usize)
+    {
         return Err(PlaybackError::Output(format!(
             "decoded packet does not align to WASAPI block size for {}",
             output_format.display_label()
@@ -1286,7 +1310,10 @@ fn write_f32_samples_to_wasapi_bytes(
         }
     }
 
-    if destination.len() % output_format.block_align() as usize != 0 {
+    if !destination
+        .len()
+        .is_multiple_of(output_format.block_align() as usize)
+    {
         return Err(PlaybackError::Output(format!(
             "resampled packet does not align to WASAPI block size for {}",
             output_format.display_label()
@@ -1308,25 +1335,30 @@ fn apply_volume_to_bytes(bytes: &mut [u8], format: WasapiPcmFormat, volume: f32)
 
     match format.kind {
         WasapiSampleKind::I16 => {
-            let sample_count = bytes.len() / 2;
-            let samples = unsafe {
-                std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut i16, sample_count)
-            };
-            apply_i16_volume(samples, volume);
+            for chunk in bytes.chunks_exact_mut(2) {
+                let sample = i16::from_ne_bytes([chunk[0], chunk[1]]);
+                let scaled = (sample as f32 * volume)
+                    .round()
+                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                chunk.copy_from_slice(&scaled.to_ne_bytes());
+            }
         }
         WasapiSampleKind::I32 => {
-            let sample_count = bytes.len() / 4;
-            let samples = unsafe {
-                std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut i32, sample_count)
-            };
-            apply_i32_volume(samples, volume);
+            let factor = volume as f64;
+            for chunk in bytes.chunks_exact_mut(4) {
+                let sample = i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let scaled = (sample as f64 * factor)
+                    .round()
+                    .clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+                chunk.copy_from_slice(&scaled.to_ne_bytes());
+            }
         }
         WasapiSampleKind::F32 => {
-            let sample_count = bytes.len() / 4;
-            let samples = unsafe {
-                std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut f32, sample_count)
-            };
-            apply_f32_volume(samples, volume);
+            for chunk in bytes.chunks_exact_mut(4) {
+                let sample = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let scaled = (sample * volume).clamp(-1.0, 1.0);
+                chunk.copy_from_slice(&scaled.to_ne_bytes());
+            }
         }
     }
 }
@@ -1463,54 +1495,45 @@ fn normalize_volume(volume: f32) -> f32 {
     volume.clamp(0.0, 1.0)
 }
 
-fn apply_i16_volume(samples: &mut [i16], volume: f32) {
-    if volume >= 0.999_9 {
-        return;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_format(kind: WasapiSampleKind) -> WasapiPcmFormat {
+        WasapiPcmFormat {
+            sample_rate: 48_000,
+            channels: 2,
+            channel_mask: 0,
+            valid_bits: match kind {
+                WasapiSampleKind::I16 => 16,
+                WasapiSampleKind::I32 | WasapiSampleKind::F32 => 32,
+            },
+            kind,
+        }
     }
 
-    if volume <= 0.000_1 {
-        samples.fill(0);
-        return;
-    }
+    #[test]
+    fn apply_volume_to_bytes_handles_unaligned_slices_safely() {
+        // Offset by 1 byte to guarantee unaligned pointer for i16/i32/f32
+        let mut raw_i16 = vec![0xAAu8];
+        raw_i16.extend_from_slice(&1000i16.to_ne_bytes());
+        raw_i16.extend_from_slice(&(-2000i16).to_ne_bytes());
+        apply_volume_to_bytes(&mut raw_i16[1..], test_format(WasapiSampleKind::I16), 0.5);
+        assert_eq!(i16::from_ne_bytes([raw_i16[1], raw_i16[2]]), 500);
+        assert_eq!(i16::from_ne_bytes([raw_i16[3], raw_i16[4]]), -1000);
 
-    for sample in samples {
-        let scaled = (*sample as f32 * volume)
-            .round()
-            .clamp(i16::MIN as f32, i16::MAX as f32);
-        *sample = scaled as i16;
-    }
-}
+        let mut raw_i32 = vec![0xBBu8];
+        raw_i32.extend_from_slice(&1_000_000i32.to_ne_bytes());
+        apply_volume_to_bytes(&mut raw_i32[1..], test_format(WasapiSampleKind::I32), 0.25);
+        assert_eq!(
+            i32::from_ne_bytes([raw_i32[1], raw_i32[2], raw_i32[3], raw_i32[4]]),
+            250_000
+        );
 
-fn apply_i32_volume(samples: &mut [i32], volume: f32) {
-    if volume >= 0.999_9 {
-        return;
-    }
-
-    if volume <= 0.000_1 {
-        samples.fill(0);
-        return;
-    }
-
-    let factor = volume as f64;
-    for sample in samples {
-        let scaled = (*sample as f64 * factor)
-            .round()
-            .clamp(i32::MIN as f64, i32::MAX as f64);
-        *sample = scaled as i32;
-    }
-}
-
-fn apply_f32_volume(samples: &mut [f32], volume: f32) {
-    if volume >= 0.999_9 {
-        return;
-    }
-
-    if volume <= 0.000_1 {
-        samples.fill(0.0);
-        return;
-    }
-
-    for sample in samples {
-        *sample = (*sample * volume).clamp(-1.0, 1.0);
+        let mut raw_f32 = vec![0xCCu8];
+        raw_f32.extend_from_slice(&0.8f32.to_ne_bytes());
+        apply_volume_to_bytes(&mut raw_f32[1..], test_format(WasapiSampleKind::F32), 0.5);
+        let scaled = f32::from_ne_bytes([raw_f32[1], raw_f32[2], raw_f32[3], raw_f32[4]]);
+        assert!((scaled - 0.4).abs() < 1e-6);
     }
 }

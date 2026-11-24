@@ -30,7 +30,7 @@ use lofty::{
 };
 use regex::Regex;
 use tokio::{
-    sync::{broadcast, RwLock},
+    sync::{broadcast, Mutex, RwLock},
     task::spawn_blocking,
 };
 use walkdir::WalkDir;
@@ -40,6 +40,7 @@ use crate::LibraryError;
 #[derive(Clone, Default)]
 pub struct LibraryService {
     state: Arc<RwLock<LibrarySnapshot>>,
+    write_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -57,10 +58,44 @@ struct ScanArtifacts {
 struct CompiledCatalogRule {
     regex: Regex,
     composer_hints: Vec<String>,
+    is_single_letter_label: bool,
 }
 
-const DEFAULT_CATALOG_SOURCE_TAGS: &[&str] = &["TITLE", "WORK", "ALBUM"];
-const COMPOSER_SOURCE_TAGS: &[&str] = &["COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"];
+const CATALOG_TITLE_SOURCE_TAGS: &[&str] = &["TITLE", "©NAM", "TIT2", "INAM", "NAME"];
+const CATALOG_WORK_SOURCE_TAGS: &[&str] = &["WORK", "©WRK", "TIT1", "----:com.apple.iTunes:WORK"];
+const CATALOG_ALBUM_SOURCE_TAGS: &[&str] = &["ALBUM", "©ALB", "TALB", "IPRD"];
+const CATALOG_SOURCE_TAG_TIERS: &[&[&str]] = &[
+    CATALOG_TITLE_SOURCE_TAGS,
+    CATALOG_WORK_SOURCE_TAGS,
+    CATALOG_ALBUM_SOURCE_TAGS,
+];
+const COMPOSER_SOURCE_TAGS: &[&str] = &[
+    "COMPOSER",
+    "©WRT",
+    "TCOM",
+    "IMUS",
+    "WORKCOMPOSER",
+    "COMPOSERSORT",
+    "----:com.apple.iTunes:COMPOSER",
+];
+
+fn remap_tracks_preserving_synthetic_fields(
+    tracks: &mut [ScannedTrack],
+    mappings: &[LibraryFieldMapping],
+    catalog_rules: &[CompiledCatalogRule],
+) {
+    for track in tracks {
+        if track.raw_tags.is_empty() {
+            continue;
+        }
+        let album_path = track.mapped_fields.get("album_path").cloned();
+        track.mapped_fields =
+            map_fields(&track.raw_tags, mappings, &track.audio.format, catalog_rules);
+        if let Some(ap) = album_path {
+            track.mapped_fields.insert("album_path".to_string(), ap);
+        }
+    }
+}
 
 impl LibraryService {
     pub fn new() -> Self {
@@ -75,19 +110,11 @@ impl LibraryService {
 
         let mappings = snapshot.field_mappings.clone();
         let catalog_rules = compile_catalog_rules(&snapshot.catalog_rules);
-        for track in &mut snapshot.tracks {
-            if !track.raw_tags.is_empty() {
-                let album_path = track.mapped_fields.get("album_path").cloned();
-                track.mapped_fields =
-                    map_fields(&track.raw_tags, &mappings, &track.audio.format, &catalog_rules);
-                if let Some(ap) = album_path {
-                    track.mapped_fields.insert("album_path".to_string(), ap);
-                }
-            }
-        }
+        remap_tracks_preserving_synthetic_fields(&mut snapshot.tracks, &mappings, &catalog_rules);
 
         Self {
             state: Arc::new(RwLock::new(snapshot)),
+            write_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -238,10 +265,7 @@ impl LibraryService {
 
         let mappings = state.field_mappings.clone();
         let catalog_rules = compile_catalog_rules(&state.catalog_rules);
-        for track in &mut state.tracks {
-            track.mapped_fields =
-                map_fields(&track.raw_tags, &mappings, &track.audio.format, &catalog_rules);
-        }
+        remap_tracks_preserving_synthetic_fields(&mut state.tracks, &mappings, &catalog_rules);
 
         state.clone()
     }
@@ -258,10 +282,7 @@ impl LibraryService {
 
         let mappings = state.field_mappings.clone();
         let catalog_rules = compile_catalog_rules(&state.catalog_rules);
-        for track in &mut state.tracks {
-            track.mapped_fields =
-                map_fields(&track.raw_tags, &mappings, &track.audio.format, &catalog_rules);
-        }
+        remap_tracks_preserving_synthetic_fields(&mut state.tracks, &mappings, &catalog_rules);
 
         Ok(state.clone())
     }
@@ -389,6 +410,8 @@ impl LibraryService {
             return Err(LibraryError::InvalidFieldExportTag);
         }
 
+        let _write_guard = self.write_lock.lock().await;
+
         let snapshot = self.state.read().await.clone();
         if snapshot.is_scanning {
             return Err(LibraryError::AlreadyScanning);
@@ -417,7 +440,7 @@ impl LibraryService {
         let compiled_catalog_rules = compile_catalog_rules(&snapshot.catalog_rules);
         let cache_root = album_art_cache_root();
 
-        let updated_tracks = spawn_blocking(move || {
+        let (updated_tracks, batch_error) = spawn_blocking(move || {
             export_field_to_tag_from_tracks(
                 &track_lookup,
                 &track_paths,
@@ -429,22 +452,28 @@ impl LibraryService {
             )
         })
         .await
-        .map_err(|_| LibraryError::FieldExportRefreshFailure)??;
+        .map_err(|_| LibraryError::FieldExportRefreshFailure)?;
 
-        let updated_track_lookup = updated_tracks
-            .into_iter()
-            .map(|track| (track.path.clone(), track))
-            .collect::<HashMap<_, _>>();
+        if !updated_tracks.is_empty() {
+            let updated_track_lookup = updated_tracks
+                .into_iter()
+                .map(|track| (track.path.clone(), track))
+                .collect::<HashMap<_, _>>();
 
-        let mut state = self.state.write().await;
-        for track in &mut state.tracks {
-            if let Some(updated) = updated_track_lookup.get(&track.path) {
-                *track = updated.clone();
+            let mut state = self.state.write().await;
+            for track in &mut state.tracks {
+                if let Some(updated) = updated_track_lookup.get(&track.path) {
+                    *track = updated.clone();
+                }
             }
+            state.tag_inventory = build_tag_inventory(&state.tracks);
         }
-        state.tag_inventory = build_tag_inventory(&state.tracks);
 
-        Ok(state.clone())
+        if let Some(err) = batch_error {
+            return Err(err);
+        }
+
+        Ok(self.state.read().await.clone())
     }
 
     pub async fn edit_track_tags(
@@ -465,6 +494,7 @@ impl LibraryService {
         }
 
         let updates = sanitize_track_tag_edit_updates(request.updates)?;
+        let _write_guard = self.write_lock.lock().await;
         let snapshot = self.state.read().await.clone();
         if updates.is_empty() {
             return Ok(snapshot);
@@ -484,7 +514,7 @@ impl LibraryService {
         let compiled_catalog_rules = compile_catalog_rules(&snapshot.catalog_rules);
         let cache_root = album_art_cache_root();
 
-        let updated_tracks = spawn_blocking(move || {
+        let (updated_tracks, batch_error) = spawn_blocking(move || {
             edit_track_tags_from_tracks(
                 &track_lookup,
                 &track_paths,
@@ -495,22 +525,28 @@ impl LibraryService {
             )
         })
         .await
-        .map_err(|_| LibraryError::FieldExportRefreshFailure)??;
+        .map_err(|_| LibraryError::FieldExportRefreshFailure)?;
 
-        let updated_track_lookup = updated_tracks
-            .into_iter()
-            .map(|track| (track.path.clone(), track))
-            .collect::<HashMap<_, _>>();
+        if !updated_tracks.is_empty() {
+            let updated_track_lookup = updated_tracks
+                .into_iter()
+                .map(|track| (track.path.clone(), track))
+                .collect::<HashMap<_, _>>();
 
-        let mut state = self.state.write().await;
-        for track in &mut state.tracks {
-            if let Some(updated) = updated_track_lookup.get(&track.path) {
-                *track = updated.clone();
+            let mut state = self.state.write().await;
+            for track in &mut state.tracks {
+                if let Some(updated) = updated_track_lookup.get(&track.path) {
+                    *track = updated.clone();
+                }
             }
+            state.tag_inventory = build_tag_inventory(&state.tracks);
         }
-        state.tag_inventory = build_tag_inventory(&state.tracks);
 
-        Ok(state.clone())
+        if let Some(err) = batch_error {
+            return Err(err);
+        }
+
+        Ok(self.state.read().await.clone())
     }
 }
 
@@ -540,7 +576,7 @@ fn scan_library(
         }
 
         let processed_files = (index + 1) as u64;
-        if processed_files == discovered_files || processed_files % 25 == 0 {
+        if processed_files == discovered_files || processed_files.is_multiple_of(25) {
             let _ = events.send(AppEvent::Library(LibraryEvent::ScanProgress(
                 ScanProgress {
                     phase: "indexing".into(),
@@ -563,7 +599,7 @@ fn scan_library(
     })
 }
 
-fn album_art_cache_root() -> PathBuf {
+pub fn album_art_cache_root() -> PathBuf {
     #[cfg(target_os = "android")]
     let base_dir = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -606,6 +642,7 @@ fn should_skip_entry(entry: &walkdir::DirEntry) -> bool {
 
 fn discover_audio_files(roots: &[LibraryRoot]) -> Vec<PathBuf> {
     let mut files = Vec::new();
+    let mut seen = HashSet::new();
 
     for root in roots {
         let walker = WalkDir::new(&root.path)
@@ -622,12 +659,27 @@ fn discover_audio_files(roots: &[LibraryRoot]) -> Vec<PathBuf> {
         for entry in walker {
             let path = entry.path();
             if entry.file_type().is_file() && is_supported_audio_file(path) {
-                files.push(path.to_path_buf());
+                let dedupe_key = canonical_path_dedupe_key(path);
+                if seen.insert(dedupe_key) {
+                    files.push(path.to_path_buf());
+                }
             }
         }
     }
 
     files
+}
+
+fn canonical_path_dedupe_key(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    #[cfg(target_os = "windows")]
+    {
+        raw.replace('/', "\\").to_lowercase()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        raw.into_owned()
+    }
 }
 
 fn is_supported_audio_file(path: &Path) -> bool {
@@ -717,6 +769,11 @@ fn merge_format_specific_raw_tags(path: &Path, raw_tags: &mut BTreeMap<String, V
                 merge_vorbis_comments(raw_tags, &vorbis_comments);
             }
         }
+        Some("m4a") | Some("mp4") => {
+            if let Some(ilst) = read_mp4_ilst(path) {
+                merge_mp4_ilst_tags(raw_tags, &ilst);
+            }
+        }
         _ => {}
     }
 
@@ -727,23 +784,24 @@ fn collect_raw_tags(tagged_file: &lofty::file::TaggedFile) -> BTreeMap<String, V
     let mut raw_tags: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for tag in tagged_file.tags() {
-        let tag_type = tag.tag_type();
-        for item in tag.items() {
-            let key = resolve_item_key_name(item.key(), tag_type);
-            let values = item_value_strings(item.value());
-            if values.is_empty() {
-                continue;
-            }
-
-            raw_tags.entry(key).or_default().extend(values);
-        }
+        collect_raw_tags_from_tag(tag, &mut raw_tags);
     }
 
-    for values in raw_tags.values_mut() {
-        *values = dedupe_preserve_order(values.clone());
-    }
-
+    normalize_raw_tag_values(&mut raw_tags);
     raw_tags
+}
+
+fn collect_raw_tags_from_tag(tag: &lofty::tag::Tag, raw_tags: &mut BTreeMap<String, Vec<String>>) {
+    let tag_type = tag.tag_type();
+    for item in tag.items() {
+        let key = resolve_item_key_name(item.key(), tag_type);
+        let values = item_value_strings(item.value());
+        if values.is_empty() {
+            continue;
+        }
+
+        raw_tags.entry(key).or_default().extend(values);
+    }
 }
 
 fn read_raw_tags_from_path(path: &Path) -> Result<BTreeMap<String, Vec<String>>, LibraryError> {
@@ -795,29 +853,40 @@ fn export_field_to_tag_from_tracks(
     mappings: &[LibraryFieldMapping],
     catalog_rules: &[CompiledCatalogRule],
     cache_root: &Path,
-) -> Result<Vec<ScannedTrack>, LibraryError> {
+) -> (Vec<ScannedTrack>, Option<LibraryError>) {
     let mut updated_tracks = Vec::with_capacity(track_paths.len());
 
     for track_path in track_paths {
         let Some(track) = track_lookup.get(track_path) else {
-            return Err(LibraryError::FieldExportTrackNotFound {
-                path: track_path.clone(),
-            });
+            return (
+                updated_tracks,
+                Some(LibraryError::FieldExportTrackNotFound {
+                    path: track_path.clone(),
+                }),
+            );
         };
 
         let values = track.mapped_fields.get(field_key).cloned().unwrap_or_default();
         let path = PathBuf::from(track_path);
 
-        write_tag_values_to_path(&path, tag_name, &values)?;
+        if let Err(err) = write_tag_updates_to_path(&path, &[(tag_name, values.as_slice())]) {
+            return (updated_tracks, Some(err));
+        }
 
-        let refreshed_track = scan_single_track(&path, mappings, catalog_rules, cache_root)
-            .map_err(|_| LibraryError::FieldExportTrackRefreshFailure {
-                path: track_path.clone(),
-            })?;
-        updated_tracks.push(refreshed_track);
+        match scan_single_track(&path, mappings, catalog_rules, cache_root) {
+            Ok(refreshed_track) => updated_tracks.push(refreshed_track),
+            Err(_) => {
+                return (
+                    updated_tracks,
+                    Some(LibraryError::FieldExportTrackRefreshFailure {
+                        path: track_path.clone(),
+                    }),
+                );
+            }
+        }
     }
 
-    Ok(updated_tracks)
+    (updated_tracks, None)
 }
 
 fn edit_track_tags_from_tracks(
@@ -827,35 +896,47 @@ fn edit_track_tags_from_tracks(
     mappings: &[LibraryFieldMapping],
     catalog_rules: &[CompiledCatalogRule],
     cache_root: &Path,
-) -> Result<Vec<ScannedTrack>, LibraryError> {
+) -> (Vec<ScannedTrack>, Option<LibraryError>) {
     let mut updated_tracks = Vec::with_capacity(track_paths.len());
+    let update_pairs: Vec<(&str, &[String])> = updates
+        .iter()
+        .map(|u| (u.tag_name.as_str(), u.values.as_slice()))
+        .collect();
 
     for track_path in track_paths {
         if !track_lookup.contains_key(track_path) {
-            return Err(LibraryError::FieldExportTrackNotFound {
-                path: track_path.clone(),
-            });
+            return (
+                updated_tracks,
+                Some(LibraryError::FieldExportTrackNotFound {
+                    path: track_path.clone(),
+                }),
+            );
         }
 
         let path = PathBuf::from(track_path);
-        for update in updates {
-            write_tag_values_to_path(&path, &update.tag_name, &update.values)?;
+        if let Err(err) = write_tag_updates_to_path(&path, &update_pairs) {
+            return (updated_tracks, Some(err));
         }
 
-        let refreshed_track = scan_single_track(&path, mappings, catalog_rules, cache_root)
-            .map_err(|_| LibraryError::FieldExportTrackRefreshFailure {
-                path: track_path.clone(),
-            })?;
-        updated_tracks.push(refreshed_track);
+        match scan_single_track(&path, mappings, catalog_rules, cache_root) {
+            Ok(refreshed_track) => updated_tracks.push(refreshed_track),
+            Err(_) => {
+                return (
+                    updated_tracks,
+                    Some(LibraryError::FieldExportTrackRefreshFailure {
+                        path: track_path.clone(),
+                    }),
+                );
+            }
+        }
     }
 
-    Ok(updated_tracks)
+    (updated_tracks, None)
 }
 
-fn write_tag_values_to_path(
+fn write_tag_updates_to_path(
     path: &Path,
-    tag_name: &str,
-    values: &[String],
+    updates: &[(&str, &[String])],
 ) -> Result<(), LibraryError> {
     let Some(file_type) = path.extension().and_then(FileType::from_ext) else {
         return Err(LibraryError::FieldExportWriteFailure {
@@ -864,201 +945,131 @@ fn write_tag_values_to_path(
         });
     };
 
+    let write_err = |message: String| LibraryError::FieldExportWriteFailure {
+        path: path.to_string_lossy().into_owned(),
+        message,
+    };
+
     match file_type {
         FileType::Aac => {
-            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
-                path: path.to_string_lossy().into_owned(),
-                message: error.to_string(),
-            })?;
-            let mut audio =
-                AacFile::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
-                    LibraryError::FieldExportWriteFailure {
-                        path: path.to_string_lossy().into_owned(),
-                        message: error.to_string(),
-                    }
-                })?;
-
-            apply_id3v2_export(&mut audio, values, tag_name);
+            let mut audio = {
+                let mut file = StdFile::open(path).map_err(|e| write_err(e.to_string()))?;
+                AacFile::read_from(&mut file, tag_write_parse_options())
+                    .map_err(|e| write_err(e.to_string()))?
+            };
+            for (tag_name, values) in updates {
+                apply_id3v2_export(&mut audio, values, tag_name);
+            }
             audio
                 .save_to_path(path, WriteOptions::default())
-                .map_err(|error| LibraryError::FieldExportWriteFailure {
-                    path: path.to_string_lossy().into_owned(),
-                    message: error.to_string(),
-                })?;
+                .map_err(|e| write_err(e.to_string()))?;
         }
         FileType::Aiff => {
-            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
-                path: path.to_string_lossy().into_owned(),
-                message: error.to_string(),
-            })?;
-            let mut audio =
-                AiffFile::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
-                    LibraryError::FieldExportWriteFailure {
-                        path: path.to_string_lossy().into_owned(),
-                        message: error.to_string(),
-                    }
-                })?;
-
-            apply_id3v2_export(&mut audio, values, tag_name);
+            let mut audio = {
+                let mut file = StdFile::open(path).map_err(|e| write_err(e.to_string()))?;
+                AiffFile::read_from(&mut file, tag_write_parse_options())
+                    .map_err(|e| write_err(e.to_string()))?
+            };
+            for (tag_name, values) in updates {
+                apply_id3v2_export(&mut audio, values, tag_name);
+            }
             audio
                 .save_to_path(path, WriteOptions::default())
-                .map_err(|error| LibraryError::FieldExportWriteFailure {
-                    path: path.to_string_lossy().into_owned(),
-                    message: error.to_string(),
-                })?;
+                .map_err(|e| write_err(e.to_string()))?;
         }
         FileType::Flac => {
-            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
-                path: path.to_string_lossy().into_owned(),
-                message: error.to_string(),
-            })?;
-            let mut audio =
-                FlacFile::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
-                    LibraryError::FieldExportWriteFailure {
-                        path: path.to_string_lossy().into_owned(),
-                        message: error.to_string(),
-                    }
-                })?;
-
-            apply_vorbis_export(&mut audio, values, tag_name);
+            let mut audio = {
+                let mut file = StdFile::open(path).map_err(|e| write_err(e.to_string()))?;
+                FlacFile::read_from(&mut file, tag_write_parse_options())
+                    .map_err(|e| write_err(e.to_string()))?
+            };
+            for (tag_name, values) in updates {
+                apply_vorbis_export(&mut audio, values, tag_name);
+            }
             audio
                 .save_to_path(path, WriteOptions::default())
-                .map_err(|error| LibraryError::FieldExportWriteFailure {
-                    path: path.to_string_lossy().into_owned(),
-                    message: error.to_string(),
-                })?;
+                .map_err(|e| write_err(e.to_string()))?;
         }
         FileType::Mpeg => {
-            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
-                path: path.to_string_lossy().into_owned(),
-                message: error.to_string(),
-            })?;
-            let mut audio =
-                MpegFile::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
-                    LibraryError::FieldExportWriteFailure {
-                        path: path.to_string_lossy().into_owned(),
-                        message: error.to_string(),
-                    }
-                })?;
-
-            apply_id3v2_export(&mut audio, values, tag_name);
+            let mut audio = {
+                let mut file = StdFile::open(path).map_err(|e| write_err(e.to_string()))?;
+                MpegFile::read_from(&mut file, tag_write_parse_options())
+                    .map_err(|e| write_err(e.to_string()))?
+            };
+            for (tag_name, values) in updates {
+                apply_id3v2_export(&mut audio, values, tag_name);
+            }
             audio
                 .save_to_path(path, WriteOptions::default())
-                .map_err(|error| LibraryError::FieldExportWriteFailure {
-                    path: path.to_string_lossy().into_owned(),
-                    message: error.to_string(),
-                })?;
+                .map_err(|e| write_err(e.to_string()))?;
         }
         FileType::Mp4 => {
-            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
-                path: path.to_string_lossy().into_owned(),
-                message: error.to_string(),
-            })?;
-            let mut audio =
-                Mp4File::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
-                    LibraryError::FieldExportWriteFailure {
-                        path: path.to_string_lossy().into_owned(),
-                        message: error.to_string(),
-                    }
-                })?;
-
-            apply_ilst_export(&mut audio, values, tag_name);
+            let mut audio = {
+                let mut file = StdFile::open(path).map_err(|e| write_err(e.to_string()))?;
+                Mp4File::read_from(&mut file, tag_write_parse_options())
+                    .map_err(|e| write_err(e.to_string()))?
+            };
+            for (tag_name, values) in updates {
+                apply_ilst_export(&mut audio, values, tag_name);
+            }
             audio
                 .save_to_path(path, WriteOptions::default())
-                .map_err(|error| LibraryError::FieldExportWriteFailure {
-                    path: path.to_string_lossy().into_owned(),
-                    message: error.to_string(),
-                })?;
+                .map_err(|e| write_err(e.to_string()))?;
         }
         FileType::Opus => {
-            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
-                path: path.to_string_lossy().into_owned(),
-                message: error.to_string(),
-            })?;
-            let mut audio =
-                OpusFile::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
-                    LibraryError::FieldExportWriteFailure {
-                        path: path.to_string_lossy().into_owned(),
-                        message: error.to_string(),
-                    }
-                })?;
-
-            apply_vorbis_export(&mut audio, values, tag_name);
+            let mut audio = {
+                let mut file = StdFile::open(path).map_err(|e| write_err(e.to_string()))?;
+                OpusFile::read_from(&mut file, tag_write_parse_options())
+                    .map_err(|e| write_err(e.to_string()))?
+            };
+            for (tag_name, values) in updates {
+                apply_vorbis_export(&mut audio, values, tag_name);
+            }
             audio
                 .save_to_path(path, WriteOptions::default())
-                .map_err(|error| LibraryError::FieldExportWriteFailure {
-                    path: path.to_string_lossy().into_owned(),
-                    message: error.to_string(),
-                })?;
+                .map_err(|e| write_err(e.to_string()))?;
         }
         FileType::Vorbis => {
-            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
-                path: path.to_string_lossy().into_owned(),
-                message: error.to_string(),
-            })?;
-            let mut audio =
-                VorbisFile::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
-                    LibraryError::FieldExportWriteFailure {
-                        path: path.to_string_lossy().into_owned(),
-                        message: error.to_string(),
-                    }
-                })?;
-
-            apply_vorbis_export(&mut audio, values, tag_name);
+            let mut audio = {
+                let mut file = StdFile::open(path).map_err(|e| write_err(e.to_string()))?;
+                VorbisFile::read_from(&mut file, tag_write_parse_options())
+                    .map_err(|e| write_err(e.to_string()))?
+            };
+            for (tag_name, values) in updates {
+                apply_vorbis_export(&mut audio, values, tag_name);
+            }
             audio
                 .save_to_path(path, WriteOptions::default())
-                .map_err(|error| LibraryError::FieldExportWriteFailure {
-                    path: path.to_string_lossy().into_owned(),
-                    message: error.to_string(),
-                })?;
+                .map_err(|e| write_err(e.to_string()))?;
         }
         FileType::Speex => {
-            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
-                path: path.to_string_lossy().into_owned(),
-                message: error.to_string(),
-            })?;
-            let mut audio =
-                SpeexFile::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
-                    LibraryError::FieldExportWriteFailure {
-                        path: path.to_string_lossy().into_owned(),
-                        message: error.to_string(),
-                    }
-                })?;
-
-            apply_vorbis_export(&mut audio, values, tag_name);
+            let mut audio = {
+                let mut file = StdFile::open(path).map_err(|e| write_err(e.to_string()))?;
+                SpeexFile::read_from(&mut file, tag_write_parse_options())
+                    .map_err(|e| write_err(e.to_string()))?
+            };
+            for (tag_name, values) in updates {
+                apply_vorbis_export(&mut audio, values, tag_name);
+            }
             audio
                 .save_to_path(path, WriteOptions::default())
-                .map_err(|error| LibraryError::FieldExportWriteFailure {
-                    path: path.to_string_lossy().into_owned(),
-                    message: error.to_string(),
-                })?;
+                .map_err(|e| write_err(e.to_string()))?;
         }
         FileType::Wav => {
-            let mut file = StdFile::open(path).map_err(|error| LibraryError::FieldExportWriteFailure {
-                path: path.to_string_lossy().into_owned(),
-                message: error.to_string(),
-            })?;
-            let mut audio =
-                WavFile::read_from(&mut file, tag_write_parse_options()).map_err(|error| {
-                    LibraryError::FieldExportWriteFailure {
-                        path: path.to_string_lossy().into_owned(),
-                        message: error.to_string(),
-                    }
-                })?;
-
-            apply_id3v2_export(&mut audio, values, tag_name);
+            let mut audio = {
+                let mut file = StdFile::open(path).map_err(|e| write_err(e.to_string()))?;
+                WavFile::read_from(&mut file, tag_write_parse_options())
+                    .map_err(|e| write_err(e.to_string()))?
+            };
+            for (tag_name, values) in updates {
+                apply_id3v2_export(&mut audio, values, tag_name);
+            }
             audio
                 .save_to_path(path, WriteOptions::default())
-                .map_err(|error| LibraryError::FieldExportWriteFailure {
-                    path: path.to_string_lossy().into_owned(),
-                    message: error.to_string(),
-                })?;
+                .map_err(|e| write_err(e.to_string()))?;
         }
         _ => {
-            return Err(LibraryError::FieldExportWriteFailure {
-                path: path.to_string_lossy().into_owned(),
-                message: "unsupported audio format".into(),
-            });
+            return Err(write_err("unsupported audio format".into()));
         }
     }
 
@@ -1177,6 +1188,20 @@ fn write_values_to_ilst_tag(tag: &mut Ilst, tag_name: &str, values: &[String]) {
     }
 
     let ident = parse_mp4_freeform_ident(tag_name);
+    // Remove any existing freeform atoms matching (mean, name) case-insensitively
+    // so legacy uppercased `COM.APPLE.ITUNES` atoms do not remain as duplicates.
+    if let AtomIdent::Freeform { ref mean, ref name } = ident {
+        tag.retain(|atom| {
+            !matches!(
+                atom.ident(),
+                AtomIdent::Freeform {
+                    mean: existing_mean,
+                    name: existing_name,
+                } if existing_mean.eq_ignore_ascii_case(mean)
+                    && existing_name.eq_ignore_ascii_case(name)
+            )
+        });
+    }
     let _ = tag.remove(&ident);
 
     if let Some((first_value, remaining_values)) = values.split_first() {
@@ -1209,8 +1234,13 @@ fn parse_mp4_freeform_ident(tag_name: &str) -> AtomIdent<'static> {
         let name = parts.next().unwrap_or_default().trim();
 
         if !mean.is_empty() && !name.is_empty() {
+            let canonical_mean = if mean.eq_ignore_ascii_case("com.apple.iTunes") {
+                "com.apple.iTunes"
+            } else {
+                mean
+            };
             return AtomIdent::Freeform {
-                mean: Cow::Owned(mean.to_string()),
+                mean: Cow::Owned(canonical_mean.to_string()),
                 name: Cow::Owned(name.to_string()),
             };
         }
@@ -1396,6 +1426,32 @@ fn read_speex_vorbis_comments(path: &Path) -> Option<VorbisComments> {
     Some(speex.vorbis_comments().clone())
 }
 
+fn read_mp4_ilst(path: &Path) -> Option<Ilst> {
+    let mut file = StdFile::open(path).ok()?;
+    let mp4 = Mp4File::read_from(&mut file, supplemental_parse_options()).ok()?;
+    mp4.ilst().cloned()
+}
+
+fn merge_mp4_ilst_tags(raw_tags: &mut BTreeMap<String, Vec<String>>, ilst: &Ilst) {
+    for atom in ilst {
+        if let AtomIdent::Freeform { mean, name } = atom.ident() {
+            let key = normalize_tag_name(&format!("----:{mean}:{name}"));
+            let mut extracted = Vec::new();
+            for data in atom.data() {
+                match data {
+                    AtomData::UTF8(text) | AtomData::UTF16(text) => {
+                        extracted.extend(split_multi_value(text));
+                    }
+                    _ => {}
+                }
+            }
+            if !extracted.is_empty() {
+                raw_tags.entry(key).or_default().extend(extracted);
+            }
+        }
+    }
+}
+
 fn merge_vorbis_comments(
     raw_tags: &mut BTreeMap<String, Vec<String>>,
     vorbis_comments: &VorbisComments,
@@ -1494,7 +1550,19 @@ fn dedupe_preserve_order(values: Vec<String>) -> Vec<String> {
 }
 
 fn normalize_tag_name(tag: &str) -> String {
-    tag.trim().to_ascii_uppercase()
+    let trimmed = tag.trim();
+    if let Some(remainder) = trimmed.strip_prefix("----:") {
+        if let Some((mean, name)) = remainder.split_once(':') {
+            let mean_trimmed = mean.trim();
+            let canonical_mean = if mean_trimmed.eq_ignore_ascii_case("com.apple.iTunes") {
+                "com.apple.iTunes"
+            } else {
+                mean_trimmed
+            };
+            return format!("----:{canonical_mean}:{}", name.trim().to_ascii_uppercase());
+        }
+    }
+    trimmed.to_ascii_uppercase()
 }
 
 fn normalize_root_path(path: &str) -> String {
@@ -1503,22 +1571,27 @@ fn normalize_root_path(path: &str) -> String {
         return String::new();
     }
 
-    if trimmed.len() <= 3 {
-        return trimmed.to_string();
+    #[cfg(target_os = "windows")]
+    let normalized = trimmed.replace('/', "\\");
+    #[cfg(not(target_os = "windows"))]
+    let normalized = trimmed.to_string();
+
+    if normalized.len() <= 3 {
+        return normalized;
     }
 
-    trimmed.trim_end_matches(['\\', '/']).to_string()
+    normalized.trim_end_matches(['\\', '/']).to_string()
 }
 
 fn root_paths_equal(left: &str, right: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
-        left.to_lowercase() == right.to_lowercase()
+        normalize_root_path(left).to_lowercase() == normalize_root_path(right).to_lowercase()
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        left == right
+        normalize_root_path(left) == normalize_root_path(right)
     }
 }
 
@@ -1593,7 +1666,7 @@ fn map_fields(
 
         for source_tag in &mapping.tag_priorities {
             let normalized = normalize_tag_name(source_tag);
-            if let Some(values) = raw_tags.get(&normalized) {
+            if let Some(values) = lookup_raw_tag_values(raw_tags, &normalized) {
                 if !values.is_empty() {
                     resolved_values = values.clone();
                     break;
@@ -1611,16 +1684,39 @@ fn map_fields(
     mapped
 }
 
+fn lookup_raw_tag_values<'a>(
+    raw_tags: &'a BTreeMap<String, Vec<String>>,
+    normalized_key: &str,
+) -> Option<&'a Vec<String>> {
+    raw_tags.get(normalized_key).or_else(|| {
+        raw_tags
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(normalized_key))
+            .map(|(_, v)| v)
+    })
+}
+
 fn extract_catalog_numbers(
     raw_tags: &BTreeMap<String, Vec<String>>,
     catalog_rules: &[CompiledCatalogRule],
 ) -> Vec<String> {
     let mut values = Vec::new();
 
-    for source in DEFAULT_CATALOG_SOURCE_TAGS {
-        let Some(source_values) = raw_tags.get(*source) else {
+    for tier in CATALOG_SOURCE_TAG_TIERS {
+        let mut tier_source_values: Vec<&str> = Vec::new();
+        for source in *tier {
+            if let Some(source_values) = lookup_raw_tag_values(raw_tags, source) {
+                for value in source_values {
+                    if !value.trim().is_empty() {
+                        tier_source_values.push(value.as_str());
+                    }
+                }
+            }
+        }
+
+        if tier_source_values.is_empty() {
             continue;
-        };
+        }
 
         let mut source_matches = Vec::new();
         for rule in catalog_rules {
@@ -1628,7 +1724,7 @@ fn extract_catalog_numbers(
                 continue;
             }
 
-            for source_value in source_values {
+            for source_value in &tier_source_values {
                 source_matches.extend(extract_catalog_matches_from_value(
                     source_value,
                     &rule.regex,
@@ -1749,13 +1845,15 @@ fn compile_catalog_rules(rules: &[CatalogRule]) -> Vec<CompiledCatalogRule> {
             let composer_hints = rule
                 .composers
                 .iter()
-                .map(|composer| composer.trim().to_ascii_lowercase())
+                .map(|composer| deunicode::deunicode(composer.trim()).to_ascii_lowercase())
                 .filter(|composer| !composer.is_empty())
                 .collect::<Vec<_>>();
+            let alnum_len = rule.label.chars().filter(|c| c.is_alphanumeric()).count();
 
             Some(CompiledCatalogRule {
                 regex,
                 composer_hints,
+                is_single_letter_label: alnum_len <= 1,
             })
         })
         .collect()
@@ -1818,18 +1916,20 @@ fn catalog_rule_matches_composer(
 
     let composer_values = COMPOSER_SOURCE_TAGS
         .iter()
-        .filter_map(|tag| raw_tags.get(*tag))
+        .filter_map(|tag| lookup_raw_tag_values(raw_tags, tag))
         .flat_map(|values| values.iter())
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>();
 
     if composer_values.is_empty() {
-        return true;
+        // Explicit multi-letter labels (e.g. HWV, BWV, WAB) can still match when composer is untagged,
+        // while ambiguous single-letter labels (K, D, S.) require an explicit composer match.
+        return !rule.is_single_letter_label;
     }
 
     composer_values.iter().any(|value| {
-        let normalized = value.to_ascii_lowercase();
+        let normalized = deunicode::deunicode(value).to_ascii_lowercase();
         rule.composer_hints
             .iter()
             .any(|hint| normalized.contains(hint))
@@ -2012,96 +2112,248 @@ fn cover_art_parse_options() -> ParseOptions {
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_first_mp4_picture, compile_catalog_rules, extract_catalog_numbers, find_album_art, scan_library,
-        parse_mp4_freeform_ident, scan_single_track, write_values_to_id3v2_tag,
-        write_values_to_vorbis_tag,
+        cache_first_mp4_picture, collect_raw_tags_from_tag, compile_catalog_rules,
+        discover_audio_files, extract_catalog_numbers, find_album_art, map_fields,
+        merge_mp4_ilst_tags, normalize_raw_tag_values, normalize_tag_name,
+        parse_mp4_freeform_ident, scan_library, scan_single_track, write_values_to_id3v2_tag,
+        write_values_to_ilst_tag, write_values_to_vorbis_tag, LibraryService,
     };
     use std::{
+        borrow::Cow,
         collections::BTreeMap,
-        path::PathBuf,
+        path::Path,
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use aria_domain::{default_catalog_rules, default_field_mappings, LibraryRoot};
+    use aria_domain::{
+        default_catalog_rules, default_field_mappings, LibraryRoot, LibrarySnapshot, ScannedTrack,
+    };
     use lofty::{
+        config::WriteOptions,
+        file::AudioFile,
+        flac::FlacFile,
         id3::v2::{FrameId, Id3v2Tag},
-        mp4::{AtomIdent, Ilst},
-        ogg::VorbisComments,
+        iff::wav::RiffInfoList,
+        mp4::{Atom, AtomData, AtomIdent, DataType, Ilst},
+        ogg::{OggPictureStorage, VorbisComments},
         picture::{MimeType, Picture, PictureType},
+        tag::{Tag, TagExt},
     };
     use tokio::sync::broadcast;
 
-    #[test]
-    fn can_scan_sample_library_when_present() {
-        let sample_root = PathBuf::from(r"C:\Users\hongswan\Music\Great 50\Great 50");
+    fn write_minimal_flac(path: &Path, comments: &[(&str, &str)], picture: Option<Picture>) {
+        // Minimal valid 42-byte FLAC file: "fLaC" + last STREAMINFO block (44.1 kHz, 2ch, 16-bit, 44100 samples)
+        let mut flac_bytes = Vec::with_capacity(42);
+        flac_bytes.extend_from_slice(b"fLaC");
+        flac_bytes.extend_from_slice(&[0x80, 0x00, 0x00, 0x22]); // last block = true, type = STREAMINFO (0), len = 34
+        flac_bytes.extend_from_slice(&4096u16.to_be_bytes()); // min block size
+        flac_bytes.extend_from_slice(&4096u16.to_be_bytes()); // max block size
+        flac_bytes.extend_from_slice(&[0u8; 6]); // min/max frame size
+        // 20-bit sample rate (44100 = 0x0AC44), 3-bit channels-1 (1), 5-bit bps-1 (15), 36-bit total samples (44100)
+        let packed: u64 = (44100u64 << 44) | (1u64 << 41) | (15u64 << 36) | 44100u64;
+        flac_bytes.extend_from_slice(&packed.to_be_bytes());
+        flac_bytes.extend_from_slice(&[0u8; 16]); // MD5
+        std::fs::write(path, &flac_bytes).expect("minimal flac should be written");
 
-        if !sample_root.exists() {
-            return;
+        let mut vorbis = VorbisComments::new();
+        for (key, value) in comments {
+            vorbis.push((*key).to_string(), (*value).to_string());
         }
+        vorbis
+            .save_to_path(path, WriteOptions::default())
+            .expect("vorbis comments should save to minimal flac");
+
+        if let Some(pic) = picture {
+            let mut file = std::fs::File::open(path).expect("flac should open for picture update");
+            let mut flac = FlacFile::read_from(&mut file, lofty::config::ParseOptions::new())
+                .expect("minimal flac should parse");
+            drop(file);
+            flac.insert_picture(pic, None)
+                .expect("picture should insert into flac");
+            lofty::file::AudioFile::save_to_path(&flac, path, WriteOptions::default())
+                .expect("flac with picture should save");
+        }
+    }
+
+    fn write_minimal_mp3(path: &Path, frames: &[(&str, &str)]) {
+        // Minimal valid MPEG-1 Layer III stream (2 consecutive 128 kbps, 44.1 kHz, stereo frames = 834 bytes)
+        let mut mp3_bytes = vec![0u8; 834];
+        for offset in [0usize, 417usize] {
+            mp3_bytes[offset] = 0xFF;
+            mp3_bytes[offset + 1] = 0xFB;
+            mp3_bytes[offset + 2] = 0x90;
+            mp3_bytes[offset + 3] = 0x00;
+        }
+        std::fs::write(path, &mp3_bytes).expect("minimal mp3 should be written");
+
+        let mut id3 = Id3v2Tag::new();
+        for (key, value) in frames {
+            write_values_to_id3v2_tag(&mut id3, key, &[(*value).to_string()]);
+        }
+        id3.save_to_path(path, WriteOptions::default())
+            .expect("id3 tag should save to minimal mp3");
+    }
+
+    fn write_minimal_wav(path: &Path, entries: &[(&str, &str)]) {
+        // Minimal valid PCM WAV file (44.1 kHz, 16-bit, stereo, 4 frames)
+        let data_len: u32 = 16;
+        let riff_len: u32 = 36 + data_len;
+        let mut wav_bytes = Vec::with_capacity(44 + data_len as usize);
+        wav_bytes.extend_from_slice(b"RIFF");
+        wav_bytes.extend_from_slice(&riff_len.to_le_bytes());
+        wav_bytes.extend_from_slice(b"WAVE");
+        wav_bytes.extend_from_slice(b"fmt ");
+        wav_bytes.extend_from_slice(&16u32.to_le_bytes());
+        wav_bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav_bytes.extend_from_slice(&2u16.to_le_bytes()); // stereo
+        wav_bytes.extend_from_slice(&44100u32.to_le_bytes()); // sample rate
+        wav_bytes.extend_from_slice(&(44100u32 * 4).to_le_bytes()); // byte rate
+        wav_bytes.extend_from_slice(&4u16.to_le_bytes()); // block align
+        wav_bytes.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        wav_bytes.extend_from_slice(b"data");
+        wav_bytes.extend_from_slice(&data_len.to_le_bytes());
+        wav_bytes.extend_from_slice(&vec![0u8; data_len as usize]);
+        std::fs::write(path, &wav_bytes).expect("minimal wav should be written");
+
+        let mut info = RiffInfoList::new();
+        for (key, value) in entries {
+            info.insert((*key).to_string(), (*value).to_string());
+        }
+        info.save_to_path(path, WriteOptions::default())
+            .expect("riff info should save to minimal wav");
+    }
+
+    #[test]
+    fn can_scan_library_across_flac_mp3_and_wav_fixtures() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("aria-fixture-scan-{unique}"));
+        let library_root = temp_root.join("music");
+        let cache_root = temp_root.join("cache");
+        std::fs::create_dir_all(&library_root).expect("fixture dir should be created");
+
+        write_minimal_flac(
+            &library_root.join("01-bach.flac"),
+            &[
+                ("ALBUM", "Goldberg Variations"),
+                ("TITLE", "Aria, BWV 988"),
+                ("COMPOSER", "Johann Sebastian Bach"),
+                ("PERFORMER", "Glenn Gould"),
+            ],
+            None,
+        );
+        write_minimal_mp3(
+            &library_root.join("02-handel.mp3"),
+            &[
+                ("TALB", "Water Music"),
+                ("TIT2", "Suite No. 1 in F Major, HWV 348"),
+                ("TCOM", "Georg Friedrich Händel"),
+                ("TPE1", "The English Concert"),
+            ],
+        );
+        write_minimal_wav(
+            &library_root.join("03-mozart.wav"),
+            &[
+                ("IPRD", "Symphonies Nos. 40 & 41"),
+                ("INAM", "Symphony No. 41 in C Major, K. 551"),
+                ("IART", "Berlin Philharmonic"),
+            ],
+        );
 
         let (events, _) = broadcast::channel(64);
         let artifacts = scan_library(
             &[LibraryRoot {
-                path: sample_root.to_string_lossy().into_owned(),
-                label: "Great 50".into(),
+                path: library_root.to_string_lossy().into_owned(),
+                label: "Fixture Library".into(),
             }],
             &default_field_mappings(),
             &default_catalog_rules(),
-            &PathBuf::from(r"C:\dev\aria\.cache\album-art"),
+            &cache_root,
             &events,
         )
-        .expect("sample library should scan");
+        .expect("fixture library should scan");
 
-        assert!(!artifacts.tracks.is_empty(), "expected scanned tracks");
+        assert_eq!(artifacts.tracks.len(), 3, "expected all 3 format fixtures to scan");
         assert!(
-            artifacts
-                .tag_inventory
-                .iter()
-                .any(|entry| entry.tag == "ALBUM"),
-            "expected ALBUM tag to appear"
+            artifacts.tag_inventory.iter().any(|entry| entry.tag == "ALBUM"),
+            "expected ALBUM tag in inventory"
         );
-        assert!(
-            artifacts.tracks.iter().any(|track| !track
-                .mapped_fields
-                .get("title")
-                .cloned()
-                .unwrap_or_default()
-                .is_empty()),
-            "expected title mapping for at least one track"
+
+        let flac = artifacts
+            .tracks
+            .iter()
+            .find(|t| t.file_name == "01-bach.flac")
+            .expect("flac fixture should be scanned");
+        assert_eq!(flac.mapped_fields.get("album"), Some(&vec!["Goldberg Variations".into()]));
+        assert_eq!(flac.mapped_fields.get("catalog"), Some(&vec!["BWV 988".into()]));
+
+        let mp3 = artifacts
+            .tracks
+            .iter()
+            .find(|t| t.file_name == "02-handel.mp3")
+            .expect("mp3 fixture should be scanned");
+        assert_eq!(mp3.mapped_fields.get("album"), Some(&vec!["Water Music".into()]));
+        assert_eq!(mp3.mapped_fields.get("composer"), Some(&vec!["Georg Friedrich Händel".into()]));
+        assert_eq!(mp3.mapped_fields.get("catalog"), Some(&vec!["HWV 348".into()]));
+
+        let wav = artifacts
+            .tracks
+            .iter()
+            .find(|t| t.file_name == "03-mozart.wav")
+            .expect("wav fixture should be scanned");
+        assert_eq!(wav.mapped_fields.get("album"), Some(&vec!["Symphonies Nos. 40 & 41".into()]));
+        assert_eq!(
+            wav.mapped_fields.get("title"),
+            Some(&vec!["Symphony No. 41 in C Major, K. 551".into()])
         );
+
+        let _ = std::fs::remove_dir_all(&temp_root);
     }
 
     #[test]
-    fn preserves_custom_flac_vorbis_fields_for_sample_track_when_present() {
-        let sample_track = PathBuf::from(
-            r"C:\Users\hongswan\Music\Great 50\Great 50\Renaud Capuçon - Brahms - Berg  Violin Concertos (2012) [16B-44.1kHz]\05. Violin Concerto To the Memory of an Angel II. Allegro - Adagio.flac",
+    fn preserves_custom_flac_vorbis_fields_during_scan() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("aria-flac-custom-tags-{unique}"));
+        let cache_root = temp_root.join("cache");
+        std::fs::create_dir_all(&temp_root).expect("temp dir should be created");
+
+        let flac_path = temp_root.join("05-berg-concerto.flac");
+        write_minimal_flac(
+            &flac_path,
+            &[
+                ("ALBUM", "Brahms & Berg: Violin Concertos"),
+                ("TITLE", "Violin Concerto: II. Allegro - Adagio"),
+                ("COMPOSER", "Alban Berg"),
+                ("ENSEMBLE", "Vienna Philharmonic"),
+                ("CONDUCTOR", "Daniel Harding"),
+            ],
+            None,
         );
 
-        if !sample_track.exists() {
-            return;
-        }
-
         let track = scan_single_track(
-            &sample_track,
+            &flac_path,
             &default_field_mappings(),
             &compile_catalog_rules(&default_catalog_rules()),
-            &PathBuf::from(r"C:\dev\aria\.cache\album-art"),
+            &cache_root,
         )
-        .expect("sample track should scan");
+        .expect("flac fixture should scan");
 
         assert!(
             track.raw_tags.contains_key("ENSEMBLE"),
             "expected ENSEMBLE raw tag to be preserved"
         );
-        assert!(
-            !track
-                .mapped_fields
-                .get("ensemble")
-                .cloned()
-                .unwrap_or_default()
-                .is_empty(),
+        assert_eq!(
+            track.mapped_fields.get("ensemble"),
+            Some(&vec!["Vienna Philharmonic".to_string()]),
             "expected ensemble field mapping to resolve"
         );
+
+        let _ = std::fs::remove_dir_all(&temp_root);
     }
 
     #[test]
@@ -2153,80 +2405,80 @@ mod tests {
     }
 
     #[test]
-    fn maps_m4a_sample_with_standard_mp4_atoms_when_user_sample_is_present() {
-        let sample_root = PathBuf::from(
-            r"G:\Bach Sacred Cantatas - Masaaki Suzuki\Masaaki Suzuki - Bach Cantatas, Vol. 30",
+    fn maps_mp4_standard_and_freeform_atoms_end_to_end() {
+        let mut ilst = Ilst::new();
+        ilst.insert(Atom::new(
+            AtomIdent::Fourcc(*b"\xa9alb"),
+            AtomData::UTF8("Bach Cantatas, Vol. 30".into()),
+        ));
+        ilst.insert(Atom::new(
+            AtomIdent::Fourcc(*b"\xa9nam"),
+            AtomData::UTF8("Cantata BWV 51: Jauchzet Gott in allen Landen".into()),
+        ));
+        ilst.insert(Atom::new(
+            AtomIdent::Fourcc(*b"\xa9wrt"),
+            AtomData::UTF8("Johann Sebastian Bach".into()),
+        ));
+        ilst.insert(Atom::new(
+            AtomIdent::Fourcc(*b"\xa9ART"),
+            AtomData::UTF8("Carolyn Sampson".into()),
+        ));
+        ilst.insert(Atom::new(
+            AtomIdent::Fourcc(*b"\xa9day"),
+            AtomData::UTF8("2005".into()),
+        ));
+        ilst.insert(Atom::new(
+            AtomIdent::Fourcc(*b"trkn"),
+            AtomData::Unknown {
+                code: DataType::Reserved,
+                data: vec![0, 0, 0, 1, 0, 12, 0, 0],
+            },
+        ));
+        ilst.insert(Atom::new(
+            AtomIdent::Fourcc(*b"disk"),
+            AtomData::Unknown {
+                code: DataType::Reserved,
+                data: vec![0, 0, 0, 1, 0, 2],
+            },
+        ));
+        ilst.insert(Atom::new(
+            AtomIdent::Freeform {
+                mean: Cow::Borrowed("com.apple.iTunes"),
+                name: Cow::Borrowed("ENSEMBLE"),
+            },
+            AtomData::UTF8("Bach Collegium Japan".into()),
+        ));
+
+        let mut raw_tags = BTreeMap::new();
+        let generic_tag: Tag = ilst.clone().into();
+        collect_raw_tags_from_tag(&generic_tag, &mut raw_tags);
+        merge_mp4_ilst_tags(&mut raw_tags, &ilst);
+        normalize_raw_tag_values(&mut raw_tags);
+
+        let mapped = map_fields(
+            &raw_tags,
+            &default_field_mappings(),
+            "MP4",
+            &compile_catalog_rules(&default_catalog_rules()),
         );
 
-        if !sample_root.exists() {
-            return;
-        }
-
-        let sample_tracks = std::fs::read_dir(&sample_root)
-            .expect("sample directory should be readable")
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| {
-                path.extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("m4a"))
-            })
-            .collect::<Vec<_>>();
-
-        assert!(
-            !sample_tracks.is_empty(),
-            "expected at least one m4a file in sample directory"
+        assert_eq!(mapped.get("album"), Some(&vec!["Bach Cantatas, Vol. 30".into()]));
+        assert_eq!(
+            mapped.get("title"),
+            Some(&vec!["Cantata BWV 51: Jauchzet Gott in allen Landen".into()])
         );
-
-        for sample_track in sample_tracks {
-            let track = scan_single_track(
-                &sample_track,
-                &default_field_mappings(),
-                &compile_catalog_rules(&default_catalog_rules()),
-                &PathBuf::from(r"C:\dev\aria\.cache\album-art"),
-            )
-            .unwrap_or_else(|_| panic!("sample track should scan: {}", sample_track.display()));
-
-            assert!(
-                !track.mapped_fields.get("album").cloned().unwrap_or_default().is_empty(),
-                "expected album mapping for {}",
-                sample_track.display()
-            );
-            assert!(
-                !track.mapped_fields.get("title").cloned().unwrap_or_default().is_empty(),
-                "expected title mapping for {}",
-                sample_track.display()
-            );
-            assert!(
-                !track.mapped_fields.get("composer").cloned().unwrap_or_default().is_empty(),
-                "expected composer mapping for {}",
-                sample_track.display()
-            );
-            assert!(
-                !track.mapped_fields.get("year").cloned().unwrap_or_default().is_empty(),
-                "expected year mapping for {}",
-                sample_track.display()
-            );
-            assert!(
-                !track.mapped_fields.get("track_number").cloned().unwrap_or_default().is_empty(),
-                "expected track number mapping for {}",
-                sample_track.display()
-            );
-            assert!(
-                !track.mapped_fields.get("disk_number").cloned().unwrap_or_default().is_empty(),
-                "expected disk number mapping for {}",
-                sample_track.display()
-            );
-            assert!(
-                !track.mapped_fields.get("soloist").cloned().unwrap_or_default().is_empty(),
-                "expected artist atom to populate soloist for {}",
-                sample_track.display()
-            );
-            assert!(
-                track.album_art_path.is_some(),
-                "expected some album art for {}",
-                sample_track.display()
-            );
-        }
+        assert_eq!(
+            mapped.get("composer"),
+            Some(&vec!["Johann Sebastian Bach".into()])
+        );
+        assert_eq!(mapped.get("soloist"), Some(&vec!["Carolyn Sampson".into()]));
+        assert_eq!(
+            mapped.get("ensemble"),
+            Some(&vec!["Bach Collegium Japan".into()]),
+            "raw_tags were: {raw_tags:?}"
+        );
+        assert_eq!(mapped.get("year"), Some(&vec!["2005".into()]));
+        assert_eq!(mapped.get("catalog"), Some(&vec!["BWV 51".into()]));
     }
 
     #[test]
@@ -2265,18 +2517,30 @@ mod tests {
     }
 
     #[test]
-    fn embedded_flac_art_wins_over_empty_sidecar_when_sample_track_is_present() {
-        let sample_track = PathBuf::from(
-            r"C:\Users\hongswan\Music\Bach 50\music\Murray Perahia - Bach Keyboard Concertos, Vol. 1 (2001) [16B-44.1kHz]\01. I. Allegro.flac",
+    fn embedded_flac_art_wins_over_empty_sidecar() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("aria-flac-art-test-{unique}"));
+        let cache_root = temp_root.join("cache");
+        std::fs::create_dir_all(&temp_root).expect("temp directory should be created");
+
+        let flac_path = temp_root.join("01-allegro.flac");
+        let embedded_pic = Picture::unchecked(vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0xFF, 0xD9])
+            .pic_type(PictureType::CoverFront)
+            .mime_type(MimeType::Jpeg)
+            .build();
+        write_minimal_flac(
+            &flac_path,
+            &[("ALBUM", "Bach Keyboard Concertos")],
+            Some(embedded_pic),
         );
+        // Empty sidecar file should NOT override embedded FLAC art
+        std::fs::write(temp_root.join("cover.jpg"), []).expect("empty sidecar should be written");
 
-        if !sample_track.exists() {
-            return;
-        }
-
-        let cache_root = PathBuf::from(r"C:\dev\aria\.cache\album-art-tests");
-        let album_art = find_album_art(&sample_track, &cache_root)
-            .expect("sample track should resolve album art");
+        let album_art = find_album_art(&flac_path, &cache_root)
+            .expect("flac fixture should resolve embedded album art");
 
         assert!(
             album_art.starts_with(&cache_root),
@@ -2288,6 +2552,8 @@ mod tests {
                 .unwrap_or(false),
             "expected cached embedded art to be non-empty"
         );
+
+        let _ = std::fs::remove_dir_all(&temp_root);
     }
 
     #[test]
@@ -2527,6 +2793,190 @@ mod tests {
             AtomIdent::Freeform { mean, name }
                 if mean == "com.apple.iTunes" && name == "CATALOGNUMBER"
         ));
+
+        let canonicalized = parse_mp4_freeform_ident("----:COM.APPLE.ITUNES:ENSEMBLE");
+        assert!(matches!(
+            canonicalized,
+            AtomIdent::Freeform { mean, name }
+                if mean == "com.apple.iTunes" && name == "ENSEMBLE"
+        ));
     }
 
+    #[test]
+    fn normalize_tag_name_preserves_mp4_itunes_mean_case() {
+        assert_eq!(
+            normalize_tag_name("----:com.apple.iTunes:ENSEMBLE"),
+            "----:com.apple.iTunes:ENSEMBLE"
+        );
+        assert_eq!(
+            normalize_tag_name("----:COM.APPLE.ITUNES:conductor"),
+            "----:com.apple.iTunes:CONDUCTOR"
+        );
+        assert_eq!(normalize_tag_name("©alb"), "©ALB");
+    }
+
+    #[test]
+    fn ilst_export_replaces_legacy_uppercased_freeform_atom_without_duplicates() {
+        let mut tag = Ilst::new();
+        tag.insert(Atom::new(
+            AtomIdent::Freeform {
+                mean: Cow::Owned("COM.APPLE.ITUNES".into()),
+                name: Cow::Owned("ENSEMBLE".into()),
+            },
+            AtomData::UTF8("Old Orchestra".into()),
+        ));
+
+        write_values_to_ilst_tag(
+            &mut tag,
+            "----:com.apple.iTunes:ENSEMBLE",
+            &["Berliner Philharmoniker".into()],
+        );
+
+        let matching: Vec<_> = (&tag)
+            .into_iter()
+            .filter(|atom| {
+                matches!(
+                    atom.ident(),
+                    AtomIdent::Freeform { mean, name }
+                        if mean.eq_ignore_ascii_case("com.apple.iTunes")
+                            && name.eq_ignore_ascii_case("ENSEMBLE")
+                )
+            })
+            .collect();
+        assert_eq!(matching.len(), 1);
+        assert!(matches!(
+            matching[0].ident(),
+            AtomIdent::Freeform { mean, name }
+                if mean == "com.apple.iTunes" && name == "ENSEMBLE"
+        ));
+    }
+
+    #[test]
+    fn id3v2_and_mp4_mappings_and_catalog_extraction_work_out_of_the_box() {
+        let mappings = aria_domain::default_field_mappings();
+        let rules = compile_catalog_rules(&default_catalog_rules());
+
+        // MP3 with native ID3v2 frame IDs + non-ASCII composer (Händel)
+        let mp3_raw = BTreeMap::from([
+            ("TALB".into(), vec!["Messiah".into()]),
+            ("TIT2".into(), vec!["Messiah, HWV 56: Hallelujah".into()]),
+            ("TCOM".into(), vec!["Georg Friedrich Händel".into()]),
+            ("TPE3".into(), vec!["John Eliot Gardiner".into()]),
+            ("TPE1".into(), vec!["Monteverdi Choir".into()]),
+            ("TDRC".into(), vec!["1983".into()]),
+            ("TPOS".into(), vec!["1/2".into()]),
+            ("TRCK".into(), vec!["12".into()]),
+        ]);
+        let mp3_mapped = map_fields(&mp3_raw, &mappings, "MP3", &rules);
+        assert_eq!(mp3_mapped.get("album"), Some(&vec!["Messiah".to_string()]));
+        assert_eq!(mp3_mapped.get("composer"), Some(&vec!["Georg Friedrich Händel".to_string()]));
+        assert_eq!(mp3_mapped.get("conductor"), Some(&vec!["John Eliot Gardiner".to_string()]));
+        assert_eq!(mp3_mapped.get("catalog"), Some(&vec!["HWV 56".to_string()]));
+        assert_eq!(mp3_mapped.get("year"), Some(&vec!["1983".to_string()]));
+        assert_eq!(mp3_mapped.get("track_number"), Some(&vec!["12".to_string()]));
+
+        // MP4 with native atoms (©NAM, ©WRT)
+        let mp4_raw = BTreeMap::from([
+            ("©ALB".into(), vec!["Mozart Piano Concertos".into()]),
+            ("©NAM".into(), vec!["Piano Concerto No. 20 in D Minor, K. 466: I. Allegro".into()]),
+            ("©WRT".into(), vec!["Wolfgang Amadeus Mozart".into()]),
+        ]);
+        let mp4_mapped = map_fields(&mp4_raw, &mappings, "MP4", &rules);
+        assert_eq!(mp4_mapped.get("catalog"), Some(&vec!["K. 466".to_string()]));
+
+        // Ambiguous single-letter catalog (K) must NOT match when composer is missing
+        let untagged_raw = BTreeMap::from([("TITLE".into(), vec!["Track K 466".into()])]);
+        let untagged_catalog = extract_catalog_numbers(&untagged_raw, &rules);
+        assert!(untagged_catalog.is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_field_mappings_and_catalog_rules_preserve_remote_album_path_and_empty_raw_tags() {
+        let mut remote_with_raw = ScannedTrack {
+            id: "remote_1".into(),
+            path: "remote://t1/Bach/01.flac".into(),
+            ..Default::default()
+        };
+        remote_with_raw.audio.format = "FLAC".into();
+        remote_with_raw.raw_tags.insert("ALBUM".into(), vec!["Goldberg".into()]);
+        remote_with_raw
+            .mapped_fields
+            .insert("album_path".into(), vec!["Bach/Goldberg".into()]);
+
+        let mut remote_without_raw = ScannedTrack {
+            id: "remote_2".into(),
+            path: "remote://t1/Mozart/01.flac".into(),
+            ..Default::default()
+        };
+        remote_without_raw.audio.format = "FLAC".into();
+        remote_without_raw
+            .mapped_fields
+            .insert("album".into(), vec!["Requiem".into()]);
+        remote_without_raw
+            .mapped_fields
+            .insert("album_path".into(), vec!["Mozart/Requiem".into()]);
+
+        let snapshot = LibrarySnapshot {
+            tracks: vec![remote_with_raw, remote_without_raw],
+            ..Default::default()
+        };
+        let service = LibraryService::with_snapshot(snapshot);
+
+        let after_mappings = service
+            .set_field_mappings(aria_domain::default_field_mappings())
+            .await;
+        assert_eq!(
+            after_mappings.tracks[0].mapped_fields.get("album_path"),
+            Some(&vec!["Bach/Goldberg".to_string()])
+        );
+        assert_eq!(
+            after_mappings.tracks[1].mapped_fields.get("album"),
+            Some(&vec!["Requiem".to_string()])
+        );
+        assert_eq!(
+            after_mappings.tracks[1].mapped_fields.get("album_path"),
+            Some(&vec!["Mozart/Requiem".to_string()])
+        );
+
+        let after_rules = service
+            .set_catalog_rules(default_catalog_rules())
+            .await
+            .expect("set catalog rules");
+        assert_eq!(
+            after_rules.tracks[0].mapped_fields.get("album_path"),
+            Some(&vec!["Bach/Goldberg".to_string()])
+        );
+        assert_eq!(
+            after_rules.tracks[1].mapped_fields.get("album"),
+            Some(&vec!["Requiem".to_string()])
+        );
+    }
+
+    #[test]
+    fn discover_audio_files_deduplicates_overlapping_roots() {
+        let base = std::env::temp_dir().join(format!(
+            "aria_overlap_roots_test_{}",
+            std::process::id()
+        ));
+        let sub = base.join("Bach");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&sub).unwrap();
+        let track = sub.join("01.flac");
+        std::fs::write(&track, b"stub").unwrap();
+
+        let roots = vec![
+            LibraryRoot {
+                path: base.to_string_lossy().to_string(),
+                label: "base".into(),
+            },
+            LibraryRoot {
+                path: sub.to_string_lossy().to_string(),
+                label: "sub".into(),
+            },
+        ];
+        let discovered = discover_audio_files(&roots);
+        assert_eq!(discovered.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

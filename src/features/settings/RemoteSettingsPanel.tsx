@@ -50,10 +50,18 @@ export function RemoteSettingsPanel({
   const [confirmClearTarget, setConfirmClearTarget] = useState<RemoteTarget | null>(null);
 
   useEffect(() => {
-    getRemoteCacheStatus().then(setCacheStatus).catch(console.error);
+    let cancelled = false;
+    getRemoteCacheStatus()
+      .then((status) => {
+        if (!cancelled) {
+          setCacheStatus(status);
+        }
+      })
+      .catch(console.error);
 
     let unlisten: (() => void) | undefined;
     listenToAppEvents((event) => {
+      if (cancelled) return;
       if (event.topic === 'remote') {
         if (event.payload.kind === 'sync_progress') {
           const payload = event.payload.payload;
@@ -82,11 +90,18 @@ export function RemoteSettingsPanel({
           }
         }
       }
-    }).then((fn) => {
-      unlisten = fn;
-    });
+    })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch(console.error);
 
     return () => {
+      cancelled = true;
       unlisten?.();
     };
   }, []);
@@ -649,6 +664,24 @@ function getTargetConfigSummary(target: RemoteTarget): string {
   return '';
 }
 
+function parseStorageLimitGb(
+  rawValue: string,
+): { ok: true; bytes: number | null } | { ok: false; error: string } {
+  const trimmed = rawValue.trim();
+  if (!trimmed) {
+    return { ok: true, bytes: null };
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return { ok: false, error: 'Storage limit must be a positive number of GB.' };
+  }
+  const bytes = Math.round(parsed * 1024 * 1024 * 1024);
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) {
+    return { ok: false, error: 'Storage limit is out of valid range.' };
+  }
+  return { ok: true, bytes };
+}
+
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
   const k = 1024;
@@ -697,28 +730,40 @@ function AddRemoteDialog({ onClose, onAdded }: AddRemoteDialogProps) {
   const [authStatusMessage, setAuthStatusMessage] = useState<string | null>(null);
   const isCompletingAuthRef = useRef(false);
 
+  const handleCompleteGdriveAuthRef = useRef(handleCompleteGdriveAuth);
+  handleCompleteGdriveAuthRef.current = handleCompleteGdriveAuth;
+
   useEffect(() => {
     if (!gdriveAuthUrl) return;
 
+    let cancelled = false;
     let unlisten: (() => void) | undefined;
     listenToAppEvents((event) => {
+      if (cancelled) return;
       if (event.topic === 'remote' && event.payload.kind === 'google_auth_completed') {
         const payload = event.payload.payload;
         if (payload.success) {
           setAuthStatusMessage('✓ Google authorization successful! Saving target...');
-          void handleCompleteGdriveAuth();
+          void handleCompleteGdriveAuthRef.current();
         } else {
           setError(payload.errorMessage ?? 'Google authorization failed');
         }
       }
-    }).then((fn) => {
-      unlisten = fn;
-    });
+    })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch(console.error);
 
     return () => {
+      cancelled = true;
       unlisten?.();
     };
-  }, [gdriveAuthUrl, name, gdriveFolderName, storageLimitGb]);
+  }, [gdriveAuthUrl]);
 
   useEffect(() => {
     if (!gdriveAuthUrl) return;
@@ -739,7 +784,12 @@ function AddRemoteDialog({ onClose, onAdded }: AddRemoteDialogProps) {
       return;
     }
     const effectiveClientId = gdriveClientId.trim().replace(/\/+$/, '') || DEFAULT_GOOGLE_CLIENT_ID;
-    const limitBytes = storageLimitGb ? parseFloat(storageLimitGb) * 1024 * 1024 * 1024 : undefined;
+    const parsedLimit = parseStorageLimitGb(storageLimitGb);
+    if (!parsedLimit.ok) {
+      setError(parsedLimit.error);
+      return;
+    }
+    const limitBytes = parsedLimit.bytes ?? undefined;
     const folder = gdriveFolderName.trim() || 'Aria';
     setError(null);
     setAuthStatusMessage(null);
@@ -773,11 +823,16 @@ function AddRemoteDialog({ onClose, onAdded }: AddRemoteDialogProps) {
       setError('Please provide a name for this remote target');
       return;
     }
+    const parsedLimit = parseStorageLimitGb(storageLimitGb);
+    if (!parsedLimit.ok) {
+      setError(parsedLimit.error);
+      return;
+    }
     isCompletingAuthRef.current = true;
     setError(null);
     setSubmitting(true);
     try {
-      const limitBytes = storageLimitGb ? parseFloat(storageLimitGb) * 1024 * 1024 * 1024 : undefined;
+      const limitBytes = parsedLimit.bytes ?? undefined;
       const folder = gdriveFolderName.trim() || 'Aria';
       const target = await completeGdriveAuthFlow(name.trim(), folder, limitBytes);
       const updated = await saveRemoteTarget(target);
@@ -846,9 +901,12 @@ function AddRemoteDialog({ onClose, onAdded }: AddRemoteDialogProps) {
       });
     }
 
-    const limitBytes = storageLimitGb.trim()
-      ? Math.round(parseFloat(storageLimitGb) * 1024 * 1024 * 1024)
-      : null;
+    const parsedLimit = parseStorageLimitGb(storageLimitGb);
+    if (!parsedLimit.ok) {
+      setError(parsedLimit.error);
+      return;
+    }
+    const limitBytes = parsedLimit.bytes;
 
     const newTarget: RemoteTarget = {
       id: `target-${Date.now()}`,
@@ -1306,9 +1364,12 @@ function EditRemoteDialog({ target, onClose, onSaved }: EditRemoteDialogProps) {
       updatedCfg.domain = smbDomain.trim() || undefined;
     }
 
-    const limitBytes = storageLimitGb.trim()
-      ? Math.round(parseFloat(storageLimitGb) * 1024 * 1024 * 1024)
-      : null;
+    const parsedLimit = parseStorageLimitGb(storageLimitGb);
+    if (!parsedLimit.ok) {
+      setError(parsedLimit.error);
+      return;
+    }
+    const limitBytes = parsedLimit.bytes;
 
     const updatedTarget: RemoteTarget = {
       ...target,
@@ -1465,6 +1526,7 @@ function EditRemoteDialog({ target, onClose, onSaved }: EditRemoteDialogProps) {
               <input
                 id="edit-webdav-pass-input"
                 type="password"
+                placeholder={initialCfg.hasPassword ? 'Leave blank to keep saved password' : ''}
                 value={webdavPassword}
                 onChange={(e) => setWebdavPassword(e.target.value)}
               />
@@ -1505,6 +1567,7 @@ function EditRemoteDialog({ target, onClose, onSaved }: EditRemoteDialogProps) {
               <input
                 id="edit-smb-pass-input"
                 type="password"
+                placeholder={initialCfg.hasPassword ? 'Leave blank to keep saved password' : ''}
                 value={smbPassword}
                 onChange={(e) => setSmbPassword(e.target.value)}
               />

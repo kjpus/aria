@@ -515,7 +515,7 @@ pub async fn upload_album(
                     .unwrap_or(0);
                 (disk, track, t.relative_file_name.clone())
             };
-            merged_tracks.sort_by(|a, b| get_track_sort_key(a).cmp(&get_track_sort_key(b)));
+            merged_tracks.sort_by_key(get_track_sort_key);
             manifest.tracks = merged_tracks;
 
             if manifest.artwork_file_name.is_none() {
@@ -597,9 +597,14 @@ pub async fn upload_album(
         let mut master_index = match backend.read_bytes("aria-library-index.json").await {
             Ok(bytes) => {
                 let json = String::from_utf8_lossy(&bytes);
-                deserialize_master_index(&json).unwrap_or_else(|_| build_master_library_index(Vec::new()))
+                deserialize_master_index(&json).map_err(|e| {
+                    RemoteStorageError::Serialization(format!(
+                        "Failed to parse existing aria-library-index.json: {e}"
+                    ))
+                })?
             }
-            Err(_) => build_master_library_index(Vec::new()),
+            Err(RemoteStorageError::NotFound(_)) => build_master_library_index(Vec::new()),
+            Err(e) => return Err(e),
         };
 
         let summary = build_master_album_summary(&manifest, &relative_folder);
@@ -660,6 +665,7 @@ pub async fn upload_album(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_progress(
     progress_tx: Option<&broadcast::Sender<UploadProgressEvent>>,
     target: &RemoteTarget,
@@ -794,10 +800,14 @@ pub async fn upload_playlist(
         let mut playlists_index = match backend.read_bytes("aria-playlists-index.json").await {
             Ok(bytes) => {
                 let json = String::from_utf8_lossy(&bytes);
-                deserialize_master_playlist_index(&json)
-                    .unwrap_or_else(|_| build_master_playlist_index(Vec::new()))
+                deserialize_master_playlist_index(&json).map_err(|e| {
+                    RemoteStorageError::Serialization(format!(
+                        "Failed to parse existing aria-playlists-index.json: {e}"
+                    ))
+                })?
             }
-            Err(_) => build_master_playlist_index(Vec::new()),
+            Err(RemoteStorageError::NotFound(_)) => build_master_playlist_index(Vec::new()),
+            Err(e) => return Err(e),
         };
 
         playlists_index.playlists.retain(|p| p.playlist_id != playlist.id);
@@ -873,6 +883,7 @@ struct FetchedAlbum {
 /// Discovers and synchronizes remote library albums and manifests from a target.
 /// Reads aria-library-index.json from the target root and aria-manifest.json for each album.
 /// Downloads and caches album cover art into the provided local artwork cache directory.
+#[allow(clippy::too_many_arguments)]
 pub async fn sync_remote_library(
     backend: Arc<dyn RemoteStorageBackend>,
     target: &RemoteTarget,
@@ -970,9 +981,9 @@ pub async fn sync_remote_library(
     let mut already_skipped_count = 0;
 
     for summary in &master_index.albums {
-        let can_skip = if existing_remote_track_ids.is_empty() {
-            false
-        } else if !existing_remote_album_folders.contains(&summary.relative_folder) {
+        let can_skip = if existing_remote_track_ids.is_empty()
+            || !existing_remote_album_folders.contains(&summary.relative_folder)
+        {
             false
         } else if let (Some(synced_at), Some(summary_updated_at)) = (
             existing_album_sync_times.get(&summary.album_id),

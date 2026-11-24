@@ -88,7 +88,7 @@ export function FieldMappingsPanel({
         </p>
       ) : null}
       {visibleMappings.map((mapping, index) => (
-        <article className="mapping-card" key={`${mapping.key}-${index}`}>
+        <article className="mapping-card" key={`${selectedFormat}-${index}`}>
           <div className="mapping-card__header">
             <strong>{mapping.label || 'New field'}</strong>
             <button

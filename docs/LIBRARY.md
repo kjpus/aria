@@ -1,40 +1,40 @@
 # Library And Metadata Pipeline
 
-This document describes how Aria scans a local music library, stores metadata, and turns raw file tags into the fields used by the UI.
+This document describes how Aria scans local music libraries, merges remote library metadata, normalizes raw tags into per-format database fields, resolves artwork, and writes tag edits back to audio files.
 
 ## Goals
 
-Aria treats the library as two layers:
+Aria models track metadata in two layers:
 
-- `raw tags`: what is read directly from the media file
-- `mapped fields`: the normalized database-facing fields that the UI uses for browsing, sorting, grouping, and playback context
+- **`raw_tags`**: Tag key/value pairs read directly from the media file.
+- **`mapped_fields`**: Normalized database-facing fields used by the UI for browsing, sorting, grouping, search, and playback context.
 
-That split is intentional. Raw tags must remain available even when Aria’s normalized view changes.
+Raw tags are preserved alongside mapped fields so users can adjust field priorities or catalog rules and remap their library without losing uncommon or custom file tags.
 
 ## Scan Overview
 
-When Aria scans the library, it does this for each configured root:
+When scanning local roots, Aria runs the following pipeline:
 
-1. Recursively discover supported audio files
-2. Read tag data and audio properties from each file
-3. Preserve raw tags
-4. Apply user-configurable field mappings
-5. Apply catalog fallback rules for the `catalog` field when needed
-6. Resolve album art
-7. Persist the resulting snapshot to SQLite
+1. Recursively discover supported audio files across configured roots, skipping hidden/dot directories and Windows system folders (`$RECYCLE.BIN`, `System Volume Information`), and deduplicating overlapping roots.
+2. Read audio properties and tags from each file via `lofty`, then merge format-specific raw tags (Vorbis comments for FLAC/OGG/OPUS/Speex and freeform `ilst` atoms for MP4/M4A).
+3. Apply per-format user-configurable field mappings (`DEFAULT` + format-specific profile).
+4. Apply composer-aware catalog fallback rules for `catalog` when dedicated catalog tags are empty.
+5. Resolve album art (embedded FLAC or MP4/M4A artwork first, then sidecar images).
+6. Merge any existing remote (`remote://`) tracks so local scans do not discard synced remote libraries.
+7. Persist the updated `LibrarySnapshot` to SQLite.
 
-The scan result is stored in the `LibrarySnapshot`, which includes:
+`LibrarySnapshot` stores:
 
-- library roots
-- scan status and file counts
-- field mappings
-- catalog rules
-- tag inventory
-- scanned tracks
+- `roots`: configured local `LibraryRoot` entries
+- `is_scanning`, `indexed_files`, `last_scan_at`
+- `field_mappings`: per-format `LibraryFieldMapping` rows
+- `catalog_rules`: composer-aware `CatalogRule` rows
+- `tag_inventory`: observed raw tags with occurrence counts and up to 3 example values
+- `tracks`: scanned local tracks and synced `remote://` tracks
 
 ## Supported Audio File Discovery
 
-The scanner currently includes files with these extensions:
+The scanner discovers files with these extensions (case-insensitive):
 
 - `flac`
 - `mp3`
@@ -47,306 +47,131 @@ The scanner currently includes files with these extensions:
 - `aiff`
 - `aif`
 
-Discovery is recursive and follows links.
+Discovery is recursive and follows symlinks. Path separators are normalized on Windows and canonicalized/deduplicated so overlapping roots (e.g., `D:\Music` and `D:\Music\Bach`) never produce duplicate `scanned_tracks.id` rows.
 
 ## Track Model
 
-Each scanned track stores:
+Each `ScannedTrack` stores:
 
-- `id`: currently the full file path
-- `path`
+- `id`: full file path for local tracks, or canonical deterministic ID for remote tracks
+- `path`: local filesystem path or `remote://<target_id>/<relative_path>`
 - `file_name`
-- `album_art_path`
-- `audio`: format, duration, sample rate, bit depth, channels
-- `raw_tags`: `tag -> [values]`
-- `mapped_fields`: `field -> [values]`
+- `album_art_path`: local cached embedded cover art path or sidecar cover path
+- `audio`: `format`, `duration_ms`, `sample_rate`, `bit_depth`, `channels`
+- `raw_tags`: `BTreeMap<String, Vec<String>>`
+- `mapped_fields`: `BTreeMap<String, Vec<String>>` (remote tracks also carry synthetic `album_path`)
 
 ## Raw Tag Extraction
 
-Aria reads tags with Lofty, then supplements that with format-specific raw-tag recovery where needed.
+Aria reads tags with `lofty` and supplements generic tag iteration with format-specific extractors:
 
-### Base extraction
+- **Base extraction:** Iterates all tags on the file, maps `ItemKey` to format-native tag names (e.g., `TALB`/`TIT2`/`TCOM` for ID3v2, `©ALB`/`©NAM`/`©WRT` for MP4, `IPRD`/`INAM` for RIFF INFO, `NAME`/`AUTH` for AIFF), splits multi-value strings, and deduplicates values while preserving order.
+- **Multi-value splitting:** Splits text on `;`, ` / `, ` | `, and NUL (`\0`).
+- **Tag name normalization:** Uppercases standard tag keys while preserving the canonical `com.apple.iTunes` namespace casing for MP4 freeform atoms (`----:com.apple.iTunes:<NAME>`).
+- **Format-specific raw-tag recovery:**
+  - **FLAC, Ogg Vorbis, Opus:** Merges raw `VorbisComments` so custom classical tags like `ENSEMBLE` and `WORKCOMPOSER` are always preserved.
+  - **MP4 / M4A:** Merges raw `Ilst` freeform atoms (`----:<mean>:<name>`) so custom iTunes freeform classical tags (`----:com.apple.iTunes:ENSEMBLE`, `CONDUCTOR`, `SOLOIST`, `CATALOGNUMBER`, etc.) are preserved even when `lofty`'s generic `Tag` view omits them.
 
-The base pass:
+## Per-Format Database Field Mappings
 
-- iterates all Lofty tags on the file
-- resolves each tag key to a normalized uppercase tag name
-- converts tag values to strings
-- splits multi-value text when Aria sees common separators
-- deduplicates values while preserving order
+Field mappings are defined per canonical format key in [`crates/domain/src/library.rs`](../crates/domain/src/library.rs):
 
-### Multi-value splitting
+- `DEFAULT` (fallback profile)
+- `FLAC`
+- `MP3`
+- `MP4` (also used for `.m4a`)
+- `AAC`
+- `OGG`
+- `OPUS`
+- `WAV`
+- `AIFF` (also used for `.aif`)
 
-Aria currently splits text values on:
+Each `LibraryFieldMapping` has:
 
-- `;`
-- ` / `
-- ` | `
-- the NUL character
-
-This is intentionally conservative. The goal is to preserve multi-value credits without over-splitting ordinary text.
-
-### Format-specific raw tags
-
-Some formats, especially Vorbis-comment based formats, can contain useful custom keys that do not survive a purely generic tag abstraction.
-
-To preserve those, Aria explicitly merges raw Vorbis-comment data for:
-
-- FLAC
-- Ogg Vorbis
-- Opus
-- Speex
-
-That is why tags like `ENSEMBLE` can still appear in `raw_tags` even if the generic tag path would otherwise lose them.
-
-## Tag Inventory
-
-The scan also builds a tag inventory. For each observed raw tag, Aria stores:
-
-- tag name
-- number of tracks where it occurred
-- up to three example values
-
-This inventory is useful for field-mapping and diagnostics, even though the main Settings pane no longer shows it inline.
-
-## Database Field Mappings
-
-Field mappings define how Aria builds normalized fields from raw tags.
-
-Each mapping has:
-
-- `key`: internal field name
+- `format`: canonical format key
+- `key`: internal database field name
 - `label`: UI label
-- `tag_priorities`: a priority-ordered list of raw tags
+- `tag_priorities`: priority-ordered list of raw tag names
 
 ### Resolution rule
 
-For a given field:
+1. Aria applies `DEFAULT` mappings first, then overrides with any mappings matching the track's canonical format.
+2. For each mapping, Aria checks `tag_priorities` in order (matching raw tags case-insensitively).
+3. The **first non-empty source tag wins**; all values from that tag are kept and deduplicated in order.
+4. When users save updated mappings or catalog rules, Aria remaps existing tracks from stored `raw_tags` while preserving synthetic remote `album_path` entries and keeping remote tracks that have no local `raw_tags`.
 
-- Aria checks source tags in order
-- the first non-empty source tag wins
-- all values from that winning tag are kept
-- duplicate values are removed while preserving order
+### Default field profiles (summary)
 
-Aria does not merge across multiple source tags for a single field. Priority is strict.
+| Field key | `DEFAULT` / `FLAC` / `OGG` / `OPUS` | `MP3` / `AAC` (ID3v2) | `MP4` / `M4A` | `WAV` / `AIFF` |
+| --- | --- | --- | --- | --- |
+| `album` | `ALBUM` | `TALB`, `ALBUM` | `©ALB`, `ALBUM` | `TALB`, `IPRD` (WAV), `ALBUM` |
+| `title` | `TITLE` | `TIT2`, `TITLE` | `©NAM`, `TITLE` | `TIT2`, `INAM` (WAV) / `NAME` (AIFF), `TITLE` |
+| `catalog` | `CATALOGNUMBER`, `CATALOG` | `CATALOGNUMBER`, `CATALOG` | `----:com.apple.iTunes:CATALOGNUMBER`, `----:com.apple.iTunes:CATALOG`, `CATALOGNUMBER`, `CATALOG` | `CATALOGNUMBER`, `CATALOG` |
+| `composer` | `COMPOSER`, `WORKCOMPOSER`, `COMPOSERSORT` | `TCOM`, `COMPOSER`, `WORKCOMPOSER`, `COMPOSERSORT` | `©WRT`, `COMPOSER`, `----:com.apple.iTunes:COMPOSER`, `WORKCOMPOSER`, `COMPOSERSORT` | `TCOM`, `IMUS` (WAV), `COMPOSER`, `WORKCOMPOSER`, `COMPOSERSORT` |
+| `genre` | `GENRE` | `TCON`, `GENRE` | `©GEN`, `GNRE`, `GENRE` | `TCON`, `IGNR` (WAV), `GENRE` |
+| `conductor` | `CONDUCTOR` | `TPE3`, `CONDUCTOR` | `----:com.apple.iTunes:CONDUCTOR`, `CONDUCTOR` | `TPE3`, `CONDUCTOR` |
+| `ensemble` | `ENSEMBLE`, `ORCHESTRA`, `BAND`, `CHOIR`, `CHORUS` | `BAND`, `ORCHESTRA`, `ENSEMBLE`, `CHOIR`, `CHORUS` | `----:com.apple.iTunes:ENSEMBLE`, `ORCHESTRA`, `BAND`, `CHOIR`, plus plain fallbacks | `BAND`, `ORCHESTRA`, `ENSEMBLE`, `CHOIR`, `CHORUS` |
+| `soloist` | `SOLOIST`, `PERFORMER`, `ARTIST`, `ALBUMARTIST` | `SOLOIST`, `TPE1`, `ARTIST`, `PERFORMER`, `TPE2`, `ALBUMARTIST` | `----:com.apple.iTunes:SOLOIST`, `PERFORMER`, `SOLOIST`, `PERFORMER`, `©ART`, `ARTIST`, `AART`, `ALBUMARTIST` | `SOLOIST`, `TPE1`, `IART` (WAV) / `AUTH` (AIFF), `ARTIST`, `PERFORMER`, `TPE2`, `ALBUMARTIST` |
+| `year` | `DATE`, `YEAR` | `TDRC`, `TYER`, `TDOR`, `DATE`, `YEAR` | `©DAY`, `DATE`, `YEAR` | `TDRC`, `TYER`, `ICRD` (WAV), `DATE`, `YEAR` |
+| `disk_number` | `DISCNUMBER`, `DISKNUMBER`, `DISC` | `TPOS`, `DISCNUMBER`, `DISKNUMBER`, `DISC` | `DISK`, `DISCNUMBER`, `DISKNUMBER`, `DISC` | `TPOS`, `DISCNUMBER`, `DISKNUMBER`, `DISC` |
+| `track_number` | `TRACKNUMBER`, `TRACK` | `TRCK`, `TRACKNUMBER`, `TRACK` | `TRKN`, `TRACKNUMBER`, `TRACK` | `TRCK`, `IPRT`/`ITRK` (WAV), `TRACKNUMBER`, `TRACK` |
 
-### Default fields
-
-The default field list is:
-
-| Field key | Default source tags |
-| --- | --- |
-| `album` | `ALBUM` |
-| `title` | `TITLE` |
-| `catalog` | `CATALOGNUMBER`, `CATALOG` |
-| `composer` | `COMPOSER` |
-| `genre` | `GENRE` |
-| `conductor` | `CONDUCTOR` |
-| `ensemble` | `ENSEMBLE`, `ORCHESTRA`, `ALBUMARTIST` |
-| `soloist` | `PERFORMER`, `ARTIST`, `ALBUMARTIST` |
-| `year` | `DATE`, `YEAR` |
-| `disk_number` | `DISCNUMBER` |
-| `track_number` | `TRACKNUMBER` |
-
-Users can edit these in `Settings -> Database fields`.
-
-Fields may be empty. They may also contain multiple values.
+Users can edit all per-format profiles in `Settings -> Database fields`.
 
 ## Catalog Extraction
 
-The `catalog` field is special.
+If the `catalog` field is resolved from dedicated catalog tags (`CATALOGNUMBER`, `CATALOG`, etc.), fallback parsing is skipped. Otherwise, Aria runs user-configurable `CatalogRule` definitions (`label`, optional `composers` hints, `enabled`).
 
-### Dedicated tags first
+### Built-in catalog labels
 
-Aria first tries to resolve `catalog` from the configured field mapping, which defaults to:
+`BWV`, `WAB`, `K`, `KV`, `D`, `RV`, `HWV`, `TWV`, `BuxWV`, `Hob.`, `S.`, `WoO`, `Op` (catch-all fallback).
 
-- `CATALOGNUMBER`
-- `CATALOG`
+### Format-aware source tiers
 
-If that succeeds, catalog fallback parsing is not used.
+Aria searches three priority tiers in order, stopping at the first tier that produces matches:
 
-### Fallback rules
+1. **Title tags:** `TITLE`, `©NAM`, `TIT2`, `INAM`, `NAME`
+2. **Work tags:** `WORK`, `©WRK`, `TIT1`, `----:com.apple.iTunes:WORK`
+3. **Album tags:** `ALBUM`, `©ALB`, `TALB`, `IPRD`
 
-If `catalog` is still empty after normal field mapping, Aria runs user-configurable catalog rules.
-
-Each catalog rule now has:
-
-- `label`: the catalog abbreviation Aria should search for, such as `BWV`, `WAB`, `K`, or `Op`
-- `composers`: optional composer hints
-- `enabled`
-
-Users can edit these in `Settings -> Catalog rules`.
-
-### Current built-in examples
-
-Aria ships with built-in rules for common classical catalogs, including examples such as:
-
-- `BWV`
-- `WAB`
-- `K`
-- `KV`
-- `D`
-- `RV`
-- `HWV`
-- `TWV`
-- `BuxWV`
-- `Hob.`
-- `S.`
-- `WoO`
-- `Op`
-
-### Shared source-tag priority
-
-All catalog rules use the same source-tag priority.
-
-Aria checks these tags in order:
-
-- `TITLE`
-- `WORK`
-- `ALBUM`
-
-It:
-
-- tries `TITLE` first for all catalog labels
-- only falls back to `WORK` if `TITLE` produced no catalog matches
-- only falls back to `ALBUM` if neither `TITLE` nor `WORK` produced matches
-
-This avoids leaking album-level range catalogs into track-level results when the track title already contains the specific catalog number.
+Within each string, Aria splits colon-separated segments and searches **right to left**, preferring the most specific movement/work segment (e.g., `BWV 852` over a book-level range `BWV 846-869`). Range prefixes followed by `-<digits>` are suppressed, and sectioned Roman-numeral catalogs such as `Hob. XVI:52` and `Hob. IIIb:2` are supported.
 
 ### Composer-aware matching
 
-If a rule has composer hints, Aria only applies that catalog label when one of these raw tags matches those hints:
+Rules with `composers` hints check composer tags across formats (`COMPOSER`, `©WRT`, `TCOM`, `IMUS`, `----:com.apple.iTunes:COMPOSER`, `WORKCOMPOSER`, `COMPOSERSORT`) using Unicode diacritic folding via `deunicode` (so `"Georg Friedrich Händel"` matches `"handel"`):
 
-- `COMPOSER`
-- `WORKCOMPOSER`
-- `COMPOSERSORT`
-
-This is how labels like `WAB` remain Bruckner-specific.
-
-### Shared catalog parser
-
-Aria does not store or edit per-rule regex patterns anymore.
-
-Instead, all labels share the same extraction logic:
-
-- split colon-separated title/work/album text into segments
-- search segments from right to left
-- look for the configured label plus a catalog number
-- keep the first segment that yields matches
-
-The shared parser also supports sectioned forms like `Hob. XVI:52` and `Hob. IIIb:2`, where the label is followed by a Roman-numeral section, an optional `a` or `b`, and then the item number.
-
-The only per-rule difference is the catalog label itself, plus optional composer hints. The built-in `Op` rule is the catch-all fallback.
-
-### Colon-segment preference
-
-When a title contains multiple colon-separated segments, Aria searches the segments from right to left and keeps the first segment that yields catalog matches.
-
-Example:
-
-```text
-Das Wohltemperierte Klavier: Book 1, BWV 846-869: Präludium Es-Dur, BWV 852
-```
-
-Aria prefers `BWV 852` from the final segment instead of the collection-level range earlier in the string.
-
-### Range suppression
-
-Aria ignores catalog matches that are immediately followed by a dash and more digits, such as:
-
-```text
-BWV 846-869
-```
-
-That prevents the start of a catalog range from being treated as a single-track catalog number.
+- When composer tags are present, a composer-hinted rule only applies if one of its composer hints matches.
+- When composer tags are missing, **unambiguous multi-letter labels** (such as `HWV`, `BWV`, `BuxWV`) may still match, while **ambiguous single-letter labels** (`K`, `D`, `S.`) are blocked to prevent false positives.
 
 ## Album Art Resolution
 
 Album art is resolved in this order:
 
-1. Embedded FLAC cover art
-2. Sidecar image files
+1. **Embedded FLAC cover art** (`CoverFront` preferred, cached to local app-data cache).
+2. **Embedded MP4 / M4A cover art** (`covr` atom, cached to local app-data cache).
+3. **Sidecar images** (`cover.jpg`, `folder.jpg`, `front.jpg`, `cover.png`, `folder.png`, `front.png`) in the track directory, falling back to the parent directory when the track resides in a disc folder (`Disc 1`, `CD1`, etc.). Zero-byte sidecar files are ignored.
 
-### Embedded FLAC art
+## In-Place Tag Editing And Field Export
 
-For FLAC files, Aria:
+Aria supports editing raw tags directly in local audio files (`edit_track_tags`) and exporting normalized mapped fields to target raw tags (`export_mapped_field_to_tag`):
 
-- reads embedded pictures
-- prefers `CoverFront`, then other picture types in a stable priority order
-- writes the extracted image into a local app-data cache
-- reuses the cached image on later scans if it already exists and is non-empty
-
-### Sidecar fallback
-
-If no embedded FLAC art is available, Aria looks for sidecar files named:
-
-- `cover.jpg`
-- `folder.jpg`
-- `front.jpg`
-- `cover.png`
-- `folder.png`
-- `front.png`
-
-It searches:
-
-- the track directory
-- the parent directory as a fallback when the track is inside a disc-like folder such as `Disc 1` or `CD1`
-
-Zero-byte sidecar files are ignored.
-
-### Current limitation
-
-Embedded art extraction is currently FLAC-first. Other formats mainly rely on sidecar images for now.
+- **Supported writable containers:** FLAC/Vorbis/Opus (`VorbisComments`), MP3/WAV/AIFF (`Id3v2Tag`), and MP4/M4A (`Ilst`).
+- **Concurrency & safety:** Tag writes acquire a service-level `write_lock`, batch all field updates per track into a single file save, close open read handles before rewriting on Windows, remove legacy uppercased duplicate MP4 freeform atoms (`----:COM.APPLE.ITUNES:*`), and refresh already-succeeded tracks even if a later file in a batch fails.
 
 ## Persistence In SQLite
 
-Aria persists the library state into SQLite tables that include:
+Library and remote sync state are stored in SQLite tables:
 
-- `library_state`
-- `library_roots`
-- `field_mappings`
-- `catalog_rules`
-- `tag_inventory`
-- `scanned_tracks`
+- `library_state`, `library_roots`, `field_mappings`, `catalog_rules`, `tag_inventory`, `scanned_tracks`
+- `remote_targets`, `remote_synced_items` (see [REMOTE_STORAGE.md](./REMOTE_STORAGE.md))
 
-Important details:
+SQLite connections enable `PRAGMA foreign_keys = ON` and a 5-second `busy_timeout`.
 
-- `raw_tags` are stored as JSON
-- `mapped_fields` are stored as JSON
-- audio properties are stored as JSON
-- library settings and playback state are also persisted elsewhere in the same database
+## Debugging Metadata Issues
 
-On Windows, the default database path is:
+Use **Show all tags** (available in `Tracks` and `Player`) to read raw tags directly from disk. When a field looks wrong, check in order:
 
-```text
-%LOCALAPPDATA%\Aria\aria.sqlite3
-```
-
-## Settings And Re-scan Behavior
-
-- Adding a new library directory from Settings starts a scan automatically
-- Re-saving field mappings remaps existing scanned tracks from stored raw tags
-- Re-saving catalog rules also remaps existing scanned tracks from stored raw tags
-- A full rescan is still needed when the source files themselves changed or when album-art lookup behavior needs to be refreshed
-
-## Raw Tags In The UI
-
-The `Tracks` tab has a `Show all tags` action. That dialog reads raw tags directly from the selected file on demand, rather than showing only the normalized database fields.
-
-This is useful when debugging:
-
-- missing fields
-- unexpected catalog results
-- multi-value role mapping
-- rare custom tags
-
-## Practical Debugging Rules
-
-If a field looks wrong, inspect in this order:
-
-1. raw file tags
-2. current field mapping
-3. current catalog rules, if the field is `catalog`
-4. whether the track needs a rescan
-
-If scan behavior changes, update this document so it stays aligned with the code.
+1. Raw file tags in the inspector
+2. Per-format mapping priority in `Settings -> Database fields`
+3. Catalog rules in `Settings -> Catalog rules` (if `catalog` is unexpected)
+4. Trigger a rescan if the file changed outside Aria

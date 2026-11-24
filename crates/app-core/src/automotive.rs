@@ -570,7 +570,7 @@ impl AppCore {
             .and_then(|t| first_field(t, "album"))
             .unwrap_or("Aria")
             .to_string();
-        let album_id = track_info.map(|t| album_id_for_track(t));
+        let album_id = track_info.map(album_id_for_track);
         let artwork_path = track_info.and_then(|t| t.album_art_path.clone());
 
         let spec = track_info
@@ -605,6 +605,7 @@ mod tests {
     use aria_domain::AudioPropertiesSnapshot;
     use std::collections::BTreeMap;
 
+    #[allow(clippy::too_many_arguments)]
     fn make_test_track(
         id: &str,
         path: &str,

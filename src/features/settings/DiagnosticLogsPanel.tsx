@@ -37,19 +37,15 @@ export function DiagnosticLogsPanel({
   const [logs, setLogs] = useState<DiagnosticLogEntry[]>([]);
   const [logFilePath, setLogFilePath] = useState<string | null>(null);
   const [selectedSubsystem, setSelectedSubsystem] = useState<string>('all');
-  const [filterLevel, setFilterLevel] = useState<string>('all');
   const [searchText, setSearchText] = useState('');
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [copied, setCopied] = useState(false);
-  const [loading, setLoading] = useState(false);
   const logContainerRef = useRef<HTMLDivElement>(null);
 
   const fetchLogs = async () => {
     try {
       const sub = selectedSubsystem === 'all' ? undefined : selectedSubsystem;
-      const minLvl =
-        filterLevel === 'all' ? undefined : (filterLevel as DiagnosticLogLevel);
-      const entries = await getDiagnosticLogs(sub, minLvl, 500);
+      const entries = await getDiagnosticLogs(sub, undefined, 500);
       setLogs(entries);
     } catch (err) {
       console.warn('Failed to fetch diagnostic logs:', err);
@@ -59,7 +55,7 @@ export function DiagnosticLogsPanel({
   useEffect(() => {
     getDiagnosticLogPath().then(setLogFilePath).catch(console.warn);
     fetchLogs();
-  }, [selectedSubsystem, filterLevel]);
+  }, [selectedSubsystem]);
 
   useEffect(() => {
     if (!autoRefresh) return;
@@ -67,7 +63,7 @@ export function DiagnosticLogsPanel({
       fetchLogs();
     }, 1500);
     return () => clearInterval(interval);
-  }, [autoRefresh, selectedSubsystem, filterLevel]);
+  }, [autoRefresh, selectedSubsystem]);
 
   const handleToggleEnabled = (enabled: boolean) => {
     const updated = { ...settings, enabled };
@@ -182,9 +178,9 @@ export function DiagnosticLogsPanel({
           gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
           gap: 12,
           padding: '12px 14px',
-          background: 'rgba(255, 255, 255, 0.03)',
+          background: 'var(--control-surface)',
           borderRadius: 8,
-          border: '1px solid rgba(255, 255, 255, 0.07)',
+          border: '1px solid var(--line)',
           marginBottom: 16,
         }}
       >
@@ -198,7 +194,7 @@ export function DiagnosticLogsPanel({
         </label>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary, #9ca3af)', whiteSpace: 'nowrap' }}>
+          <span style={{ fontSize: '0.85rem', color: 'var(--muted)', whiteSpace: 'nowrap' }}>
             Min Level:
           </span>
           <select
@@ -208,9 +204,9 @@ export function DiagnosticLogsPanel({
               padding: '4px 8px',
               fontSize: '0.82rem',
               borderRadius: 4,
-              background: 'var(--color-bg-secondary, #1f2937)',
+              background: 'var(--panel)',
               color: 'inherit',
-              border: '1px solid rgba(255, 255, 255, 0.1)',
+              border: '1px solid var(--line)',
             }}
           >
             <option value="trace">Trace (all)</option>
@@ -278,14 +274,15 @@ export function DiagnosticLogsPanel({
             <button
               key={sub}
               onClick={() => setSelectedSubsystem(sub)}
+              type="button"
               style={{
                 padding: '3px 9px',
                 fontSize: '0.78rem',
                 borderRadius: 4,
                 border: '1px solid',
-                borderColor: selectedSubsystem === sub ? 'var(--color-accent, #d6b16a)' : 'rgba(255, 255, 255, 0.1)',
-                background: selectedSubsystem === sub ? 'rgba(214, 177, 106, 0.15)' : 'transparent',
-                color: selectedSubsystem === sub ? 'var(--color-accent, #d6b16a)' : 'inherit',
+                borderColor: selectedSubsystem === sub ? 'var(--accent)' : 'var(--line)',
+                background: selectedSubsystem === sub ? 'var(--accent-soft)' : 'transparent',
+                color: selectedSubsystem === sub ? 'var(--accent)' : 'inherit',
                 cursor: 'pointer',
                 textTransform: 'capitalize',
               }}
@@ -304,8 +301,8 @@ export function DiagnosticLogsPanel({
               padding: '4px 8px',
               fontSize: '0.78rem',
               borderRadius: 4,
-              border: '1px solid rgba(255, 255, 255, 0.1)',
-              background: 'rgba(0, 0, 0, 0.2)',
+              border: '1px solid var(--line)',
+              background: 'var(--control-surface)',
               color: 'inherit',
               width: 140,
             }}
@@ -314,13 +311,14 @@ export function DiagnosticLogsPanel({
           <button
             onClick={() => setAutoRefresh(!autoRefresh)}
             title="Toggle live auto-refresh"
+            type="button"
             style={{
               padding: '4px 8px',
               fontSize: '0.78rem',
               borderRadius: 4,
-              border: '1px solid rgba(255, 255, 255, 0.1)',
-              background: autoRefresh ? 'rgba(34, 197, 94, 0.2)' : 'transparent',
-              color: autoRefresh ? '#4ade80' : 'inherit',
+              border: '1px solid var(--line)',
+              background: autoRefresh ? 'rgba(34, 197, 94, 0.18)' : 'transparent',
+              color: autoRefresh ? '#22c55e' : 'inherit',
               cursor: 'pointer',
             }}
           >
@@ -329,11 +327,12 @@ export function DiagnosticLogsPanel({
 
           <button
             onClick={fetchLogs}
+            type="button"
             style={{
               padding: '4px 8px',
               fontSize: '0.78rem',
               borderRadius: 4,
-              border: '1px solid rgba(255, 255, 255, 0.1)',
+              border: '1px solid var(--line)',
               background: 'transparent',
               cursor: 'pointer',
             }}
@@ -343,11 +342,12 @@ export function DiagnosticLogsPanel({
 
           <button
             onClick={handleCopy}
+            type="button"
             style={{
               padding: '4px 8px',
               fontSize: '0.78rem',
               borderRadius: 4,
-              border: '1px solid rgba(255, 255, 255, 0.1)',
+              border: '1px solid var(--line)',
               background: 'transparent',
               cursor: 'pointer',
             }}
@@ -357,13 +357,14 @@ export function DiagnosticLogsPanel({
 
           <button
             onClick={handleClear}
+            type="button"
             style={{
               padding: '4px 8px',
               fontSize: '0.78rem',
               borderRadius: 4,
-              border: '1px solid rgba(239, 68, 68, 0.3)',
+              border: '1px solid rgba(239, 68, 68, 0.35)',
               background: 'rgba(239, 68, 68, 0.1)',
-              color: '#f87171',
+              color: '#ef4444',
               cursor: 'pointer',
             }}
           >
@@ -378,9 +379,10 @@ export function DiagnosticLogsPanel({
         style={{
           height: 340,
           overflowY: 'auto',
-          background: '#0a0d14',
+          background: 'var(--bg-soft)',
+          color: 'var(--text)',
           borderRadius: 6,
-          border: '1px solid rgba(255, 255, 255, 0.08)',
+          border: '1px solid var(--line)',
           padding: 8,
           fontFamily: 'monospace, Consolas, "Liberation Mono", Menlo, Courier',
           fontSize: '0.74rem',

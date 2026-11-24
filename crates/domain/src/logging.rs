@@ -149,21 +149,34 @@ impl DiagnosticLogger {
 
     pub fn set_log_dir(&self, dir: PathBuf) {
         let _ = std::fs::create_dir_all(&dir);
-        let mut path_guard = self.log_file_path.write().unwrap();
+        let mut path_guard = self.log_file_path.write().unwrap_or_else(|e| e.into_inner());
         *path_guard = Some(dir.join("aria_diagnostics.log"));
     }
 
     pub fn get_log_file_path(&self) -> Option<PathBuf> {
-        self.log_file_path.read().unwrap().clone()
+        self.log_file_path
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn get_settings(&self) -> LoggingSettings {
-        self.settings.read().unwrap().clone()
+        self.settings
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn update_settings(&self, new_settings: LoggingSettings) {
-        let mut settings_guard = self.settings.write().unwrap();
-        *settings_guard = new_settings;
+        let max_entries = new_settings.max_entries;
+        {
+            let mut settings_guard = self.settings.write().unwrap_or_else(|e| e.into_inner());
+            *settings_guard = new_settings;
+        }
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        while entries.len() > max_entries {
+            entries.pop_front();
+        }
     }
 
     pub fn log(
@@ -174,7 +187,7 @@ impl DiagnosticLogger {
         details: Option<String>,
     ) {
         let (enabled, min_level, log_to_file, log_downloading, log_playback, max_entries) = {
-            let s = self.settings.read().unwrap();
+            let s = self.settings.read().unwrap_or_else(|e| e.into_inner());
             (
                 s.enabled,
                 s.min_level,
@@ -262,18 +275,26 @@ impl DiagnosticLogger {
 
         // 3. In-memory ring buffer
         {
-            let mut entries = self.entries.write().unwrap();
-            while entries.len() >= max_entries {
-                entries.pop_front();
+            let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+            if max_entries == 0 {
+                entries.clear();
+            } else {
+                while entries.len() >= max_entries {
+                    entries.pop_front();
+                }
+                entries.push_back(entry);
             }
-            entries.push_back(entry);
         }
 
         // 4. File append with rotation
         if log_to_file {
-            let file_path = self.log_file_path.read().unwrap().clone();
+            let file_path = self
+                .log_file_path
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             if let Some(path) = file_path {
-                let _lock = self.file_writer_lock.lock().unwrap();
+                let _lock = self.file_writer_lock.lock().unwrap_or_else(|e| e.into_inner());
                 self.append_to_file(&path, timestamp_ms, level, subsystem, &message, details.as_deref());
             }
         }
@@ -329,7 +350,7 @@ impl DiagnosticLogger {
         min_level: Option<DiagnosticLogLevel>,
         limit: Option<usize>,
     ) -> Vec<DiagnosticLogEntry> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         let iter = entries.iter().filter(|entry| {
             if let Some(sub) = filter_subsystem {
                 if entry.subsystem != sub {
@@ -352,12 +373,12 @@ impl DiagnosticLogger {
     }
 
     pub fn clear(&self) {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
         entries.clear();
     }
 
     pub fn export_text(&self) -> String {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         let mut out = String::with_capacity(entries.len() * 80);
         for entry in entries.iter() {
             let seconds = entry.timestamp_ms / 1000;
@@ -455,4 +476,97 @@ macro_rules! aria_error {
             None,
         );
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_entries_zero_does_not_hang_or_retain_entries() {
+        let settings = LoggingSettings {
+            enabled: true,
+            min_level: DiagnosticLogLevel::Trace,
+            log_to_file: false,
+            log_downloading: true,
+            log_playback: true,
+            max_entries: 0,
+        };
+        let logger = DiagnosticLogger::new(settings, None);
+        logger.log(
+            DiagnosticSubsystem::General,
+            DiagnosticLogLevel::Info,
+            "should not loop",
+            None,
+        );
+        assert!(logger.get_logs(None, None, None).is_empty());
+    }
+
+    #[test]
+    fn ring_buffer_evicts_oldest_and_trims_on_settings_update() {
+        let settings = LoggingSettings {
+            enabled: true,
+            min_level: DiagnosticLogLevel::Trace,
+            log_to_file: false,
+            log_downloading: true,
+            log_playback: true,
+            max_entries: 3,
+        };
+        let logger = DiagnosticLogger::new(settings.clone(), None);
+        for i in 1..=5 {
+            logger.log(
+                DiagnosticSubsystem::Playback,
+                DiagnosticLogLevel::Info,
+                format!("msg {i}"),
+                None,
+            );
+        }
+        let messages: Vec<String> = logger
+            .get_logs(None, None, None)
+            .into_iter()
+            .map(|e| e.message)
+            .collect();
+        assert_eq!(messages, vec!["msg 3", "msg 4", "msg 5"]);
+
+        logger.update_settings(LoggingSettings {
+            max_entries: 1,
+            ..settings
+        });
+        let trimmed: Vec<String> = logger
+            .get_logs(None, None, None)
+            .into_iter()
+            .map(|e| e.message)
+            .collect();
+        assert_eq!(trimmed, vec!["msg 5"]);
+    }
+
+    #[test]
+    fn recovers_gracefully_from_poisoned_entries_lock() {
+        let settings = LoggingSettings {
+            enabled: true,
+            min_level: DiagnosticLogLevel::Trace,
+            log_to_file: false,
+            log_downloading: true,
+            log_playback: true,
+            max_entries: 10,
+        };
+        let logger = std::sync::Arc::new(DiagnosticLogger::new(settings, None));
+        let logger_clone = logger.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = logger_clone.entries.write().unwrap();
+            panic!("intentional poison");
+        })
+        .join();
+
+        assert!(logger.entries.read().is_err());
+        logger.log(
+            DiagnosticSubsystem::General,
+            DiagnosticLogLevel::Warn,
+            "after poison",
+            None,
+        );
+        let logs = logger.get_logs(None, None, None);
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].message, "after poison");
+    }
 }

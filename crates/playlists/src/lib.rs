@@ -1,3 +1,6 @@
+//! Persistent playlist management service, ordering mutations, and automatic
+//! `Favorites` playlist invariants.
+
 use std::sync::Arc;
 
 use aria_domain::{Playlist, PlaylistSnapshot};

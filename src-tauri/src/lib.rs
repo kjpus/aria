@@ -6,7 +6,7 @@ mod auto_jni;
 use std::sync::Arc;
 
 use aria_app_core::AppCore;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 pub struct AppState {
     pub core: Arc<AppCore>,
@@ -41,9 +41,6 @@ pub fn get_main_runtime() -> &'static tokio::runtime::Runtime {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let rt = get_main_runtime();
-    let _guard = rt.enter();
-
     let core = get_or_init_app_core();
     let setup_core = core.clone();
     let run_core = core.clone();
@@ -52,6 +49,14 @@ pub fn run() {
         .manage(AppState { core })
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            let asset_scope = app.asset_protocol_scope();
+            for dir in setup_core.artwork_cache_dirs() {
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = asset_scope.allow_directory(&dir, true);
+            }
+            for root in setup_core.library_roots_now() {
+                let _ = asset_scope.allow_directory(&root.path, true);
+            }
             let mut events = setup_core.subscribe();
 
             tauri::async_runtime::spawn(async move {
@@ -156,67 +161,6 @@ pub fn run() {
             }
             _ => {}
         });
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_aria_player_AriaPlaybackService_nativePlayPause(
-    _env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-) {
-    if let Some(core) = get_app_core() {
-        let rt = get_main_runtime();
-        rt.spawn(async move {
-            let snapshot = core.playback_snapshot().await;
-            if snapshot.status == aria_domain::PlaybackStatus::Playing {
-                let _ = core.pause().await;
-            } else {
-                let _ = core.play().await;
-            }
-        });
-    }
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_aria_player_AriaPlaybackService_nativeNext(
-    _env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-) {
-    if let Some(core) = get_app_core() {
-        let rt = get_main_runtime();
-        rt.spawn(async move {
-            let _ = core.next_track().await;
-        });
-    }
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_aria_player_AriaPlaybackService_nativePrevious(
-    _env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-) {
-    if let Some(core) = get_app_core() {
-        let rt = get_main_runtime();
-        rt.spawn(async move {
-            let _ = core.previous_track().await;
-        });
-    }
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_aria_player_AriaPlaybackService_nativeStopPlayback(
-    _env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-) {
-    if let Some(core) = get_app_core() {
-        let rt = get_main_runtime();
-        rt.spawn(async move {
-            let _ = core.pause().await;
-        });
-    }
 }
 
 #[cfg(target_os = "android")]

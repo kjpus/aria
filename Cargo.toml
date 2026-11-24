@@ -22,6 +22,7 @@ version = "0.5.0"
 [workspace.dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["clock"] }
+deunicode = "1.6.2"
 dirs = "6"
 futures-util = "0.3"
 lofty = "0.23"

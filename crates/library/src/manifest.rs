@@ -42,13 +42,13 @@ pub fn is_disc_directory_name(name: &str) -> bool {
 
 /// Returns the effective album directory for a track path, collapsing disc subdirectories (e.g. "Disc 1") to their parent.
 pub fn effective_album_directory(path: &str) -> String {
-    let last_sep = path.rfind(|c| c == '/' || c == '\\');
+    let last_sep = path.rfind(['/', '\\']);
     let parent = match last_sep {
         Some(idx) => &path[..idx],
         None => return String::new(),
     };
 
-    let parent_sep = parent.rfind(|c| c == '/' || c == '\\');
+    let parent_sep = parent.rfind(['/', '\\']);
     let folder_name = match parent_sep {
         Some(idx) => &parent[idx + 1..],
         None => parent,
@@ -77,29 +77,48 @@ pub fn derive_album_relative_path(tracks: &[ScannedTrack], roots: &[String]) -> 
 
     let dir_normalized = effective_dir.replace('\\', "/");
     let dir_trimmed = dir_normalized.trim_end_matches('/');
+    let dir_segments: Vec<&str> = dir_trimmed
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
 
-    // 3. Find matching library root
-    // Sort roots descending by length to match the most specific root first
-    let mut sorted_roots: Vec<String> = roots.to_vec();
-    sorted_roots.sort_by_key(|r| std::cmp::Reverse(r.len()));
+    // 3. Find matching library root using segment-boundary comparison
+    // Sort roots descending by normalized segment count (then trimmed length) to match the most specific root first
+    let mut normalized_roots: Vec<Vec<String>> = roots
+        .iter()
+        .map(|root| {
+            root.replace('\\', "/")
+                .trim_end_matches('/')
+                .split('/')
+                .filter(|segment| !segment.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|segments| !segments.is_empty())
+        .collect();
+    normalized_roots.sort_by(|a, b| {
+        b.len()
+            .cmp(&a.len())
+            .then_with(|| {
+                let a_len: usize = a.iter().map(String::len).sum();
+                let b_len: usize = b.iter().map(String::len).sum();
+                b_len.cmp(&a_len)
+            })
+    });
 
     let mut matched_rel: Option<String> = None;
-    for root in &sorted_roots {
-        let root_normalized = root.replace('\\', "/");
-        let root_trimmed = root_normalized.trim_end_matches('/');
-
-        if root_trimmed.is_empty() {
+    for root_segments in &normalized_roots {
+        if dir_segments.len() <= root_segments.len() {
             continue;
         }
-
-        let dir_lower = dir_trimmed.to_lowercase();
-        let root_lower = root_trimmed.to_lowercase();
-
-        if dir_lower.starts_with(&root_lower) {
-            let remainder = &dir_trimmed[root_trimmed.len()..];
-            let rel = remainder.trim_start_matches('/');
+        let prefix_matches = dir_segments
+            .iter()
+            .zip(root_segments.iter())
+            .all(|(dir_seg, root_seg)| dir_seg.to_lowercase() == root_seg.to_lowercase());
+        if prefix_matches {
+            let rel = dir_segments[root_segments.len()..].join("/");
             if !rel.is_empty() {
-                matched_rel = Some(rel.to_string());
+                matched_rel = Some(rel);
                 break;
             }
         }
@@ -116,7 +135,7 @@ pub fn derive_album_relative_path(tracks: &[ScannedTrack], roots: &[String]) -> 
         .split('/')
         .map(|seg| seg.trim())
         .filter(|seg| !seg.is_empty() && !is_disc_directory_name(seg))
-        .map(|seg| sanitize_path_segment(seg))
+        .map(sanitize_path_segment)
         .filter(|seg| !seg.is_empty() && seg != "Unknown")
         .collect();
 
@@ -611,12 +630,16 @@ mod tests {
             "G:\\Music\\Bach - Mass"
         );
 
-        let mut t1 = ScannedTrack::default();
-        t1.path = multi_disc1.to_string();
+        let mut t1 = ScannedTrack {
+            path: multi_disc1.to_string(),
+            ..Default::default()
+        };
         t1.mapped_fields.insert("album".into(), vec!["Mass in B Minor".into()]);
 
-        let mut t2 = ScannedTrack::default();
-        t2.path = multi_disc2.to_string();
+        let mut t2 = ScannedTrack {
+            path: multi_disc2.to_string(),
+            ..Default::default()
+        };
         t2.mapped_fields.insert("album".into(), vec!["Mass in B Minor".into()]);
 
         assert_eq!(album_id_for_track(&t1), album_id_for_track(&t2));
@@ -626,8 +649,10 @@ mod tests {
         );
 
         // Different recordings with same album name get different IDs
-        let mut t3_other_recording = ScannedTrack::default();
-        t3_other_recording.path = "G:\\Music\\Gardiner - Mass\\01.flac".to_string();
+        let mut t3_other_recording = ScannedTrack {
+            path: "G:\\Music\\Gardiner - Mass\\01.flac".to_string(),
+            ..Default::default()
+        };
         t3_other_recording.mapped_fields.insert("album".into(), vec!["Mass in B Minor".into()]);
         assert_ne!(album_id_for_track(&t1), album_id_for_track(&t3_other_recording));
     }
@@ -815,11 +840,15 @@ mod tests {
     fn test_derive_album_relative_path_and_multi_disc() {
         let roots = vec!["G:\\Music".to_string(), "D:/Classical".to_string()];
 
-        let mut t1 = ScannedTrack::default();
-        t1.path = "G:\\Music\\Vivaldi - Four Seasons (Carmignola)\\Disc 1\\01.flac".to_string();
+        let mut t1 = ScannedTrack {
+            path: "G:\\Music\\Vivaldi - Four Seasons (Carmignola)\\Disc 1\\01.flac".to_string(),
+            ..Default::default()
+        };
 
-        let mut t2 = ScannedTrack::default();
-        t2.path = "G:\\Music\\Vivaldi - Four Seasons (Carmignola)\\Disc 2\\01.flac".to_string();
+        let mut t2 = ScannedTrack {
+            path: "G:\\Music\\Vivaldi - Four Seasons (Carmignola)\\Disc 2\\01.flac".to_string(),
+            ..Default::default()
+        };
 
         let rel1 = derive_album_relative_path(&[t1.clone()], &roots);
         let rel2 = derive_album_relative_path(&[t2.clone()], &roots);
@@ -841,13 +870,17 @@ mod tests {
         );
 
         // Remote track tagging with album_path
-        let mut r1 = ScannedTrack::default();
-        r1.path = "remote://target_1/Vivaldi - Four Seasons (Carmignola)/01.flac".to_string();
+        let mut r1 = ScannedTrack {
+            path: "remote://target_1/Vivaldi - Four Seasons (Carmignola)/01.flac".to_string(),
+            ..Default::default()
+        };
         r1.mapped_fields.insert("album".into(), vec!["Four Seasons".into()]);
         r1.mapped_fields.insert("album_path".into(), vec!["Vivaldi - Four Seasons (Carmignola)".into()]);
 
-        let mut r2 = ScannedTrack::default();
-        r2.path = "remote://target_1/Vivaldi - Four Seasons (Carmignola)/02.flac".to_string();
+        let mut r2 = ScannedTrack {
+            path: "remote://target_1/Vivaldi - Four Seasons (Carmignola)/02.flac".to_string(),
+            ..Default::default()
+        };
         r2.mapped_fields.insert("album".into(), vec!["Four Seasons".into()]);
         r2.mapped_fields.insert("album_path".into(), vec!["Vivaldi - Four Seasons (Carmignola)".into()]);
         r2.mapped_fields.insert("soloist".into(), vec!["Guest Soloist".into()]);
@@ -860,6 +893,28 @@ mod tests {
         assert_eq!(
             album_id_for_track(&r1),
             "four seasons::remote://target_1/vivaldi - four seasons (carmignola)"
+        );
+    }
+
+    #[test]
+    fn test_derive_album_relative_path_handles_unicode_and_prefix_boundaries() {
+        // Prefix boundary: G:\Music must NOT match G:\Music2\Bach
+        let roots = vec!["G:\\Music".to_string()];
+        let sibling_track = ScannedTrack {
+            path: "G:\\Music2\\Bach\\01.flac".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(derive_album_relative_path(&[sibling_track], &roots), None);
+
+        // Unicode lowercase byte-length expansion (Turkish İ U+0130 -> i + combining dot) must NOT panic
+        let unicode_roots = vec!["G:\\İstanbul".to_string()];
+        let unicode_track = ScannedTrack {
+            path: "G:\\İstanbul\\Bach\\Goldberg\\01.flac".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            derive_album_relative_path(&[unicode_track], &unicode_roots),
+            Some("Bach/Goldberg".to_string())
         );
     }
 }

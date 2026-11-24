@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlbumPane } from '../features/albums/AlbumPane';
 import { LibraryPane } from '../features/library/LibraryPane';
 import { PlayerPane } from '../features/now-playing/PlayerPane';
@@ -395,21 +395,25 @@ export function App() {
     return tracks.filter((t) => !t.path.startsWith('remote://'));
   }, [bootstrap?.library.tracks, remoteStorageOnly]);
 
+  const visibleLibrary = useMemo(
+    () => (bootstrap ? { ...bootstrap.library, tracks: visibleTracks } : null),
+    [bootstrap?.library, visibleTracks],
+  );
+
   const albumCards = useMemo(
     () => buildAlbumCards(visibleTracks),
     [visibleTracks],
   );
 
+  const currentTrackId = bootstrap?.playback.currentTrack?.id ?? null;
   const currentTrackDetails = useMemo(() => {
-    const currentTrackId = bootstrap?.playback.currentTrack?.id;
-    if (!bootstrap || !currentTrackId) {
+    const tracks = bootstrap?.library.tracks;
+    if (!tracks || !currentTrackId) {
       return null;
     }
 
-    return (
-      bootstrap.library.tracks.find((track) => track.id === currentTrackId) ?? null
-    );
-  }, [bootstrap]);
+    return tracks.find((track) => track.id === currentTrackId) ?? null;
+  }, [bootstrap?.library.tracks, currentTrackId]);
 
   useEffect(() => {
     if (!selectedAlbumId) {
@@ -422,17 +426,18 @@ export function App() {
   }, [albumCards, selectedAlbumId]);
 
   useEffect(() => {
-    if (!bootstrap) {
+    const playlists = bootstrap?.playlists.playlists;
+    if (!playlists) {
       return;
     }
 
     if (
       selectedPlaylistId &&
-      !bootstrap.playlists.playlists.some((playlist) => playlist.id === selectedPlaylistId)
+      !playlists.some((playlist) => playlist.id === selectedPlaylistId)
     ) {
-      setSelectedPlaylistId(bootstrap.playlists.playlists[0]?.id ?? null);
+      setSelectedPlaylistId(playlists[0]?.id ?? null);
     }
-  }, [bootstrap, selectedPlaylistId]);
+  }, [bootstrap?.playlists.playlists, selectedPlaylistId]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -457,24 +462,19 @@ export function App() {
     return () => mediaQuery.removeEventListener('change', handleChange);
   }, [bootstrap?.settings.theme]);
 
+  const queueLength = bootstrap?.playback.queue.length ?? 0;
+  const currentQueueIndex = bootstrap?.playback.currentQueueIndex ?? null;
   const remainingQueueCount = useMemo(() => {
-    if (!bootstrap) {
+    if (queueLength === 0) {
       return 0;
     }
 
-    if (bootstrap.playback.queue.length === 0) {
-      return 0;
+    if (currentQueueIndex === null) {
+      return queueLength;
     }
 
-    if (bootstrap.playback.currentQueueIndex === null) {
-      return bootstrap.playback.queue.length;
-    }
-
-    return Math.max(
-      bootstrap.playback.queue.length - bootstrap.playback.currentQueueIndex,
-      0,
-    );
-  }, [bootstrap]);
+    return Math.max(queueLength - currentQueueIndex, 0);
+  }, [queueLength, currentQueueIndex]);
 
   useEffect(() => {
     applyUiPreferences(uiPrefs);
@@ -504,6 +504,9 @@ export function App() {
       }
 
       if (event.key === 'Escape') {
+        if (document.querySelector('[role="dialog"]')) {
+          return;
+        }
         if (activePane === 'album') {
           event.preventDefault();
           setActivePane('library');
@@ -538,7 +541,7 @@ export function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [uiPrefs]);
+  }, [activePane, previousPane, uiPrefs]);
 
   function handleOpenAlbum(albumId: string) {
     setSelectedAlbumId(albumId);
@@ -1025,38 +1028,47 @@ export function App() {
     }
   }
 
-  async function handleAlbumTrackTableChange(trackTable: TrackTableSettings) {
-    try {
-      const settings = await updateAlbumTrackTableSettings(trackTable);
-      setBootstrap((current) =>
-        current ? { ...current, settings } : current,
-      );
-    } catch (reason) {
-      void reportDebugMessage('update_album_track_table_settings', reason);
-    }
-  }
+  const handleAlbumTrackTableChange = useCallback(
+    async (trackTable: TrackTableSettings) => {
+      try {
+        const settings = await updateAlbumTrackTableSettings(trackTable);
+        setBootstrap((current) =>
+          current ? { ...current, settings } : current,
+        );
+      } catch (reason) {
+        void reportDebugMessage('update_album_track_table_settings', reason);
+      }
+    },
+    [],
+  );
 
-  async function handlePlaylistTrackTableChange(trackTable: TrackTableSettings) {
-    try {
-      const settings = await updatePlaylistTrackTableSettings(trackTable);
-      setBootstrap((current) =>
-        current ? { ...current, settings } : current,
-      );
-    } catch (reason) {
-      void reportDebugMessage('update_playlist_track_table_settings', reason);
-    }
-  }
+  const handlePlaylistTrackTableChange = useCallback(
+    async (trackTable: TrackTableSettings) => {
+      try {
+        const settings = await updatePlaylistTrackTableSettings(trackTable);
+        setBootstrap((current) =>
+          current ? { ...current, settings } : current,
+        );
+      } catch (reason) {
+        void reportDebugMessage('update_playlist_track_table_settings', reason);
+      }
+    },
+    [],
+  );
 
-  async function handleTrackTableChange(trackTable: TrackTableSettings) {
-    try {
-      const settings = await updateTrackTableSettings(trackTable);
-      setBootstrap((current) =>
-        current ? { ...current, settings } : current,
-      );
-    } catch (reason) {
-      void reportDebugMessage('update_track_table_settings', reason);
-    }
-  }
+  const handleTrackTableChange = useCallback(
+    async (trackTable: TrackTableSettings) => {
+      try {
+        const settings = await updateTrackTableSettings(trackTable);
+        setBootstrap((current) =>
+          current ? { ...current, settings } : current,
+        );
+      } catch (reason) {
+        void reportDebugMessage('update_track_table_settings', reason);
+      }
+    },
+    [],
+  );
 
   async function handlePlaybackPreferencesChange(
     playback: PlaybackPreferences,
@@ -2026,12 +2038,12 @@ export function App() {
               />
             ) : null}
 
-            {activePane === 'settings' ? (
+            {activePane === 'settings' && visibleLibrary ? (
               <SettingsPane
                 currentOutputDevice={bootstrap.playback.outputDevice}
                 draftCatalogRules={draftCatalogRules}
                 draftMappings={draftMappings}
-                library={{ ...bootstrap.library, tracks: visibleTracks }}
+                library={visibleLibrary}
                 onAddCatalogRule={handleAddCatalogRule}
                 onAddDirectory={handleAddDirectory}
                 onAddField={handleAddField}

@@ -10,7 +10,7 @@ type PlaylistImportDialogProps = {
 };
 
 const ENCODINGS = [
-  { value: 0, label: 'System Default (ANSI)' },
+  { value: 0, label: 'Auto (UTF-8 for M3U8, System Default)' },
   { value: 65001, label: 'UTF-8' },
   { value: 1252, label: 'Windows-1252 (Western)' },
   { value: 1250, label: 'Windows-1250 (Central Europe)' },

@@ -185,7 +185,12 @@ object AriaBluetoothAudioHelper {
             return BluetoothAudioInfo(isConnected = false)
         }
 
-        val deviceName = btDevice?.name ?: btAudioDevice?.productName?.toString() ?: "Bluetooth Audio"
+        val safeBtName = try {
+            btDevice?.name
+        } catch (_: SecurityException) {
+            null
+        }
+        val deviceName = safeBtName ?: btAudioDevice?.productName?.toString() ?: "Bluetooth Audio"
         val deviceId = btAudioDevice?.id ?: 0
 
         var hdSupported = false
@@ -275,7 +280,12 @@ object AriaBluetoothAudioHelper {
             return getBluetoothAudioInfo(ctx)
         }
 
-        Log.i(TAG, "Optimizing Bluetooth audio quality for device: ${btDevice.name} at source rate: ${sourceSampleRate}Hz, bit depth: ${sourceBitDepth}-bit")
+        val safeOptName = try {
+            btDevice.name
+        } catch (_: SecurityException) {
+            "Bluetooth Audio"
+        }
+        Log.i(TAG, "Optimizing Bluetooth audio quality for device: $safeOptName at source rate: ${sourceSampleRate}Hz, bit depth: ${sourceBitDepth}-bit")
 
         // 1. Enable HD Audio (optional codecs) on the device if supported
         val hdSupported = checkOptionalCodecsSupported(a2dp, btDevice)
@@ -288,7 +298,7 @@ object AriaBluetoothAudioHelper {
                     Int::class.javaPrimitiveType
                 )
                 setEnabledMethod.invoke(a2dp, btDevice, 1) // OPTIONAL_CODECS_PREF_ENABLED = 1
-                Log.i(TAG, "Enabled HD audio / optional codecs for ${btDevice.name}")
+                Log.i(TAG, "Enabled HD audio / optional codecs for $safeOptName")
             } catch (e: Exception) {
                 Log.d(TAG, "setOptionalCodecsEnabled reflection failed: ${e.message}")
             }

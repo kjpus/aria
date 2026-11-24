@@ -1,3 +1,7 @@
+//! Shared domain DTOs, default per-format field-mapping profiles, classical
+//! catalog rules, and structured diagnostic logging primitives shared across
+//! Aria's Rust crates and serialized to the TypeScript frontend.
+
 pub mod events;
 pub mod library;
 pub mod logging;

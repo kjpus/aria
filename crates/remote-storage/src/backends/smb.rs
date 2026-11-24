@@ -155,6 +155,7 @@ fn windows_connect_net_resource(
     use std::os::windows::ffi::OsStrExt;
 
     #[repr(C)]
+    #[allow(clippy::upper_case_acronyms)]
     struct NETRESOURCEW {
         dw_scope: u32,
         dw_type: u32,

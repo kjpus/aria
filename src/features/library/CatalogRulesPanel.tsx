@@ -51,7 +51,7 @@ export function CatalogRulesPanel({
 
       <div className="mapping-list">
         {rules.map((rule, index) => (
-          <article className="mapping-card" key={`${rule.label}-${index}`}>
+          <article className="mapping-card" key={index}>
             <div className="mapping-card__header">
               <strong>{rule.label || 'Custom rule'}</strong>
               <button

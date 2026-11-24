@@ -101,18 +101,6 @@ class AriaPlaybackService : MediaBrowserServiceCompat() {
             }
         }
 
-        @JvmStatic
-        private external fun nativePlayPause()
-
-        @JvmStatic
-        private external fun nativeNext()
-
-        @JvmStatic
-        private external fun nativePrevious()
-
-        @JvmStatic
-        private external fun nativeStopPlayback()
-
         // Automotive native functions
         @JvmStatic
         external fun nativeAutoEnsureAppCore(context: Context)
@@ -314,8 +302,10 @@ class AriaPlaybackService : MediaBrowserServiceCompat() {
     private var currentArtworkPath: String? = null
     private var currentCachedArtBitmap: Bitmap? = null
     private var isPlaying: Boolean = false
+    private var hasEnteredForeground: Boolean = false
     private var noisyReceiverRegistered = false
     private var audioDeviceCallback: AudioDeviceCallback? = null
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     private val noisyReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -337,12 +327,6 @@ class AriaPlaybackService : MediaBrowserServiceCompat() {
             Log.w(TAG, "nativeRegisterContext failed", e)
         }
 
-        try {
-            nativeAutoEnsureAppCore(applicationContext)
-        } catch (e: Throwable) {
-            Log.w(TAG, "nativeAutoEnsureAppCore failed", e)
-        }
-
         createNotificationChannel()
         initMediaSession()
         sessionToken = mediaSession?.sessionToken
@@ -351,7 +335,15 @@ class AriaPlaybackService : MediaBrowserServiceCompat() {
         registerAudioDeviceCallback()
         acquireLocks()
 
-        syncWithNowPlaying()
+        // Initialize Rust AppCore and initial now-playing snapshot off the Main Thread to avoid ANRs
+        backgroundExecutor.execute {
+            try {
+                nativeAutoEnsureAppCore(applicationContext)
+            } catch (e: Throwable) {
+                Log.w(TAG, "nativeAutoEnsureAppCore failed", e)
+            }
+            syncWithNowPlaying()
+        }
 
         Log.i(TAG, "AriaPlaybackService created as MediaBrowserService")
     }
@@ -717,20 +709,26 @@ class AriaPlaybackService : MediaBrowserServiceCompat() {
                     val playing = obj.optBoolean("isPlaying", isPlaying)
                     val artPath = if (obj.has("artworkPath") && !obj.isNull("artworkPath")) obj.getString("artworkPath") else null
 
-                    if (!title.isNullOrBlank() && title != "Aria") currentTitle = title
-                    if (!artist.isNullOrBlank() && artist != "Playing audio") currentArtist = artist
-                    if (!album.isNullOrBlank()) currentAlbum = album
-                    if (!spec.isNullOrBlank()) currentAudioSpec = spec
-                    currentPositionMs = pos
-                    currentDurationMs = dur
-                    isPlaying = playing
-
-                    if (artPath != currentArtworkPath) {
-                        currentArtworkPath = artPath
-                        currentCachedArtBitmap = loadArtworkBitmap(artPath)
+                    val decodedBitmap = if (artPath != currentArtworkPath) {
+                        loadArtworkBitmap(artPath)
+                    } else {
+                        currentCachedArtBitmap
                     }
 
-                    updateSessionAndNotification()
+                    mainHandler.post {
+                        if (!title.isNullOrBlank() && title != "Aria") currentTitle = title
+                        if (!artist.isNullOrBlank() && artist != "Playing audio") currentArtist = artist
+                        if (!album.isNullOrBlank()) currentAlbum = album
+                        if (!spec.isNullOrBlank()) currentAudioSpec = spec
+                        currentPositionMs = pos
+                        currentDurationMs = dur
+                        isPlaying = playing
+                        if (artPath != currentArtworkPath) {
+                            currentArtworkPath = artPath
+                            currentCachedArtBitmap = decodedBitmap
+                        }
+                        updateSessionAndNotification()
+                    }
                 }
             } catch (e: Throwable) {
                 Log.w(TAG, "syncWithNowPlaying error", e)
@@ -807,6 +805,23 @@ class AriaPlaybackService : MediaBrowserServiceCompat() {
         MediaButtonReceiver.handleIntent(mediaSession, intent)
 
         val action = intent?.action ?: ACTION_START
+        if (!hasEnteredForeground) {
+            try {
+                val notification = buildNotification()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                    )
+                } else {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+                hasEnteredForeground = true
+            } catch (e: Exception) {
+                Log.w(TAG, "Initial startForeground failed", e)
+            }
+        }
         when (action) {
             ACTION_PLAY_PAUSE -> {
                 triggerPlayPause()
@@ -841,6 +856,7 @@ class AriaPlaybackService : MediaBrowserServiceCompat() {
             ACTION_STOP -> {
                 Log.i(TAG, "Stopping playback service")
                 isPlaying = false
+                hasEnteredForeground = false
                 releaseLocks()
                 mediaSession?.isActive = false
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -943,7 +959,7 @@ class AriaPlaybackService : MediaBrowserServiceCompat() {
         val notification = buildNotification()
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
         try {
-            if (isPlaying) {
+            if (isPlaying || !hasEnteredForeground) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     startForeground(
                         NOTIFICATION_ID,
@@ -953,7 +969,9 @@ class AriaPlaybackService : MediaBrowserServiceCompat() {
                 } else {
                     startForeground(NOTIFICATION_ID, notification)
                 }
-            } else {
+                hasEnteredForeground = true
+            }
+            if (!isPlaying) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     stopForeground(STOP_FOREGROUND_DETACH)
                 } else {

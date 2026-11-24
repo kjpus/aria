@@ -60,6 +60,7 @@ pub struct AudioResampler {
     in_rate: u32,
     out_rate: u32,
     in_buffer: Vec<f32>,
+    temp_out: Vec<f32>,
     chunk_frames_in: usize,
     max_chunk_frames_out: usize,
     delay_frames_to_drop: usize,
@@ -74,6 +75,7 @@ impl AudioResampler {
                 in_rate,
                 out_rate,
                 in_buffer: Vec::new(),
+                temp_out: Vec::new(),
                 chunk_frames_in: 0,
                 max_chunk_frames_out: 0,
                 delay_frames_to_drop: 0,
@@ -105,6 +107,7 @@ impl AudioResampler {
             in_rate,
             out_rate,
             in_buffer: Vec::new(),
+            temp_out: vec![0.0f32; max_chunk_frames_out * channels],
             chunk_frames_in,
             max_chunk_frames_out,
             delay_frames_to_drop,
@@ -137,8 +140,6 @@ impl AudioResampler {
 
         self.in_buffer.extend_from_slice(input);
 
-        let mut temp_out = vec![0.0f32; self.max_chunk_frames_out * self.channels];
-
         while self.in_buffer.len() / self.channels >= self.chunk_frames_in {
             let chunk_samples = self.chunk_frames_in * self.channels;
             let in_adapter = InterleavedSlice::new(
@@ -149,7 +150,7 @@ impl AudioResampler {
             .map_err(|e| PlaybackError::Output(e.to_string()))?;
 
             let mut out_adapter = InterleavedSlice::new_mut(
-                &mut temp_out,
+                &mut self.temp_out,
                 self.channels,
                 self.max_chunk_frames_out,
             )
@@ -162,7 +163,7 @@ impl AudioResampler {
             self.in_buffer.drain(..consumed * self.channels);
 
             let produced_samples = produced * self.channels;
-            let produced_slice = &temp_out[..produced_samples];
+            let produced_slice = &self.temp_out[..produced_samples];
 
             if self.delay_frames_to_drop > 0 {
                 let samples_to_drop =
@@ -183,51 +184,72 @@ impl AudioResampler {
         };
 
         let rem_frames = self.in_buffer.len() / self.channels;
-        if rem_frames > 0 {
-            let padding_frames = self.chunk_frames_in.saturating_sub(rem_frames);
-            if padding_frames > 0 {
-                self.in_buffer.resize(self.in_buffer.len() + padding_frames * self.channels, 0.0);
-            }
+        let output_delay = resampler.output_delay();
+        let expected_tail_frames = ((rem_frames as f64 * self.out_rate as f64 / self.in_rate as f64)
+            .round() as usize)
+            + output_delay;
 
-            let mut temp_out = vec![0.0f32; self.max_chunk_frames_out * self.channels];
+        if rem_frames > 0 || output_delay > 0 {
+            // Feed remaining frames plus enough zero-padding to flush the sinc filter's internal delay
+            let delay_in_frames = ((output_delay as f64 * self.in_rate as f64 / self.out_rate as f64)
+                .ceil() as usize)
+                + 1;
+            let total_in_frames = rem_frames + delay_in_frames;
+            let mut frames_remaining = total_in_frames;
+            let mut emitted_frames = 0usize;
 
-            let in_adapter = InterleavedSlice::new(
-                &self.in_buffer[..self.chunk_frames_in * self.channels],
-                self.channels,
-                self.chunk_frames_in,
-            )
-            .map_err(|e| PlaybackError::Output(e.to_string()))?;
+            while frames_remaining > 0 && emitted_frames < expected_tail_frames {
+                let current_in_frames = frames_remaining.min(self.chunk_frames_in);
+                let required_samples = self.chunk_frames_in * self.channels;
+                if self.in_buffer.len() < required_samples {
+                    self.in_buffer.resize(required_samples, 0.0);
+                }
 
-            let mut out_adapter = InterleavedSlice::new_mut(
-                &mut temp_out,
-                self.channels,
-                self.max_chunk_frames_out,
-            )
-            .map_err(|e| PlaybackError::Output(e.to_string()))?;
-
-            let indexing = Indexing::new().partial_len(rem_frames);
-
-            let (_consumed, produced) = resampler
-                .process_into_buffer(&in_adapter, &mut out_adapter, Some(&indexing))
+                let in_adapter = InterleavedSlice::new(
+                    &self.in_buffer[..required_samples],
+                    self.channels,
+                    self.chunk_frames_in,
+                )
                 .map_err(|e| PlaybackError::Output(e.to_string()))?;
 
-            self.in_buffer.clear();
+                let mut out_adapter = InterleavedSlice::new_mut(
+                    &mut self.temp_out,
+                    self.channels,
+                    self.max_chunk_frames_out,
+                )
+                .map_err(|e| PlaybackError::Output(e.to_string()))?;
 
-            let valid_produced = ((rem_frames as f64 * self.out_rate as f64 / self.in_rate as f64)
-                .round() as usize)
-                .min(produced);
+                let indexing = if current_in_frames < self.chunk_frames_in {
+                    Some(Indexing::new().partial_len(current_in_frames))
+                } else {
+                    None
+                };
 
-            let produced_samples = valid_produced * self.channels;
-            let produced_slice = &temp_out[..produced_samples];
+                let (consumed, produced) = resampler
+                    .process_into_buffer(&in_adapter, &mut out_adapter, indexing.as_ref())
+                    .map_err(|e| PlaybackError::Output(e.to_string()))?;
 
-            if self.delay_frames_to_drop > 0 {
-                let samples_to_drop =
-                    (self.delay_frames_to_drop * self.channels).min(produced_slice.len());
-                output.extend_from_slice(&produced_slice[samples_to_drop..]);
-                self.delay_frames_to_drop -= samples_to_drop / self.channels;
-            } else {
-                output.extend_from_slice(produced_slice);
+                let drain_samples = (consumed * self.channels).min(self.in_buffer.len());
+                self.in_buffer.drain(..drain_samples);
+                frames_remaining = frames_remaining.saturating_sub(current_in_frames);
+
+                let produced_samples = produced * self.channels;
+                let mut produced_slice = &self.temp_out[..produced_samples];
+
+                if self.delay_frames_to_drop > 0 {
+                    let samples_to_drop =
+                        (self.delay_frames_to_drop * self.channels).min(produced_slice.len());
+                    produced_slice = &produced_slice[samples_to_drop..];
+                    self.delay_frames_to_drop -= samples_to_drop / self.channels;
+                }
+
+                let remaining_expected = expected_tail_frames.saturating_sub(emitted_frames);
+                let frames_to_emit = (produced_slice.len() / self.channels).min(remaining_expected);
+                output.extend_from_slice(&produced_slice[..frames_to_emit * self.channels]);
+                emitted_frames += frames_to_emit;
             }
+
+            self.in_buffer.clear();
         }
 
         Ok(())

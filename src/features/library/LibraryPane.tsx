@@ -207,7 +207,7 @@ export function LibraryPane({
   }, [selectedAlbumId]);
 
   function handleAlbumClick(
-    event: ReactMouseEvent<HTMLButtonElement>,
+    event: ReactMouseEvent<HTMLElement>,
     albumId: string,
   ) {
     const orderedIds = filteredAlbums.map((album) => album.id);
@@ -242,7 +242,7 @@ export function LibraryPane({
   }
 
   function openContextMenu(
-    event: ReactMouseEvent<HTMLButtonElement>,
+    event: ReactMouseEvent<HTMLElement>,
     albumId: string,
   ) {
     event.preventDefault();
@@ -380,12 +380,20 @@ export function LibraryPane({
               const selected = selectedAlbumSet.has(album.id);
 
               return (
-                <button
+                <div
                   className={`album-card album-card--button${selected ? ' album-card--selected' : ''}`}
                   key={album.id}
                   onClick={(event) => handleAlbumClick(event, album.id)}
                   onContextMenu={(event) => openContextMenu(event, album.id)}
-                  type="button"
+                  onKeyDown={(event) => {
+                    if (event.target !== event.currentTarget) return;
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      onOpenAlbum(album.id);
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
                 >
                   <div className="album-card__cover-wrapper">
                     {art ? (
@@ -436,7 +444,7 @@ export function LibraryPane({
                     <span>{album.trackCount} {album.trackCount === 1 ? 'track' : 'tracks'}</span>
                     <span>{album.year || '—'}</span>
                   </div>
-                </button>
+                </div>
               );
             })
           )}

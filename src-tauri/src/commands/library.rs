@@ -2,16 +2,22 @@ use aria_domain::{
     CatalogRule, FieldExportRequest, LibraryFieldMapping, LibrarySnapshot, TrackTagEditRequest,
 };
 use std::collections::BTreeMap;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::{error::CommandError, AppState};
 
 #[tauri::command]
 pub async fn add_library_root(
+    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
 ) -> Result<LibrarySnapshot, CommandError> {
-    Ok(state.core.add_library_root(path).await?)
+    let snapshot = state.core.add_library_root(path).await?;
+    let asset_scope = app.asset_protocol_scope();
+    for root in &snapshot.roots {
+        let _ = asset_scope.allow_directory(&root.path, true);
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]

@@ -192,10 +192,11 @@ impl ExclusivePlayer {
         let decoder = ExclusiveDecoder::open(path, start_position)?;
         let stream_spec = decoder.stream_spec();
 
+        let start_position_ms = start_position.as_millis() as u64;
         let state = Arc::new(ExclusiveState {
             paused: AtomicBool::new(start_paused),
             finished: AtomicBool::new(false),
-            position_ms: AtomicU64::new(start_position.as_millis() as u64),
+            position_ms: AtomicU64::new(start_position_ms),
             volume_bits: AtomicU32::new(normalize_volume(volume).to_bits()),
         });
 
@@ -212,6 +213,7 @@ impl ExclusivePlayer {
                     device_id_int,
                     decoder,
                     stream_spec,
+                    start_position_ms,
                     start_paused,
                     is_prewarm,
                     state_for_thread,
@@ -682,6 +684,7 @@ fn run_android_exclusive_thread(
     device_id: i32,
     decoder: ExclusiveDecoder,
     stream_spec: DecodedStreamSpec,
+    start_position_ms: u64,
     start_paused: bool,
     is_prewarm: bool,
     state: Arc<ExclusiveState>,
@@ -1064,7 +1067,10 @@ fn run_android_exclusive_thread(
                         if let Ok(pos_val) = env.call_method(&player_obj, "getPositionMs", "()J", &[]) {
                             if let Ok(pos_ms) = pos_val.j() {
                                 if pos_ms >= 0 {
-                                    state.position_ms.store(pos_ms as u64, Ordering::Relaxed);
+                                    state.position_ms.store(
+                                        start_position_ms.saturating_add(pos_ms as u64),
+                                        Ordering::Relaxed,
+                                    );
                                 }
                             }
                         }
@@ -1151,7 +1157,10 @@ fn run_android_exclusive_thread(
                 if let Ok(pos_val) = env.call_method(&player_obj, "getPositionMs", "()J", &[]) {
                     if let Ok(pos_ms) = pos_val.j() {
                         if pos_ms >= 0 {
-                            state.position_ms.store(pos_ms as u64, Ordering::Relaxed);
+                            state.position_ms.store(
+                                start_position_ms.saturating_add(pos_ms as u64),
+                                Ordering::Relaxed,
+                            );
                         }
                     }
                 }
@@ -1229,21 +1238,19 @@ fn apply_volume(bytes: &mut [u8], active_format: ActivePcmFormat, volume: f32) {
 
     match active_format {
         ActivePcmFormat::PcmFloat => {
-            let sample_count = bytes.len() / 4;
-            let samples = unsafe {
-                std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut f32, sample_count)
-            };
-            for s in samples {
-                *s *= volume;
+            for chunk in bytes.chunks_exact_mut(4) {
+                let sample = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let scaled = (sample * volume).clamp(-1.0, 1.0);
+                chunk.copy_from_slice(&scaled.to_ne_bytes());
             }
         }
         ActivePcmFormat::Pcm16 => {
-            let sample_count = bytes.len() / 2;
-            let samples = unsafe {
-                std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut i16, sample_count)
-            };
-            for s in samples {
-                *s = (*s as f32 * volume).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            for chunk in bytes.chunks_exact_mut(2) {
+                let sample = i16::from_ne_bytes([chunk[0], chunk[1]]);
+                let scaled = (sample as f32 * volume)
+                    .round()
+                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                chunk.copy_from_slice(&scaled.to_ne_bytes());
             }
         }
         ActivePcmFormat::Pcm24Packed => {
@@ -1264,13 +1271,13 @@ fn apply_volume(bytes: &mut [u8], active_format: ActivePcmFormat, volume: f32) {
             }
         }
         ActivePcmFormat::Pcm32 => {
-            let sample_count = bytes.len() / 4;
-            let samples = unsafe {
-                std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut i32, sample_count)
-            };
-            for s in samples {
-                *s = (*s as f64 * volume as f64).round().clamp(i32::MIN as f64, i32::MAX as f64)
-                    as i32;
+            let factor = volume as f64;
+            for chunk in bytes.chunks_exact_mut(4) {
+                let sample = i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let scaled = (sample as f64 * factor)
+                    .round()
+                    .clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+                chunk.copy_from_slice(&scaled.to_ne_bytes());
             }
         }
     }

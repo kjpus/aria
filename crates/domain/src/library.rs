@@ -221,33 +221,33 @@ fn flac_mapping_profile() -> DefaultMappingProfile<'static> {
 
 fn mp3_mapping_profile() -> DefaultMappingProfile<'static> {
     DefaultMappingProfile {
-        album: &["ALBUM"],
-        title: &["TITLE"],
+        album: &["TALB", "ALBUM"],
+        title: &["TIT2", "TITLE"],
         catalog: &["CATALOGNUMBER", "CATALOG"],
-        composer: &["COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"],
-        genre: &["GENRE"],
-        conductor: &["CONDUCTOR"],
+        composer: &["TCOM", "COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"],
+        genre: &["TCON", "GENRE"],
+        conductor: &["TPE3", "CONDUCTOR"],
         ensemble: &["BAND", "ORCHESTRA", "ENSEMBLE", "CHOIR", "CHORUS"],
-        soloist: &["SOLOIST", "ARTIST", "PERFORMER", "ALBUMARTIST"],
-        year: &["DATE", "YEAR"],
-        disk_number: &["DISCNUMBER", "DISKNUMBER", "DISC"],
-        track_number: &["TRACKNUMBER", "TRACK"],
+        soloist: &["SOLOIST", "TPE1", "ARTIST", "PERFORMER", "TPE2", "ALBUMARTIST"],
+        year: &["TDRC", "TYER", "TDOR", "DATE", "YEAR"],
+        disk_number: &["TPOS", "DISCNUMBER", "DISKNUMBER", "DISC"],
+        track_number: &["TRCK", "TRACKNUMBER", "TRACK"],
     }
 }
 
 fn aac_mapping_profile() -> DefaultMappingProfile<'static> {
     DefaultMappingProfile {
-        album: &["ALBUM"],
-        title: &["TITLE"],
+        album: &["TALB", "ALBUM"],
+        title: &["TIT2", "TITLE"],
         catalog: &["CATALOGNUMBER", "CATALOG"],
-        composer: &["COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"],
-        genre: &["GENRE"],
-        conductor: &["CONDUCTOR"],
+        composer: &["TCOM", "COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"],
+        genre: &["TCON", "GENRE"],
+        conductor: &["TPE3", "CONDUCTOR"],
         ensemble: &["BAND", "ORCHESTRA", "ENSEMBLE", "CHOIR", "CHORUS"],
-        soloist: &["SOLOIST", "ARTIST", "PERFORMER", "ALBUMARTIST"],
-        year: &["DATE", "YEAR"],
-        disk_number: &["DISCNUMBER", "DISKNUMBER", "DISC"],
-        track_number: &["TRACKNUMBER", "TRACK"],
+        soloist: &["SOLOIST", "TPE1", "ARTIST", "PERFORMER", "TPE2", "ALBUMARTIST"],
+        year: &["TDRC", "TYER", "TDOR", "DATE", "YEAR"],
+        disk_number: &["TPOS", "DISCNUMBER", "DISKNUMBER", "DISC"],
+        track_number: &["TRCK", "TRACKNUMBER", "TRACK"],
     }
 }
 
@@ -285,33 +285,33 @@ fn opus_mapping_profile() -> DefaultMappingProfile<'static> {
 
 fn wav_mapping_profile() -> DefaultMappingProfile<'static> {
     DefaultMappingProfile {
-        album: &["ALBUM"],
-        title: &["TITLE"],
+        album: &["TALB", "IPRD", "ALBUM"],
+        title: &["TIT2", "INAM", "TITLE"],
         catalog: &["CATALOGNUMBER", "CATALOG"],
-        composer: &["COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"],
-        genre: &["GENRE"],
-        conductor: &["CONDUCTOR"],
+        composer: &["TCOM", "IMUS", "COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"],
+        genre: &["TCON", "IGNR", "GENRE"],
+        conductor: &["TPE3", "CONDUCTOR"],
         ensemble: &["BAND", "ORCHESTRA", "ENSEMBLE", "CHOIR", "CHORUS"],
-        soloist: &["SOLOIST", "ARTIST", "PERFORMER", "ALBUMARTIST"],
-        year: &["DATE", "YEAR"],
-        disk_number: &["DISCNUMBER", "DISKNUMBER", "DISC"],
-        track_number: &["TRACKNUMBER", "TRACK"],
+        soloist: &["SOLOIST", "TPE1", "IART", "ARTIST", "PERFORMER", "TPE2", "ALBUMARTIST"],
+        year: &["TDRC", "TYER", "ICRD", "DATE", "YEAR"],
+        disk_number: &["TPOS", "DISCNUMBER", "DISKNUMBER", "DISC"],
+        track_number: &["TRCK", "IPRT", "ITRK", "TRACKNUMBER", "TRACK"],
     }
 }
 
 fn aiff_mapping_profile() -> DefaultMappingProfile<'static> {
     DefaultMappingProfile {
-        album: &["ALBUM"],
-        title: &["TITLE"],
+        album: &["TALB", "ALBUM"],
+        title: &["TIT2", "NAME", "TITLE"],
         catalog: &["CATALOGNUMBER", "CATALOG"],
-        composer: &["COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"],
-        genre: &["GENRE"],
-        conductor: &["CONDUCTOR"],
+        composer: &["TCOM", "COMPOSER", "WORKCOMPOSER", "COMPOSERSORT"],
+        genre: &["TCON", "GENRE"],
+        conductor: &["TPE3", "CONDUCTOR"],
         ensemble: &["BAND", "ORCHESTRA", "ENSEMBLE", "CHOIR", "CHORUS"],
-        soloist: &["SOLOIST", "ARTIST", "PERFORMER", "ALBUMARTIST"],
-        year: &["DATE", "YEAR"],
-        disk_number: &["DISCNUMBER", "DISKNUMBER", "DISC"],
-        track_number: &["TRACKNUMBER", "TRACK"],
+        soloist: &["SOLOIST", "TPE1", "AUTH", "ARTIST", "PERFORMER", "TPE2", "ALBUMARTIST"],
+        year: &["TDRC", "TYER", "DATE", "YEAR"],
+        disk_number: &["TPOS", "DISCNUMBER", "DISKNUMBER", "DISC"],
+        track_number: &["TRCK", "TRACKNUMBER", "TRACK"],
     }
 }
 

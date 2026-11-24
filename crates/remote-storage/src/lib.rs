@@ -1,3 +1,7 @@
+//! Remote storage backends (Google Drive, WebDAV, SMB, local filesystem),
+//! album/playlist upload and delta-sync pipelines, storage quota accounting,
+//! sliding-window audio cache, and playback prefetching.
+
 pub mod backends;
 pub mod cache;
 pub mod error;
